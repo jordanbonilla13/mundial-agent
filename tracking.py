@@ -6,27 +6,134 @@ from datetime import UTC, datetime
 from collections.abc import Iterator
 from typing import Any
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # pragma: no cover
+    psycopg = None
+    dict_row = None
+
 
 DB_PATH = os.getenv("BETTING_DB_PATH", "betting_tracker.sqlite3")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+IDENTITY_TABLES = {
+    "picks",
+    "odds_snapshots",
+    "telegram_publications",
+    "telegram_publication_items",
+}
+
+
+def _is_postgres(db_path: str = DB_PATH) -> bool:
+    if db_path != DB_PATH:
+        return False
+    return bool(DATABASE_URL)
+
+
+def _adapt_sql(query: str) -> str:
+    return query.replace("?", "%s")
+
+
+class CompatCursor:
+    def __init__(self, cursor: Any, backend: str, lastrowid: int | None = None):
+        self._cursor = cursor
+        self._backend = backend
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        return row
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+
+class CompatConnection:
+    def __init__(self, raw: Any, backend: str):
+        self._raw = raw
+        self._backend = backend
+        self.row_factory = getattr(raw, "row_factory", None)
+
+    def execute(self, query: str, params: tuple | list = ()):
+        if self._backend == "sqlite":
+            cursor = self._raw.execute(query, params)
+            return CompatCursor(cursor, self._backend, getattr(cursor, "lastrowid", None))
+
+        if psycopg is None:
+            raise RuntimeError("psycopg no esta instalado")
+
+        q = _adapt_sql(query)
+        lastrowid = None
+        match = None
+        normalized = query.strip().lower()
+        if normalized.startswith("insert into"):
+            parts = normalized.split()
+            if len(parts) >= 3:
+                table_name = parts[2].strip('"')
+                if table_name in IDENTITY_TABLES and "returning" not in normalized:
+                    q = f"{q} RETURNING id"
+                    match = table_name
+
+        cursor = self._raw.cursor(row_factory=dict_row)
+        cursor.execute(q, params)
+        if match:
+            row = cursor.fetchone()
+            if row:
+                lastrowid = int(row["id"])
+        return CompatCursor(cursor, self._backend, lastrowid)
+
+    def commit(self) -> None:
+        self._raw.commit()
+
+    def close(self) -> None:
+        self._raw.close()
 
 
 @contextmanager
-def conectar(db_path: str = DB_PATH) -> Iterator[sqlite3.Connection]:
+def conectar(db_path: str = DB_PATH) -> Iterator[Any]:
+    if _is_postgres(db_path):
+        if psycopg is None:
+            raise RuntimeError("Para usar Postgres instala psycopg[binary]")
+        conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+        compat = CompatConnection(conn, "postgres")
+        try:
+            yield compat
+        finally:
+            compat.close()
+        return
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    compat = CompatConnection(conn, "sqlite")
 
     try:
-        yield conn
+        yield compat
     finally:
-        conn.close()
+        compat.close()
 
 
 def _asegurar_columna(
-    conn: sqlite3.Connection,
+    conn: Any,
     table: str,
     column: str,
     definition: str,
 ) -> None:
+    if isinstance(conn, CompatConnection) and conn._backend == "postgres":
+        columnas = {
+            row["column_name"]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                """,
+                (table,),
+            ).fetchall()
+        }
+        if column not in columnas:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+        return
+
     columnas = {
         row["name"]
         for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -38,102 +145,199 @@ def _asegurar_columna(
 
 def inicializar_db(db_path: str = DB_PATH) -> None:
     with conectar(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS picks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                event_id TEXT,
-                commence_time TEXT,
-                sport_key TEXT,
-                sport_label TEXT,
-                league_key TEXT,
-                league_label TEXT,
-                partido TEXT NOT NULL,
-                equipo TEXT NOT NULL,
-                tipo_resultado TEXT,
-                casa TEXT,
-                mercado TEXT,
-                cuota REAL NOT NULL,
-                cuota_minima REAL,
-                probabilidad_mercado REAL,
-                probabilidad_elo REAL,
-                probabilidad_modelo REAL,
-                valor_esperado REAL,
-                margen_cuota REAL,
-                kelly_fraccional REAL,
-                stake_pct_bankroll REAL,
-                importe_sugerido REAL,
-                stake REAL,
-                recomendacion TEXT,
-                motivo TEXT,
-                quality_score INTEGER,
-                elite_pick INTEGER NOT NULL DEFAULT 0,
-                estado TEXT NOT NULL DEFAULT 'pendiente',
-                resultado TEXT,
-                closing_odds REAL,
-                profit_loss REAL,
-                raw_json TEXT NOT NULL
+        if isinstance(conn, CompatConnection) and conn._backend == "postgres":
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS picks (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    event_id TEXT,
+                    commence_time TEXT,
+                    sport_key TEXT,
+                    sport_label TEXT,
+                    league_key TEXT,
+                    league_label TEXT,
+                    partido TEXT NOT NULL,
+                    equipo TEXT NOT NULL,
+                    tipo_resultado TEXT,
+                    casa TEXT,
+                    mercado TEXT,
+                    cuota DOUBLE PRECISION NOT NULL,
+                    cuota_minima DOUBLE PRECISION,
+                    probabilidad_mercado DOUBLE PRECISION,
+                    probabilidad_elo DOUBLE PRECISION,
+                    probabilidad_modelo DOUBLE PRECISION,
+                    valor_esperado DOUBLE PRECISION,
+                    margen_cuota DOUBLE PRECISION,
+                    kelly_fraccional DOUBLE PRECISION,
+                    stake_pct_bankroll DOUBLE PRECISION,
+                    importe_sugerido DOUBLE PRECISION,
+                    stake DOUBLE PRECISION,
+                    recomendacion TEXT,
+                    motivo TEXT,
+                    quality_score INTEGER,
+                    elite_pick INTEGER NOT NULL DEFAULT 0,
+                    estado TEXT NOT NULL DEFAULT 'pendiente',
+                    resultado TEXT,
+                    closing_odds DOUBLE PRECISION,
+                    profit_loss DOUBLE PRECISION,
+                    raw_json TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS odds_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                event_id TEXT,
-                commence_time TEXT,
-                sport_key TEXT,
-                sport_label TEXT,
-                league_key TEXT,
-                league_label TEXT,
-                partido TEXT,
-                bookmaker TEXT,
-                market_key TEXT,
-                outcome_name TEXT,
-                outcome_point REAL,
-                price REAL,
-                raw_json TEXT NOT NULL
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS odds_snapshots (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    event_id TEXT,
+                    commence_time TEXT,
+                    sport_key TEXT,
+                    sport_label TEXT,
+                    league_key TEXT,
+                    league_label TEXT,
+                    partido TEXT,
+                    bookmaker TEXT,
+                    market_key TEXT,
+                    outcome_name TEXT,
+                    outcome_point DOUBLE PRECISION,
+                    price DOUBLE PRECISION,
+                    raw_json TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS app_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS telegram_publications (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TEXT NOT NULL,
-                publication_type TEXT NOT NULL,
-                sport_label TEXT,
-                league_label TEXT,
-                total_picks INTEGER NOT NULL DEFAULT 0,
-                total_stakazos INTEGER NOT NULL DEFAULT 0,
-                payload_json TEXT NOT NULL
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_publications (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    publication_type TEXT NOT NULL,
+                    sport_label TEXT,
+                    league_label TEXT,
+                    total_picks INTEGER NOT NULL DEFAULT 0,
+                    total_stakazos INTEGER NOT NULL DEFAULT 0,
+                    payload_json TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS telegram_publication_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                publication_id INTEGER NOT NULL,
-                pick_id INTEGER,
-                telegram_message_id INTEGER,
-                message_kind TEXT NOT NULL,
-                text TEXT NOT NULL,
-                FOREIGN KEY(publication_id) REFERENCES telegram_publications(id)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_publication_items (
+                    id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    publication_id INTEGER NOT NULL REFERENCES telegram_publications(id),
+                    pick_id INTEGER,
+                    telegram_message_id INTEGER,
+                    message_kind TEXT NOT NULL,
+                    text TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
+        else:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS picks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    event_id TEXT,
+                    commence_time TEXT,
+                    sport_key TEXT,
+                    sport_label TEXT,
+                    league_key TEXT,
+                    league_label TEXT,
+                    partido TEXT NOT NULL,
+                    equipo TEXT NOT NULL,
+                    tipo_resultado TEXT,
+                    casa TEXT,
+                    mercado TEXT,
+                    cuota REAL NOT NULL,
+                    cuota_minima REAL,
+                    probabilidad_mercado REAL,
+                    probabilidad_elo REAL,
+                    probabilidad_modelo REAL,
+                    valor_esperado REAL,
+                    margen_cuota REAL,
+                    kelly_fraccional REAL,
+                    stake_pct_bankroll REAL,
+                    importe_sugerido REAL,
+                    stake REAL,
+                    recomendacion TEXT,
+                    motivo TEXT,
+                    quality_score INTEGER,
+                    elite_pick INTEGER NOT NULL DEFAULT 0,
+                    estado TEXT NOT NULL DEFAULT 'pendiente',
+                    resultado TEXT,
+                    closing_odds REAL,
+                    profit_loss REAL,
+                    raw_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS odds_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    event_id TEXT,
+                    commence_time TEXT,
+                    sport_key TEXT,
+                    sport_label TEXT,
+                    league_key TEXT,
+                    league_label TEXT,
+                    partido TEXT,
+                    bookmaker TEXT,
+                    market_key TEXT,
+                    outcome_name TEXT,
+                    outcome_point REAL,
+                    price REAL,
+                    raw_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_publications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    publication_type TEXT NOT NULL,
+                    sport_label TEXT,
+                    league_label TEXT,
+                    total_picks INTEGER NOT NULL DEFAULT 0,
+                    total_stakazos INTEGER NOT NULL DEFAULT 0,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS telegram_publication_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    publication_id INTEGER NOT NULL,
+                    pick_id INTEGER,
+                    telegram_message_id INTEGER,
+                    message_kind TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    FOREIGN KEY(publication_id) REFERENCES telegram_publications(id)
+                )
+                """
+            )
         _asegurar_columna(conn, "picks", "sport_key", "TEXT")
         _asegurar_columna(conn, "picks", "sport_label", "TEXT")
         _asegurar_columna(conn, "picks", "league_key", "TEXT")
