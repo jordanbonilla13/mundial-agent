@@ -434,6 +434,29 @@ def telegram_tier_label(tier: str | None) -> str:
     }.get(tier_normalized, tier_normalized.upper() or "ELITE")
 
 
+def resumir_penalizacion_historica(reasons: Any) -> str:
+    if not reasons or not isinstance(reasons, list):
+        return ""
+
+    etiquetas = {
+        "clv muy negativo": "CLV muy negativo",
+        "rate flojo": "hit rate flojo",
+        "hit rate flojo": "hit rate flojo",
+        "muestra corta": "muestra corta",
+        "varianza alta": "varianza alta",
+    }
+    resumen: list[str] = []
+
+    for item in reasons[:3]:
+        parts = [str(part).strip() for part in str(item).split(":") if str(part).strip()]
+        detalle = parts[-1].lower() if parts else ""
+        texto = etiquetas.get(detalle, detalle or str(item).strip())
+        if texto and texto not in resumen:
+            resumen.append(texto)
+
+    return ", ".join(resumen)
+
+
 def formatear_mensaje_telegram_pick(pick: dict) -> str:
     cuota = pick.get("cuota_apuesta") or pick.get("cuota_pinnacle")
     stake = pick.get("stake")
@@ -451,6 +474,9 @@ def formatear_mensaje_telegram_pick(pick: dict) -> str:
     tipo_label, tipo_valor = etiqueta_tipo_apuesta(pick)
     condicion = que_tiene_que_pasar(pick)
     motivo = pick.get("motivo_es") or pick.get("motivo") or "Sin detalle adicional."
+    ajuste_historico = pick.get("historical_penalty_summary_es") or resumir_penalizacion_historica(
+        pick.get("historical_penalty_reasons")
+    )
 
     return (
         f"<b>{telegram_text(tier)} | {telegram_text(liga)}</b>\n"
@@ -466,6 +492,11 @@ def formatear_mensaje_telegram_pick(pick: dict) -> str:
         f"<b>Confianza:</b> {telegram_text(confianza)} | <b>Fiabilidad:</b> {telegram_text(fiabilidad)} ({telegram_text(fiabilidad_score)}/100)\n"
         f"<b>Condicion:</b> {telegram_text(condicion)}\n"
         f"<b>Motivo:</b> {telegram_text(motivo)}"
+        + (
+            f"\n<b>Ajuste historico:</b> {telegram_text(ajuste_historico)}"
+            if ajuste_historico
+            else ""
+        )
     )
 
 
@@ -964,9 +995,7 @@ def aplicar_penalizacion_historica(apuesta: dict, penalizaciones: dict[str, dict
         apuesta["elite_tier"] = "elite"
 
     if reasons:
-        nota = " | Penalizacion historica: " + "; ".join(reasons[:3])
-        apuesta["motivo_es"] = f"{apuesta.get('motivo_es', '')}{nota}".strip()
-        apuesta["motivo"] = apuesta["motivo_es"]
+        apuesta["historical_penalty_summary_es"] = resumir_penalizacion_historica(reasons)
 
     return apuesta
 
