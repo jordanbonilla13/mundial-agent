@@ -457,6 +457,36 @@ def resumir_penalizacion_historica(reasons: Any) -> str:
     return ", ".join(resumen)
 
 
+def fingerprint_pick(pick: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return tuple(
+        str(pick.get(field) or "").strip().lower()
+        for field in ("event_id", "mercado", "tipo_resultado", "equipo", "casa")
+    )
+
+
+def seleccionar_picks_para_telegram(
+    data: dict[str, Any],
+    solo_stakazos: bool = False,
+    max_items: int = 5,
+) -> list[dict[str, Any]]:
+    if solo_stakazos:
+        return list(data.get("picks_elite", []))[:max_items]
+
+    seleccionados: list[dict[str, Any]] = []
+    vistos: set[tuple[str, str, str, str, str]] = set()
+
+    for pick in data.get("mejores_apuestas", []):
+        clave = fingerprint_pick(pick)
+        if clave in vistos:
+            continue
+        seleccionados.append(pick)
+        vistos.add(clave)
+        if len(seleccionados) >= max_items:
+            break
+
+    return seleccionados
+
+
 def formatear_mensaje_telegram_pick(pick: dict) -> str:
     cuota = pick.get("cuota_apuesta") or pick.get("cuota_pinnacle")
     stake = pick.get("stake")
@@ -710,19 +740,13 @@ def publicar_pronosticos_telegram(
     picks_publicables = list(data.get("pronosticos", []))
     picks_guardados = guardar_recomendaciones_unicas(picks_publicables)
     picks_por_fingerprint = {
-        tuple(
-            str(item.get(key) or "").strip().lower()
-            for key in ("event_id", "mercado", "tipo_resultado", "equipo", "casa")
-        ): item
+        fingerprint_pick(item): item
         for item in picks_guardados
     }
 
     picks_publicables = []
     for pick in data.get("pronosticos", []):
-        key = tuple(
-            str(pick.get(field) or "").strip().lower()
-            for field in ("event_id", "mercado", "tipo_resultado", "equipo", "casa")
-        )
+        key = fingerprint_pick(pick)
         pick_guardado = picks_por_fingerprint.get(key)
         if pick_guardado is not None:
             pick_publicable = {**pick, **_raw_pick(pick_guardado), **pick_guardado}
@@ -3464,8 +3488,9 @@ def pronosticos(
         pick for pick in data.get("picks_elite", [])
         if str(pick.get("elite_tier") or "").lower() == "stakazo"
     ]
+    picks_telegram = seleccionar_picks_para_telegram(data, solo_stakazos=solo_stakazos)
 
-    for pick in data.get("picks_elite", []):
+    for pick in picks_telegram:
         mensajes.append(formatear_mensaje_telegram_pick(pick))
 
     resumen = (
@@ -3476,7 +3501,8 @@ def pronosticos(
         f"<b>Modo:</b> {telegram_text(modo_es(modo if modo in MODOS_INFORME else 'comparador'))}\n"
         f"<b>Picks elite:</b> {telegram_text(data.get('total_elite', 0))}\n"
         f"<b>Stakazos:</b> {telegram_text(len(stakazos))}\n"
-        f"<b>Filtro:</b> {'Solo stakazos' if solo_stakazos else 'Elite y stakazos'}"
+        f"<b>Envios:</b> {telegram_text(len(picks_telegram))}\n"
+        f"<b>Filtro:</b> {'Solo stakazos' if solo_stakazos else 'Top 3-5 mejores apuestas'}"
     )
 
     return {
@@ -3488,7 +3514,7 @@ def pronosticos(
         "total_elite": data.get("total_elite", 0),
         "total_stakazos": len(stakazos),
         "solo_stakazos": solo_stakazos,
-        "pronosticos": data.get("picks_elite", []),
+        "pronosticos": picks_telegram,
         "mensajes_telegram": mensajes,
     }
 

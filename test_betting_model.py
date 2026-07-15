@@ -1871,6 +1871,85 @@ class BettingModelTests(unittest.TestCase):
         self.assertFalse(llamadas[1]["solo_stakazos"])
         self.assertEqual(resultado["mensajes_enviados"], 2)
 
+    def test_pronosticos_completa_con_mejores_si_hay_pocas_elite(self):
+        import main
+
+        original = main.apuestas_hoy
+
+        try:
+            main.apuestas_hoy = lambda **kwargs: {
+                "sport_label": "Todo",
+                "league_label": "Todas las ligas base",
+                "criterio": "Test",
+                "total_elite": 1,
+                "picks_elite": [
+                    {
+                        "event_id": "evt_1",
+                        "mercado": "totals",
+                        "tipo_resultado": "over",
+                        "equipo": "Mas de 184.5 goles",
+                        "casa": "Pinnacle",
+                        "partido": "A vs B",
+                        "partido_es": "A vs B",
+                        "equipo_es": "Mas de 184.5 goles",
+                        "stake": 2.5,
+                        "valor_esperado": 0.05,
+                        "quality_score": 60,
+                        "confianza": "Media",
+                        "reliability_tier": "media",
+                        "reliability_score": 55,
+                        "elite_tier": "elite",
+                        "motivo_es": "Value",
+                    }
+                ],
+                "mejores_apuestas": [
+                    {
+                        "event_id": "evt_2",
+                        "mercado": "totals",
+                        "tipo_resultado": "over",
+                        "equipo": "Mas de 181.5 goles",
+                        "casa": "Pinnacle",
+                        "partido": "C vs D",
+                        "partido_es": "C vs D",
+                        "equipo_es": "Mas de 181.5 goles",
+                        "stake": 2.5,
+                        "valor_esperado": 0.051,
+                        "quality_score": 47,
+                        "confianza": "Media",
+                        "reliability_tier": "alta",
+                        "reliability_score": 56,
+                        "elite_tier": "seguimiento",
+                        "motivo_es": "Value 2",
+                    },
+                    {
+                        "event_id": "evt_1",
+                        "mercado": "totals",
+                        "tipo_resultado": "over",
+                        "equipo": "Mas de 184.5 goles",
+                        "casa": "Pinnacle",
+                        "partido": "A vs B",
+                        "partido_es": "A vs B",
+                        "equipo_es": "Mas de 184.5 goles",
+                        "stake": 2.5,
+                        "valor_esperado": 0.05,
+                        "quality_score": 60,
+                        "confianza": "Media",
+                        "reliability_tier": "media",
+                        "reliability_score": 55,
+                        "elite_tier": "elite",
+                        "motivo_es": "Value",
+                    },
+                ],
+            }
+            data = main.pronosticos(perfil="alto_riesgo", modo="pinnacle", deporte="todo")
+        finally:
+            main.apuestas_hoy = original
+
+        self.assertEqual(len(data["pronosticos"]), 2)
+        self.assertIn("Envios:</b> 2", data["resumen_telegram"])
+        self.assertEqual(data["pronosticos"][0]["event_id"], "evt_2")
+        self.assertEqual(data["pronosticos"][1]["event_id"], "evt_1")
+
     def test_auto_publicar_telegram_once_respeta_configuracion(self):
         import main
 
