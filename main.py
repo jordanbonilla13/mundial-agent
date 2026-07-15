@@ -3480,7 +3480,7 @@ def pronosticos(
         mercados=mercados,
         partido=partido,
         deporte=deporte,
-        solo_elite=not solo_stakazos,
+        solo_elite=False,
         solo_stakazos=solo_stakazos,
     )
     mensajes = []
