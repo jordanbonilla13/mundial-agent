@@ -1275,6 +1275,8 @@ def opciones_deporte_disponibles(provider: str | None = None, selected: str | No
         deportes = catalogo_deportes_fallback()
 
     agregar(seleccion_actual)
+    for contexto in catalogo_deportes_fallback():
+        agregar(contexto)
 
     for contexto in deportes[:500]:
         agregar(contexto)

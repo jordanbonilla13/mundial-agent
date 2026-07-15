@@ -1379,6 +1379,38 @@ class BettingModelTests(unittest.TestCase):
         finally:
             main.discover_available_catalog = original
 
+        valores = {item["value"] for item in opciones}
+
+        self.assertEqual(opciones[0]["value"], "todo")
+        self.assertEqual(opciones[1]["value"], "soccer_brazil_serie_a")
+        self.assertIn("futbol", valores)
+        self.assertIn("baloncesto", valores)
+        self.assertIn("tennis_atp_wimbledon", valores)
+
+    def test_opciones_deporte_disponibles_conserva_catalogo_base_con_discovery(self):
+        import main
+
+        original = main.discover_available_catalog
+
+        try:
+            main.discover_available_catalog = lambda provider=None: {
+                "provider": "the_odds_api",
+                "sports": [
+                    build_dynamic_context_from_sport_key("basketball_wnba"),
+                ],
+            }
+            opciones = opciones_deporte_disponibles(selected="basketball_wnba")
+        finally:
+            main.discover_available_catalog = original
+
+        valores = {item["value"] for item in opciones}
+
+        self.assertIn("worldcup", valores)
+        self.assertIn("futbol", valores)
+        self.assertIn("tenis", valores)
+        self.assertIn("baloncesto", valores)
+        self.assertIn("basketball_wnba", valores)
+
     def test_deportes_agregados_para_todo_limita_y_prioriza(self):
         import main
 
@@ -1544,6 +1576,35 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("pick:77:win", callback_values)
         self.assertIn("pick:77:loss", callback_values)
         self.assertIn("pick:77:push", callback_values)
+
+    def test_formatear_mensaje_telegram_pick_separa_ajuste_historico(self):
+        pick = {
+            "id": 31,
+            "elite_tier": "elite",
+            "league_label": "La Liga",
+            "partido": "Real Madrid vs Real Sociedad",
+            "equipo": "Menos de 3 goles",
+            "mercado": "totals",
+            "cuota_apuesta": 1.97,
+            "stake": 2.5,
+            "importe_sugerido": 7.5,
+            "valor_esperado": 0.055,
+            "quality_score": 71,
+            "confianza": "Baja",
+            "reliability_tier": "alta",
+            "reliability_score": 84,
+            "motivo_es": "Valor positivo con exposicion controlada",
+            "historical_penalty_reasons": [
+                "tier:elite:CLV muy negativo",
+                "tier:elite:Hit rate flojo",
+            ],
+        }
+
+        mensaje = formatear_mensaje_telegram_pick(pick)
+
+        self.assertIn("<b>Motivo:</b> Valor positivo con exposicion controlada", mensaje)
+        self.assertIn("<b>Ajuste historico:</b> CLV muy negativo, hit rate flojo", mensaje)
+        self.assertNotIn("tier:elite:CLV muy negativo", mensaje)
 
     def test_guardar_recomendaciones_unicas_evita_duplicados_pendientes(self):
         recomendacion = {
