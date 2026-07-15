@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: mundial-agent
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: ODDS_PROVIDER
+        value: the_odds_api
+      - key: REFERENCE_BOOKMAKER
+        value: Pinnacle
+      - key: TELEGRAM_AUTOPUBLISH_ENABLED
+        value: "true"
+      - key: TELEGRAM_AUTOPUBLISH_INTERVAL_HOURS
+        value: "6"
+      - key: TELEGRAM_AUTOPUBLISH_DEPORTE
+        value: todo
+      - key: TELEGRAM_AUTOPUBLISH_PERFIL
+        value: alto_riesgo
+      - key: TELEGRAM_AUTOPUBLISH_MODO
+        value: pinnacle
+      - key: TELEGRAM_AUTOPUBLISH_MERCADOS
+        value: todo
+      - key: TELEGRAM_AUTOPUBLISH_PARTIDO
+        value: todos
+      - key: TELEGRAM_AUTOPUBLISH_SOLO_STAKAZOS
+        value: "false"

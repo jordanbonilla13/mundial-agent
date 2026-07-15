@@ -1,0 +1,1233 @@
+import json
+import os
+import sqlite3
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from collections.abc import Iterator
+from typing import Any
+
+
+DB_PATH = os.getenv("BETTING_DB_PATH", "betting_tracker.sqlite3")
+
+
+@contextmanager
+def conectar(db_path: str = DB_PATH) -> Iterator[sqlite3.Connection]:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _asegurar_columna(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columnas = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+    if column not in columnas:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def inicializar_db(db_path: str = DB_PATH) -> None:
+    with conectar(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS picks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                event_id TEXT,
+                commence_time TEXT,
+                sport_key TEXT,
+                sport_label TEXT,
+                league_key TEXT,
+                league_label TEXT,
+                partido TEXT NOT NULL,
+                equipo TEXT NOT NULL,
+                tipo_resultado TEXT,
+                casa TEXT,
+                mercado TEXT,
+                cuota REAL NOT NULL,
+                cuota_minima REAL,
+                probabilidad_mercado REAL,
+                probabilidad_elo REAL,
+                probabilidad_modelo REAL,
+                valor_esperado REAL,
+                margen_cuota REAL,
+                kelly_fraccional REAL,
+                stake_pct_bankroll REAL,
+                importe_sugerido REAL,
+                stake REAL,
+                recomendacion TEXT,
+                motivo TEXT,
+                quality_score INTEGER,
+                elite_pick INTEGER NOT NULL DEFAULT 0,
+                estado TEXT NOT NULL DEFAULT 'pendiente',
+                resultado TEXT,
+                closing_odds REAL,
+                profit_loss REAL,
+                raw_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS odds_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                event_id TEXT,
+                commence_time TEXT,
+                sport_key TEXT,
+                sport_label TEXT,
+                league_key TEXT,
+                league_label TEXT,
+                partido TEXT,
+                bookmaker TEXT,
+                market_key TEXT,
+                outcome_name TEXT,
+                outcome_point REAL,
+                price REAL,
+                raw_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_publications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                publication_type TEXT NOT NULL,
+                sport_label TEXT,
+                league_label TEXT,
+                total_picks INTEGER NOT NULL DEFAULT 0,
+                total_stakazos INTEGER NOT NULL DEFAULT 0,
+                payload_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS telegram_publication_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                publication_id INTEGER NOT NULL,
+                pick_id INTEGER,
+                telegram_message_id INTEGER,
+                message_kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                FOREIGN KEY(publication_id) REFERENCES telegram_publications(id)
+            )
+            """
+        )
+        _asegurar_columna(conn, "picks", "sport_key", "TEXT")
+        _asegurar_columna(conn, "picks", "sport_label", "TEXT")
+        _asegurar_columna(conn, "picks", "league_key", "TEXT")
+        _asegurar_columna(conn, "picks", "league_label", "TEXT")
+        _asegurar_columna(conn, "picks", "quality_score", "INTEGER")
+        _asegurar_columna(conn, "picks", "elite_pick", "INTEGER NOT NULL DEFAULT 0")
+        _asegurar_columna(conn, "odds_snapshots", "sport_key", "TEXT")
+        _asegurar_columna(conn, "odds_snapshots", "sport_label", "TEXT")
+        _asegurar_columna(conn, "odds_snapshots", "league_key", "TEXT")
+        _asegurar_columna(conn, "odds_snapshots", "league_label", "TEXT")
+        conn.commit()
+
+
+def obtener_setting(key: str, default: str | None = None, db_path: str = DB_PATH) -> str | None:
+    inicializar_db(db_path)
+
+    with conectar(db_path) as conn:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+
+    return row["value"] if row else default
+
+
+def guardar_setting(key: str, value: str, db_path: str = DB_PATH) -> None:
+    inicializar_db(db_path)
+    ahora = datetime.now(UTC).isoformat()
+
+    with conectar(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, ahora),
+        )
+        conn.commit()
+
+
+def obtener_bankroll(default: float = 25, db_path: str = DB_PATH) -> float:
+    value = obtener_setting("bankroll_actual", str(default), db_path=db_path)
+
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return round(default, 2)
+
+
+def actualizar_bankroll(bankroll: float, db_path: str = DB_PATH) -> float:
+    if bankroll < 0:
+        raise ValueError("bankroll debe ser mayor o igual que 0")
+
+    bankroll = round(float(bankroll), 2)
+    guardar_setting("bankroll_actual", str(bankroll), db_path=db_path)
+    return bankroll
+
+
+def guardar_snapshot_cuotas(
+    partidos: list[dict[str, Any]],
+    db_path: str = DB_PATH,
+) -> int:
+    inicializar_db(db_path)
+    ahora = datetime.now(UTC).isoformat()
+    guardadas = 0
+
+    with conectar(db_path) as conn:
+        for partido in partidos:
+            home = partido.get("home_team")
+            away = partido.get("away_team")
+            partido_nombre = f"{home} vs {away}" if home and away else None
+
+            for bookmaker in partido.get("bookmakers", []):
+                casa = bookmaker.get("title")
+
+                for market in bookmaker.get("markets", []):
+                    market_key = market.get("key")
+
+                    for outcome in market.get("outcomes", []):
+                        price = outcome.get("price")
+
+                        if not price:
+                            continue
+
+                        conn.execute(
+                            """
+                            INSERT INTO odds_snapshots (
+                                created_at, event_id, commence_time, sport_key, sport_label,
+                                league_key, league_label, partido, bookmaker,
+                                market_key, outcome_name, outcome_point, price, raw_json
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                ahora,
+                                partido.get("id"),
+                                partido.get("commence_time"),
+                                partido.get("sport_key"),
+                                partido.get("sport_label"),
+                                partido.get("league_key"),
+                                partido.get("league_label"),
+                                partido_nombre,
+                                casa,
+                                market_key,
+                                outcome.get("name"),
+                                outcome.get("point"),
+                                float(price),
+                                json.dumps({
+                                    "event_id": partido.get("id"),
+                                    "commence_time": partido.get("commence_time"),
+                                    "sport_key": partido.get("sport_key"),
+                                    "sport_label": partido.get("sport_label"),
+                                    "league_key": partido.get("league_key"),
+                                    "league_label": partido.get("league_label"),
+                                    "partido": partido_nombre,
+                                    "bookmaker": casa,
+                                    "market": market_key,
+                                    "outcome": outcome,
+                                }, ensure_ascii=False),
+                            ),
+                        )
+                        guardadas += 1
+
+        conn.commit()
+
+    return guardadas
+
+
+def guardar_recomendaciones(recomendaciones: list[dict[str, Any]], db_path: str = DB_PATH) -> int:
+    return len(guardar_recomendaciones_unicas(recomendaciones, db_path=db_path, solo_nuevas=True))
+
+
+def _valor_equivalente(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, float):
+        return f"{value:.4f}"
+
+    return str(value).strip().lower()
+
+
+def _fingerprint_pick_data(data: dict[str, Any]) -> tuple[str, ...]:
+    return (
+        _valor_equivalente(data.get("event_id")),
+        _valor_equivalente(data.get("sport_key")),
+        _valor_equivalente(data.get("league_key")),
+        _valor_equivalente(data.get("partido")),
+        _valor_equivalente(data.get("equipo_raw") or data.get("equipo")),
+        _valor_equivalente(data.get("mercado")),
+        _valor_equivalente(data.get("tipo_resultado_raw") or data.get("tipo_resultado")),
+        _valor_equivalente(data.get("casa")),
+        _valor_equivalente(data.get("outcome_point")),
+        _valor_equivalente(data.get("outcome_description")),
+    )
+
+
+def _insertar_pick(conn: sqlite3.Connection, rec: dict[str, Any], created_at: str) -> dict[str, Any] | None:
+    if rec.get("importe_sugerido", 0) <= 0:
+        return None
+
+    cursor = conn.execute(
+        """
+        INSERT INTO picks (
+            created_at, event_id, commence_time, sport_key, sport_label,
+            league_key, league_label, partido, equipo, tipo_resultado,
+            casa, mercado, cuota, cuota_minima, probabilidad_mercado, probabilidad_elo,
+            probabilidad_modelo, valor_esperado, margen_cuota, kelly_fraccional,
+            stake_pct_bankroll, importe_sugerido, stake, recomendacion, motivo,
+            quality_score, elite_pick, raw_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            created_at,
+            rec.get("event_id"),
+            rec.get("commence_time"),
+            rec.get("sport_key"),
+            rec.get("sport_label"),
+            rec.get("league_key"),
+            rec.get("league_label"),
+            rec.get("partido"),
+            rec.get("equipo"),
+            rec.get("tipo_resultado"),
+            rec.get("casa"),
+            rec.get("mercado"),
+            rec.get("cuota_apuesta", rec.get("cuota_pinnacle")),
+            rec.get("cuota_minima_aceptable"),
+            rec.get("probabilidad_mercado"),
+            rec.get("probabilidad_elo"),
+            rec.get("probabilidad_modelo"),
+            rec.get("valor_esperado"),
+            rec.get("margen_cuota"),
+            rec.get("kelly_fraccional"),
+            rec.get("stake_pct_bankroll"),
+            rec.get("importe_sugerido"),
+            rec.get("stake"),
+            rec.get("recomendacion"),
+            rec.get("motivo"),
+            rec.get("quality_score"),
+            1 if rec.get("elite_pick") else 0,
+            json.dumps(rec, ensure_ascii=False),
+        ),
+    )
+    row = conn.execute("SELECT * FROM picks WHERE id = ?", (cursor.lastrowid,)).fetchone()
+    return dict(row) if row else None
+
+
+def guardar_recomendaciones_unicas(
+    recomendaciones: list[dict[str, Any]],
+    db_path: str = DB_PATH,
+    solo_nuevas: bool = False,
+) -> list[dict[str, Any]]:
+    inicializar_db(db_path)
+    ahora = datetime.now(UTC).isoformat()
+
+    with conectar(db_path) as conn:
+        pendientes = [dict(row) for row in conn.execute("SELECT * FROM picks WHERE estado = 'pendiente'").fetchall()]
+        fingerprints_pendientes = {
+            _fingerprint_pick_data(_raw_pick(row) | row): row
+            for row in pendientes
+        }
+        salida: list[dict[str, Any]] = []
+
+        for rec in recomendaciones:
+            if rec.get("importe_sugerido", 0) <= 0:
+                continue
+
+            fingerprint = _fingerprint_pick_data(rec)
+            existente = fingerprints_pendientes.get(fingerprint)
+
+            if existente is not None:
+                if not solo_nuevas:
+                    salida.append(existente)
+                continue
+
+            creado = _insertar_pick(conn, rec, created_at=ahora)
+            if creado is None:
+                continue
+
+            fingerprints_pendientes[fingerprint] = creado
+            salida.append(creado)
+
+        conn.commit()
+
+    return salida
+
+
+def guardar_apuesta_real(
+    recomendacion: dict[str, Any],
+    importe_real: float,
+    db_path: str = DB_PATH,
+) -> dict[str, Any] | None:
+    if importe_real <= 0:
+        raise ValueError("importe_real debe ser mayor que 0")
+
+    rec = recomendacion.copy()
+    rec["importe_modelo_sugerido"] = rec.get("importe_sugerido")
+    rec["importe_sugerido"] = round(float(importe_real), 2)
+    rec["apuesta_real"] = True
+
+    inicializar_db(db_path)
+    guardar_recomendaciones([rec], db_path=db_path)
+
+    with conectar(db_path) as conn:
+        row = conn.execute("SELECT * FROM picks ORDER BY id DESC LIMIT 1").fetchone()
+
+    return dict(row) if row else None
+
+
+def marcar_apuesta_real_pick(
+    pick_id: int,
+    importe_real: float | None = None,
+    db_path: str = DB_PATH,
+) -> dict[str, Any] | None:
+    inicializar_db(db_path)
+
+    with conectar(db_path) as conn:
+        row = conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
+
+        if row is None:
+            return None
+
+        pick = dict(row)
+        raw = _raw_pick(pick)
+        importe = round(float(importe_real), 2) if importe_real is not None else round(float(pick.get("importe_sugerido") or 0), 2)
+
+        if importe <= 0:
+            raise ValueError("importe_real debe ser mayor que 0")
+
+        raw["importe_modelo_sugerido"] = raw.get("importe_modelo_sugerido") or pick.get("importe_sugerido")
+        raw["importe_sugerido"] = importe
+        raw["apuesta_real"] = True
+
+        conn.execute(
+            """
+            UPDATE picks
+            SET importe_sugerido = ?,
+                raw_json = ?
+            WHERE id = ?
+            """,
+            (importe, json.dumps(raw, ensure_ascii=False), pick_id),
+        )
+        conn.commit()
+
+        updated = conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
+
+    return dict(updated) if updated else None
+
+
+def actualizar_importe_pick(
+    pick_id: int,
+    importe_real: float,
+    db_path: str = DB_PATH,
+) -> dict[str, Any] | None:
+    if importe_real <= 0:
+        raise ValueError("importe_real debe ser mayor que 0")
+
+    inicializar_db(db_path)
+
+    with conectar(db_path) as conn:
+        row = conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
+
+        if row is None:
+            return None
+
+        raw = _raw_pick(dict(row))
+        raw["importe_modelo_sugerido"] = raw.get("importe_modelo_sugerido") or row["importe_sugerido"]
+        raw["importe_sugerido"] = round(float(importe_real), 2)
+        raw["apuesta_real"] = True
+
+        conn.execute(
+            """
+            UPDATE picks
+            SET importe_sugerido = ?,
+                raw_json = ?
+            WHERE id = ?
+            """,
+            (round(float(importe_real), 2), json.dumps(raw, ensure_ascii=False), pick_id),
+        )
+        conn.commit()
+
+        updated = conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
+
+    return dict(updated)
+
+
+def actualizar_cuota_pick(
+    pick_id: int,
+    cuota_real: float,
+    db_path: str = DB_PATH,
+) -> dict[str, Any] | None:
+    if cuota_real <= 1:
+        raise ValueError("cuota_real debe ser mayor que 1")
+
+    inicializar_db(db_path)
+
+    with conectar(db_path) as conn:
+        row = conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
+
+        if row is None:
+            return None
+
+        pick = dict(row)
+        raw = _raw_pick(pick)
+        raw["cuota_modelo_original"] = raw.get("cuota_modelo_original") or pick.get("cuota")
+        raw["cuota_apuesta"] = round(float(cuota_real), 3)
+        raw["apuesta_real"] = True
+
+        profit_loss = pick.get("profit_loss")
+
+        if pick.get("estado") == "cerrada" and pick.get("resultado"):
+            importe = float(pick["importe_sugerido"] or 0)
+            resultado = pick["resultado"]
+
+            if resultado == "win":
+                profit_loss = round(importe * (float(cuota_real) - 1), 2)
+            elif resultado == "loss":
+                profit_loss = round(-importe, 2)
+            else:
+                profit_loss = 0
+
+        conn.execute(
+            """
+            UPDATE picks
+            SET cuota = ?,
+                profit_loss = ?,
+                raw_json = ?
+            WHERE id = ?
+            """,
+            (
+                round(float(cuota_real), 3),
+                profit_loss,
+                json.dumps(raw, ensure_ascii=False),
+                pick_id,
+            ),
+        )
+        conn.commit()
+
+        updated = conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
+
+    return dict(updated)
+
+
+def _pick_field(pick: dict[str, Any], field: str, default: Any = None) -> Any:
+    raw = _raw_pick(pick)
+    return raw.get(field, pick.get(field, default))
+
+
+def _tier_priority(tier: str | None) -> int:
+    return {
+        "stakazo": 3,
+        "elite": 2,
+        "premium": 1,
+        "seguimiento": 0,
+        "descartable": 0,
+    }.get(str(tier or "").lower(), 0)
+
+
+def _prioridad_pick_tracking(pick: dict[str, Any]) -> tuple:
+    return (
+        _tier_priority(_pick_field(pick, "elite_tier", "")),
+        float(_pick_field(pick, "quality_score", 0) or 0),
+        float(_pick_field(pick, "reliability_score", 0) or 0),
+        float(_pick_field(pick, "puntuacion_confianza", 0) or 0),
+        float(_pick_field(pick, "valor_esperado", 0) or 0),
+        int(pick.get("id") or 0),
+    )
+
+
+def listar_picks(
+    limit: int = 100,
+    estado: str | None = None,
+    elite_tier: str | None = None,
+    solo_elite: bool = False,
+    solo_stakazos: bool = False,
+    sport_label: str | None = None,
+    league_label: str | None = None,
+    min_quality_score: int | None = None,
+    min_reliability_score: int | None = None,
+    apuesta_real: bool | None = None,
+    publicada_telegram: bool | None = None,
+    order_by: str = "recientes",
+    db_path: str = DB_PATH,
+) -> list[dict[str, Any]]:
+    inicializar_db(db_path)
+    limit = max(1, min(limit, 500))
+
+    with conectar(db_path) as conn:
+        if estado:
+            rows = conn.execute(
+                "SELECT * FROM picks WHERE estado = ? ORDER BY id DESC LIMIT ?",
+                (estado, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM picks ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+    picks = [dict(row) for row in rows]
+
+    if solo_stakazos:
+        picks = [p for p in picks if str(_pick_field(p, "elite_tier", "")).lower() == "stakazo"]
+    elif solo_elite:
+        picks = [p for p in picks if bool(_pick_field(p, "elite_pick", False))]
+
+    if elite_tier:
+        picks = [p for p in picks if str(_pick_field(p, "elite_tier", "")).lower() == elite_tier.lower()]
+
+    if sport_label:
+        picks = [p for p in picks if str(_pick_field(p, "sport_label", "")).lower() == sport_label.lower()]
+
+    if league_label:
+        picks = [p for p in picks if str(_pick_field(p, "league_label", "")).lower() == league_label.lower()]
+
+    if min_quality_score is not None:
+        picks = [p for p in picks if float(_pick_field(p, "quality_score", 0) or 0) >= min_quality_score]
+
+    if min_reliability_score is not None:
+        picks = [p for p in picks if float(_pick_field(p, "reliability_score", 0) or 0) >= min_reliability_score]
+
+    if apuesta_real is not None:
+        picks = [p for p in picks if bool(_pick_field(p, "apuesta_real", False)) is apuesta_real]
+
+    if publicada_telegram is not None:
+        picks = [p for p in picks if bool(_pick_field(p, "telegram_publicada", False)) is publicada_telegram]
+
+    if order_by == "premium":
+        picks = sorted(picks, key=_prioridad_pick_tracking, reverse=True)
+    else:
+        picks = sorted(picks, key=lambda p: int(p.get("id") or 0), reverse=True)
+
+    return picks[:limit]
+
+
+def actualizar_resultado(
+    pick_id: int,
+    resultado: str,
+    closing_odds: float | None = None,
+    db_path: str = DB_PATH,
+) -> dict[str, Any] | None:
+    inicializar_db(db_path)
+    resultado = resultado.lower().strip()
+
+    if resultado not in {"win", "loss", "push"}:
+        raise ValueError("resultado debe ser win, loss o push")
+
+    with conectar(db_path) as conn:
+        row = conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
+
+        if row is None:
+            return None
+
+        pick = dict(row)
+        importe = float(pick["importe_sugerido"] or 0)
+        cuota = float(pick["cuota"] or 0)
+
+        if resultado == "win":
+            profit_loss = round(importe * (cuota - 1), 2)
+        elif resultado == "loss":
+            profit_loss = round(-importe, 2)
+        else:
+            profit_loss = 0
+
+        conn.execute(
+            """
+            UPDATE picks
+            SET estado = 'cerrada',
+                resultado = ?,
+                closing_odds = ?,
+                profit_loss = ?
+            WHERE id = ?
+            """,
+            (resultado, closing_odds, profit_loss, pick_id),
+        )
+        conn.commit()
+
+        updated = conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
+
+    return dict(updated)
+
+
+def registrar_publicacion_telegram(
+    publication_type: str,
+    payload: dict[str, Any],
+    items: list[dict[str, Any]],
+    db_path: str = DB_PATH,
+) -> dict[str, Any]:
+    inicializar_db(db_path)
+    ahora = datetime.now(UTC).isoformat()
+
+    with conectar(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO telegram_publications (
+                created_at, publication_type, sport_label, league_label,
+                total_picks, total_stakazos, payload_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ahora,
+                publication_type,
+                payload.get("deporte"),
+                payload.get("liga"),
+                int(payload.get("total_elite") or 0),
+                int(payload.get("total_stakazos") or 0),
+                json.dumps(payload, ensure_ascii=False),
+            ),
+        )
+        publication_id = int(cursor.lastrowid)
+
+        for item in items:
+            conn.execute(
+                """
+                INSERT INTO telegram_publication_items (
+                    publication_id, pick_id, telegram_message_id, message_kind, text
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    publication_id,
+                    item.get("pick_id"),
+                    item.get("telegram_message_id"),
+                    item.get("message_kind") or "pick",
+                    item.get("text") or "",
+                ),
+            )
+
+            pick_id = item.get("pick_id")
+            if pick_id:
+                row = conn.execute("SELECT * FROM picks WHERE id = ?", (pick_id,)).fetchone()
+                if row is not None:
+                    pick = dict(row)
+                    raw = _raw_pick(pick)
+                    raw["telegram_publicada"] = True
+                    raw["telegram_publication_id"] = publication_id
+                    raw["telegram_message_id"] = item.get("telegram_message_id")
+                    conn.execute(
+                        "UPDATE picks SET raw_json = ? WHERE id = ?",
+                        (json.dumps(raw, ensure_ascii=False), pick_id),
+                    )
+
+        conn.commit()
+
+        row = conn.execute(
+            "SELECT * FROM telegram_publications WHERE id = ?",
+            (publication_id,),
+        ).fetchone()
+
+    return dict(row) if row else {
+        "id": publication_id,
+        "created_at": ahora,
+        "publication_type": publication_type,
+    }
+
+
+def listar_publicaciones_telegram(limit: int = 20, db_path: str = DB_PATH) -> list[dict[str, Any]]:
+    inicializar_db(db_path)
+    limit = max(1, min(limit, 100))
+
+    with conectar(db_path) as conn:
+        publicaciones = conn.execute(
+            "SELECT * FROM telegram_publications ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+        salida = []
+        for row in publicaciones:
+            publicacion = dict(row)
+            payload = json.loads(publicacion.get("payload_json") or "{}")
+            items = [
+                dict(item)
+                for item in conn.execute(
+                    """
+                    SELECT i.*, p.estado, p.resultado, p.partido, p.equipo
+                    FROM telegram_publication_items i
+                    LEFT JOIN picks p ON p.id = i.pick_id
+                    WHERE i.publication_id = ?
+                    ORDER BY i.id ASC
+                    """,
+                    (publicacion["id"],),
+                ).fetchall()
+            ]
+            pick_items = [item for item in items if item.get("message_kind") == "pick"]
+            ganadas = sum(1 for item in pick_items if item.get("resultado") == "win")
+            perdidas = sum(1 for item in pick_items if item.get("resultado") == "loss")
+            nulas = sum(1 for item in pick_items if item.get("resultado") == "push")
+            pendientes = sum(1 for item in pick_items if item.get("estado") != "cerrada")
+
+            salida.append(
+                {
+                    "id": publicacion["id"],
+                    "created_at": publicacion["created_at"],
+                    "publication_type": publicacion["publication_type"],
+                    "sport_label": publicacion.get("sport_label"),
+                    "league_label": publicacion.get("league_label"),
+                    "total_picks": publicacion.get("total_picks"),
+                    "total_stakazos": publicacion.get("total_stakazos"),
+                    "payload": payload,
+                    "items": items,
+                    "resultado_resumen": {
+                        "pendientes": pendientes,
+                        "ganadas": ganadas,
+                        "perdidas": perdidas,
+                        "nulas": nulas,
+                    },
+                }
+            )
+
+    return salida
+
+
+def _raw_pick(pick: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(pick.get("raw_json") or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def _score_map(evento: dict[str, Any]) -> dict[str, int]:
+    scores = {}
+
+    for score in evento.get("scores") or []:
+        name = score.get("name")
+        value = score.get("score")
+
+        if name is None or value is None:
+            continue
+
+        try:
+            scores[name] = int(value)
+        except (TypeError, ValueError):
+            continue
+
+    return scores
+
+
+def _resultado_partido(home_score: int, away_score: int) -> str:
+    if home_score > away_score:
+        return "home"
+    if away_score > home_score:
+        return "away"
+    return "draw"
+
+
+def _resultado_pick_con_score(pick: dict[str, Any], evento: dict[str, Any]) -> str | None:
+    raw = _raw_pick(pick)
+    scores = _score_map(evento)
+    home = evento.get("home_team")
+    away = evento.get("away_team")
+
+    if not home or not away or home not in scores or away not in scores:
+        return None
+
+    home_score = scores[home]
+    away_score = scores[away]
+    mercado = raw.get("mercado") or pick.get("mercado")
+    nombre = raw.get("equipo_raw") or raw.get("equipo") or pick.get("equipo")
+    tipo = raw.get("tipo_resultado_raw") or pick.get("tipo_resultado")
+    point = raw.get("outcome_point")
+    description = raw.get("outcome_description")
+
+    try:
+        point = float(point) if point is not None else None
+    except (TypeError, ValueError):
+        point = None
+
+    if mercado == "h2h":
+        return "win" if tipo == _resultado_partido(home_score, away_score) else "loss"
+
+    if mercado in {"totals", "alternate_totals"}:
+        if point is None:
+            return None
+
+        total = home_score + away_score
+
+        if total == point:
+            return "push"
+        if nombre == "Over":
+            return "win" if total > point else "loss"
+        if nombre == "Under":
+            return "win" if total < point else "loss"
+
+    if mercado == "team_totals":
+        if point is None or not description:
+            return None
+
+        team_score = scores.get(description)
+
+        if team_score is None:
+            return None
+        if team_score == point:
+            return "push"
+        if nombre == "Over":
+            return "win" if team_score > point else "loss"
+        if nombre == "Under":
+            return "win" if team_score < point else "loss"
+
+    if mercado == "btts":
+        ambos_marcan = home_score > 0 and away_score > 0
+
+        if nombre == "Yes":
+            return "win" if ambos_marcan else "loss"
+        if nombre == "No":
+            return "win" if not ambos_marcan else "loss"
+
+    if mercado == "double_chance":
+        resultado = _resultado_partido(home_score, away_score)
+        nombre_resultado = {
+            "home": home,
+            "away": away,
+            "draw": "Draw",
+        }[resultado]
+        opciones = [op.strip().lower() for op in str(nombre).split(" or ")]
+
+        return "win" if nombre_resultado.lower() in opciones else "loss"
+
+    return None
+
+
+def liquidar_picks_con_scores(
+    scores: list[dict[str, Any]],
+    db_path: str = DB_PATH,
+) -> dict[str, Any]:
+    inicializar_db(db_path)
+    eventos = {
+        evento.get("id"): evento
+        for evento in scores
+        if evento.get("id") and evento.get("completed") is True
+    }
+    liquidados = []
+    omitidos = []
+
+    with conectar(db_path) as conn:
+        picks = conn.execute("SELECT * FROM picks WHERE estado = 'pendiente'").fetchall()
+
+    for row in picks:
+        pick = dict(row)
+        event_id = pick.get("event_id")
+        evento = eventos.get(event_id)
+
+        if not evento:
+            omitidos.append({"pick_id": pick["id"], "motivo": "sin marcador final"})
+            continue
+
+        resultado = _resultado_pick_con_score(pick, evento)
+
+        if resultado is None:
+            omitidos.append({"pick_id": pick["id"], "motivo": "mercado no liquidable con marcador"})
+            continue
+
+        actualizado = actualizar_resultado(pick["id"], resultado, db_path=db_path)
+
+        if actualizado:
+            liquidados.append({
+                "pick_id": pick["id"],
+                "resultado": resultado,
+                "partido": pick.get("partido"),
+                "mercado": pick.get("mercado"),
+            })
+
+    return {
+        "liquidados": len(liquidados),
+        "omitidos": len(omitidos),
+        "detalle": liquidados,
+        "omitidos_detalle": omitidos[:20],
+    }
+
+
+def _metricas_grupo(picks: list[dict[str, Any]]) -> dict[str, Any]:
+    cerrados = [p for p in picks if p["estado"] == "cerrada"]
+    apostado = round(sum(float(p["importe_sugerido"] or 0) for p in cerrados), 2)
+    beneficio = round(sum(float(p["profit_loss"] or 0) for p in cerrados), 2)
+    ganadas = sum(1 for p in cerrados if p["resultado"] == "win")
+    perdidas = sum(1 for p in cerrados if p["resultado"] == "loss")
+    nulas = sum(1 for p in cerrados if p["resultado"] == "push")
+    quality_values = []
+    reliability_values = []
+    clv_values = []
+
+    for pick in picks:
+        raw = _raw_pick(pick)
+        quality = raw.get("quality_score", pick.get("quality_score"))
+        reliability = raw.get("reliability_score", pick.get("reliability_score"))
+
+        if quality is not None:
+            quality_values.append(float(quality))
+        if reliability is not None:
+            reliability_values.append(float(reliability))
+
+    for pick in cerrados:
+        cuota = pick.get("cuota")
+        closing_odds = pick.get("closing_odds")
+
+        if cuota and closing_odds:
+            clv_values.append((float(cuota) / float(closing_odds)) - 1)
+
+    return {
+        "picks": len(picks),
+        "cerradas": len(cerrados),
+        "pendientes": len(picks) - len(cerrados),
+        "ganadas": ganadas,
+        "perdidas": perdidas,
+        "nulas": nulas,
+        "apostado": apostado,
+        "beneficio": beneficio,
+        "roi": round((beneficio / apostado) * 100, 2) if apostado else 0,
+        "hit_rate": round((ganadas / len(cerrados)) * 100, 2) if cerrados else 0,
+        "quality_media": round(sum(quality_values) / len(quality_values), 2) if quality_values else None,
+        "reliability_media": round(sum(reliability_values) / len(reliability_values), 2) if reliability_values else None,
+        "clv_medio": round((sum(clv_values) / len(clv_values)) * 100, 2) if clv_values else None,
+        "clv_muestras": len(clv_values),
+        "clv_positivo_pct": round((sum(1 for x in clv_values if x > 0) / len(clv_values)) * 100, 2) if clv_values else None,
+    }
+
+
+def dashboard_data(db_path: str = DB_PATH) -> dict[str, Any]:
+    inicializar_db(db_path)
+
+    with conectar(db_path) as conn:
+        rows = conn.execute("SELECT * FROM picks ORDER BY id DESC").fetchall()
+
+    picks = [dict(row) for row in rows]
+    stakazos = [
+        pick for pick in picks
+        if str((_raw_pick(pick).get("elite_tier") or pick.get("elite_tier") or "")).lower() == "stakazo"
+    ]
+    elite = [
+        pick for pick in picks
+        if str((_raw_pick(pick).get("elite_tier") or pick.get("elite_tier") or "")).lower() == "elite"
+    ]
+    premium = [
+        pick for pick in picks
+        if str((_raw_pick(pick).get("elite_tier") or pick.get("elite_tier") or "")).lower() == "premium"
+    ]
+    seguimiento = [
+        pick for pick in picks
+        if str((_raw_pick(pick).get("elite_tier") or pick.get("elite_tier") or "seguimiento")).lower() == "seguimiento"
+    ]
+
+    def agrupar(campo: str) -> list[dict[str, Any]]:
+        grupos: dict[str, list[dict[str, Any]]] = {}
+
+        for pick in picks:
+            raw = _raw_pick(pick)
+            valor = raw.get(campo) or pick.get(campo) or "sin_dato"
+            grupos.setdefault(str(valor), []).append(pick)
+
+        salida = []
+        for nombre, grupo in grupos.items():
+            metricas = _metricas_grupo(grupo)
+            metricas["nombre"] = nombre
+            salida.append(metricas)
+
+        return sorted(salida, key=lambda x: (x["cerradas"], x["beneficio"]), reverse=True)
+
+    return {
+        "resumen": estadisticas(db_path=db_path),
+        "aprendizaje": aprendizaje(db_path=db_path),
+        "por_deporte": agrupar("sport_label"),
+        "por_liga": agrupar("league_label"),
+        "por_mercado": agrupar("mercado"),
+        "por_casa": agrupar("casa"),
+        "por_perfil": agrupar("perfil"),
+        "por_modelo": agrupar("modelo_mercado"),
+        "por_elite": agrupar("elite_tier"),
+        "solo_stakazos": _metricas_grupo(stakazos),
+        "solo_elite": _metricas_grupo(elite),
+        "solo_premium": _metricas_grupo(premium),
+        "solo_seguimiento": _metricas_grupo(seguimiento),
+        "pendientes": [p for p in picks if p["estado"] == "pendiente"][:20],
+    }
+
+
+def _evaluar_penalizacion_historica(metricas: dict[str, Any]) -> dict[str, Any] | None:
+    cerradas = int(metricas.get("cerradas") or 0)
+
+    if cerradas < 5:
+        return None
+
+    score = 0
+    razones = []
+    roi = float(metricas.get("roi") or 0)
+    hit_rate = float(metricas.get("hit_rate") or 0)
+    clv_medio = metricas.get("clv_medio")
+    clv_positivo_pct = metricas.get("clv_positivo_pct")
+    clv_muestras = int(metricas.get("clv_muestras") or 0)
+
+    if roi <= -8:
+        score += 12
+        razones.append("ROI muy negativo")
+    elif roi < 0:
+        score += 6
+        razones.append("ROI negativo")
+
+    if clv_medio is not None:
+        clv_medio = float(clv_medio)
+        if clv_medio <= -3:
+            score += 10
+            razones.append("CLV muy negativo")
+        elif clv_medio < 0:
+            score += 5
+            razones.append("CLV negativo")
+
+    if cerradas >= 8 and hit_rate < 45:
+        score += 4
+        razones.append("Hit rate flojo")
+
+    if clv_muestras >= 4 and clv_positivo_pct is not None and float(clv_positivo_pct) < 45:
+        score += 4
+        razones.append("Poco CLV positivo")
+
+    if score < 8:
+        return None
+
+    if score >= 18:
+        level = "alta"
+    elif score >= 12:
+        level = "media"
+    else:
+        level = "moderada"
+
+    return {
+        "penalty_score": score,
+        "level": level,
+        "reasons": razones,
+        "sample_closed": cerradas,
+    }
+
+
+def penalizaciones_historicas(db_path: str = DB_PATH) -> dict[str, dict[str, Any]]:
+    data = dashboard_data(db_path=db_path)
+    ligas: dict[str, Any] = {}
+    tiers: dict[str, Any] = {}
+
+    for fila in data["por_liga"]:
+        evaluacion = _evaluar_penalizacion_historica(fila)
+        if evaluacion:
+            ligas[str(fila["nombre"])] = evaluacion
+
+    for fila in data["por_elite"]:
+        evaluacion = _evaluar_penalizacion_historica(fila)
+        if evaluacion:
+            tiers[str(fila["nombre"])] = evaluacion
+
+    return {
+        "ligas": ligas,
+        "tiers": tiers,
+    }
+
+
+def estadisticas(db_path: str = DB_PATH) -> dict[str, Any]:
+    inicializar_db(db_path)
+
+    with conectar(db_path) as conn:
+        rows = conn.execute("SELECT * FROM picks WHERE estado = 'cerrada'").fetchall()
+        pendientes = conn.execute("SELECT COUNT(*) AS total FROM picks WHERE estado = 'pendiente'").fetchone()["total"]
+        snapshots = conn.execute("SELECT COUNT(*) AS total FROM odds_snapshots").fetchone()["total"]
+
+    cerradas = [dict(row) for row in rows]
+    total_cerradas = len(cerradas)
+    total_apostado = round(sum(float(x["importe_sugerido"] or 0) for x in cerradas), 2)
+    beneficio = round(sum(float(x["profit_loss"] or 0) for x in cerradas), 2)
+    ganadas = sum(1 for x in cerradas if x["resultado"] == "win")
+    perdidas = sum(1 for x in cerradas if x["resultado"] == "loss")
+    nulas = sum(1 for x in cerradas if x["resultado"] == "push")
+    roi = round((beneficio / total_apostado) * 100, 2) if total_apostado else 0
+
+    clv_values = []
+    for pick in cerradas:
+        cuota = pick.get("cuota")
+        closing_odds = pick.get("closing_odds")
+
+        if cuota and closing_odds:
+            clv_values.append((float(cuota) / float(closing_odds)) - 1)
+
+    clv_medio = round((sum(clv_values) / len(clv_values)) * 100, 2) if clv_values else None
+
+    return {
+        "picks_cerrados": total_cerradas,
+        "picks_pendientes": pendientes,
+        "snapshots_cuotas": snapshots,
+        "ganadas": ganadas,
+        "perdidas": perdidas,
+        "nulas": nulas,
+        "hit_rate": round((ganadas / total_cerradas) * 100, 2) if total_cerradas else 0,
+        "total_apostado": total_apostado,
+        "beneficio": beneficio,
+        "roi": roi,
+        "clv_medio": clv_medio,
+        "aviso": "No subas stake hasta tener una muestra amplia y CLV positivo.",
+    }
+
+
+def aprendizaje(db_path: str = DB_PATH) -> dict[str, Any]:
+    inicializar_db(db_path)
+
+    with conectar(db_path) as conn:
+        picks = conn.execute("SELECT * FROM picks").fetchall()
+        snapshots_total = conn.execute("SELECT COUNT(*) AS total FROM odds_snapshots").fetchone()["total"]
+        eventos = conn.execute(
+            "SELECT COUNT(DISTINCT event_id) AS total FROM odds_snapshots WHERE event_id IS NOT NULL"
+        ).fetchone()["total"]
+        casas = conn.execute(
+            "SELECT COUNT(DISTINCT bookmaker) AS total FROM odds_snapshots WHERE bookmaker IS NOT NULL"
+        ).fetchone()["total"]
+
+    picks = [dict(row) for row in picks]
+    cerrados = [p for p in picks if p["estado"] == "cerrada"]
+    pendientes = [p for p in picks if p["estado"] == "pendiente"]
+    con_clv = [p for p in cerrados if p.get("closing_odds")]
+    clv_positivo = 0
+
+    for pick in con_clv:
+        cuota = pick.get("cuota")
+        cierre = pick.get("closing_odds")
+
+        if cuota and cierre and float(cuota) > float(cierre):
+            clv_positivo += 1
+
+    return {
+        "snapshots_guardados": snapshots_total,
+        "eventos_observados": eventos,
+        "casas_observadas": casas,
+        "picks_totales": len(picks),
+        "picks_pendientes": len(pendientes),
+        "picks_cerrados": len(cerrados),
+        "picks_con_clv": len(con_clv),
+        "porcentaje_clv_positivo": round((clv_positivo / len(con_clv)) * 100, 2) if con_clv else 0,
+        "lectura": (
+            "Todavía falta muestra para aprender con fiabilidad."
+            if len(cerrados) < 30
+            else "Ya hay una muestra inicial; revisa ROI y CLV antes de subir riesgo."
+        ),
+    }
