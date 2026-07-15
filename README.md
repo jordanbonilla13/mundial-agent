@@ -1,0 +1,2 @@
+# mundial-agent
+Pronosticador IA
