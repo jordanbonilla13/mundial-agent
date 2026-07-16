@@ -745,7 +745,8 @@ def send_audit_report_telegram() -> dict[str, Any]:
         report_text = format_audit_report_telegram(report)
         
         # Enviar por Telegram
-        client = TelegramClient(token, chat_id)
+        config = TelegramBotConfig(token=token, chat_id=chat_id)
+        client = TelegramClient(config)
         result = client.send_message(report_text)
         
         return {
