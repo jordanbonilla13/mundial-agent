@@ -166,6 +166,12 @@ class BetRecommendation:
     elite_pick: bool = False
     elite_tier: str = "descartable"
     source_strength: str = "market+model"
+    market_support_count: int = 0
+    market_consensus_odds: float | None = None
+    market_best_odds: float | None = None
+    market_worst_odds: float | None = None
+    market_width_pct: float | None = None
+    market_edge_vs_consensus: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -278,6 +284,18 @@ def probabilidad_binaria_elo(elo_equipo: int, elo_rival: int) -> float:
 
 def clamp(valor: float, minimo: float, maximo: float) -> float:
     return max(minimo, min(valor, maximo))
+
+
+def median(values: list[float]) -> float | None:
+    cleaned = sorted(float(value) for value in values if value is not None)
+
+    if not cleaned:
+        return None
+
+    half = len(cleaned) // 2
+    if len(cleaned) % 2:
+        return cleaned[half]
+    return (cleaned[half - 1] + cleaned[half]) / 2
 
 
 def poisson_cdf(k: int, media: float) -> float:
@@ -524,6 +542,55 @@ def stake_en_unidades(stake_pct_bankroll: float) -> float:
     return 5
 
 
+def market_consensus_snapshot(
+    partido: dict[str, Any],
+    market_key: str,
+    outcome_key: tuple,
+    selected_odds: float | None = None,
+) -> dict[str, Any]:
+    prices: list[float] = []
+
+    for bookmaker in partido.get("bookmakers", []):
+        market = obtener_mercado(bookmaker, market_key)
+        if not market:
+            continue
+
+        for outcome in market.get("outcomes", []):
+            price = outcome.get("price")
+            if not price:
+                continue
+
+            key = clave_outcome(
+                market_key,
+                outcome,
+                str(partido.get("home_team") or ""),
+                str(partido.get("away_team") or ""),
+            )
+            if key == outcome_key:
+                prices.append(float(price))
+                break
+
+    support_count = len(prices)
+    consensus_odds = median(prices)
+    best_odds = max(prices) if prices else None
+    worst_odds = min(prices) if prices else None
+    width_pct = ((best_odds / worst_odds) - 1) if best_odds and worst_odds and worst_odds > 0 else None
+    edge_vs_consensus = (
+        ((float(selected_odds) / consensus_odds) - 1)
+        if selected_odds and consensus_odds and consensus_odds > 0
+        else None
+    )
+
+    return {
+        "support_count": support_count,
+        "consensus_odds": round(consensus_odds, 3) if consensus_odds is not None else None,
+        "best_odds": round(best_odds, 3) if best_odds is not None else None,
+        "worst_odds": round(worst_odds, 3) if worst_odds is not None else None,
+        "width_pct": round(width_pct, 4) if width_pct is not None else None,
+        "edge_vs_consensus": round(edge_vs_consensus, 4) if edge_vs_consensus is not None else None,
+    }
+
+
 def clasificar_fiabilidad_liga(sport_key: str | None, league_key: str | None) -> tuple[str, int]:
     sport_key_norm = str(sport_key or "").lower()
     league_key_norm = str(league_key or "").lower()
@@ -575,6 +642,8 @@ def calcular_fiabilidad_pick(
     market_key: str,
     casa: str | None,
     source_strength: str,
+    market_support_count: int | None = None,
+    market_width_pct: float | None = None,
 ) -> tuple[int, str]:
     score = 50
     league_tier, league_adj = clasificar_fiabilidad_liga(sport_key, league_key)
@@ -588,6 +657,28 @@ def calcular_fiabilidad_pick(
         score += 6
     else:
         score -= 6
+
+    if market_support_count is not None:
+        if market_support_count >= 6:
+            score += 10
+        elif market_support_count >= 4:
+            score += 6
+        elif market_support_count >= 2:
+            score += 2
+        elif market_support_count == 1:
+            score -= 6
+
+    if market_width_pct is not None:
+        if market_width_pct <= 0.02:
+            score += 4
+        elif market_width_pct <= 0.04:
+            score += 2
+        elif market_width_pct >= 0.12:
+            score -= 8
+        elif market_width_pct >= 0.08:
+            score -= 5
+        elif market_width_pct >= 0.05:
+            score -= 2
 
     score = max(0, min(score, 100))
 
@@ -605,6 +696,9 @@ def calcular_confianza(
     probabilidad_elo: float | None,
     probabilidad_mercado: float,
     source_strength: str = "market+model",
+    market_support_count: int | None = None,
+    market_width_pct: float | None = None,
+    edge_vs_consensus: float | None = None,
 ) -> tuple[str, int]:
     score = 0
 
@@ -634,6 +728,14 @@ def calcular_confianza(
         elif ventaja_sobre_pinnacle >= 0.02:
             score += 10
 
+    if edge_vs_consensus is not None:
+        if edge_vs_consensus >= 0.05:
+            score += 10
+        elif edge_vs_consensus >= 0.025:
+            score += 6
+        elif edge_vs_consensus >= 0.01:
+            score += 3
+
     if probabilidad_elo is not None:
         edge_elo = probabilidad_elo - probabilidad_mercado
 
@@ -650,6 +752,28 @@ def calcular_confianza(
             score += 4
     elif source_strength in {"tennis_model", "basketball_model"}:
         score = min(score + 2, 84)
+
+    if market_support_count is not None:
+        if market_support_count >= 6:
+            score += 8
+        elif market_support_count >= 4:
+            score += 5
+        elif market_support_count >= 2:
+            score += 2
+        elif market_support_count == 1:
+            score -= 4
+
+    if market_width_pct is not None:
+        if market_width_pct <= 0.02:
+            score += 4
+        elif market_width_pct <= 0.04:
+            score += 2
+        elif market_width_pct >= 0.12:
+            score -= 8
+        elif market_width_pct >= 0.08:
+            score -= 5
+        elif market_width_pct >= 0.05:
+            score -= 2
 
     score = max(0, min(score, 100))
 
@@ -821,6 +945,9 @@ def clasificar_pick_elite(
     league_key: str | None = None,
     market_key: str = "h2h",
     casa: str | None = None,
+    market_support_count: int | None = None,
+    market_width_pct: float | None = None,
+    edge_vs_consensus: float | None = None,
 ) -> tuple[bool, str, int]:
     if stake <= 0:
         return False, "descartable", 0
@@ -832,6 +959,8 @@ def clasificar_pick_elite(
         market_key=market_key,
         casa=casa,
         source_strength=source_strength,
+        market_support_count=market_support_count,
+        market_width_pct=market_width_pct,
     )
     score += round((reliability_score - 50) * 0.55)
 
@@ -857,9 +986,33 @@ def clasificar_pick_elite(
     if source_strength == "market_only":
         score -= 8
 
+    if market_support_count is not None:
+        if market_support_count >= 5:
+            score += 6
+        elif market_support_count >= 3:
+            score += 3
+        elif market_support_count == 1:
+            score -= 5
+
+    if edge_vs_consensus is not None:
+        if edge_vs_consensus >= 0.05:
+            score += 8
+        elif edge_vs_consensus >= 0.03:
+            score += 5
+        elif edge_vs_consensus >= 0.015:
+            score += 2
+
+    if market_width_pct is not None:
+        if market_width_pct <= 0.025:
+            score += 4
+        elif market_width_pct >= 0.12:
+            score -= 7
+        elif market_width_pct >= 0.08:
+            score -= 4
+
     score = max(0, min(score, 100))
 
-    if reliability_tier == "alta" and confianza == "Alta" and score >= 82:
+    if reliability_tier == "alta" and confianza == "Alta" and score >= 82 and (market_support_count is None or market_support_count >= 3):
         return True, "stakazo", score
     if reliability_tier != "baja" and score >= 68:
         return True, "elite", score
@@ -1270,6 +1423,12 @@ def analizar_comparador_casas(
                     point = outcome.get("point")
                     description = outcome.get("description")
                     cuota = float(cuota)
+                    consensus = market_consensus_snapshot(
+                        partido,
+                        market_key,
+                        key,
+                        selected_odds=cuota,
+                    )
                     prob_modelo = info_modelo["probabilidad_modelo"]
                     prob_mercado = info_modelo["probabilidad_mercado"]
                     prob_elo = info_modelo["probabilidad_elo"]
@@ -1300,6 +1459,9 @@ def analizar_comparador_casas(
                         prob_elo,
                         prob_mercado,
                         source_strength=source_strength,
+                        market_support_count=consensus["support_count"],
+                        market_width_pct=consensus["width_pct"],
+                        edge_vs_consensus=consensus["edge_vs_consensus"],
                     )
                     reliability_score, reliability_tier = calcular_fiabilidad_pick(
                         sport_key=partido.get("sport_key"),
@@ -1307,6 +1469,8 @@ def analizar_comparador_casas(
                         market_key=market_key,
                         casa=casa,
                         source_strength=source_strength,
+                        market_support_count=consensus["support_count"],
+                        market_width_pct=consensus["width_pct"],
                     )
                     if stake == 0:
                         rescue_stake_pct, rescue_importe, rescue_stake, rescue_recomendacion, rescue_motivo = rescatar_casi_value(
@@ -1341,6 +1505,9 @@ def analizar_comparador_casas(
                         league_key=partido.get("league_key"),
                         market_key=market_key,
                         casa=casa,
+                        market_support_count=consensus["support_count"],
+                        market_width_pct=consensus["width_pct"],
+                        edge_vs_consensus=consensus["edge_vs_consensus"],
                     )
 
                     if ventaja_sobre_pinnacle is not None and ventaja_sobre_pinnacle > 0.02 and stake == 0:
@@ -1388,6 +1555,12 @@ def analizar_comparador_casas(
                         elite_pick=elite_pick,
                         elite_tier=elite_tier,
                         source_strength=source_strength,
+                        market_support_count=consensus["support_count"],
+                        market_consensus_odds=consensus["consensus_odds"],
+                        market_best_odds=consensus["best_odds"],
+                        market_worst_odds=consensus["worst_odds"],
+                        market_width_pct=consensus["width_pct"],
+                        market_edge_vs_consensus=consensus["edge_vs_consensus"],
                     ).to_dict())
 
     return sorted(recomendaciones, key=lambda x: x["valor_esperado"], reverse=True)
@@ -1445,6 +1618,13 @@ def analizar_partidos(
                     equipo = cuota_info["equipo"]
                     cuota = cuota_info["cuota"]
                     tipo_resultado = clasificar_resultado(equipo, home, away)
+                    key = ("h2h", tipo_resultado, None)
+                    consensus = market_consensus_snapshot(
+                        partido,
+                        "h2h",
+                        key,
+                        selected_odds=cuota,
+                    )
                     prob_mercado = cuota_info["probabilidad_mercado"]
                     prob_elo = None
                     elo_equipo = None
@@ -1488,6 +1668,9 @@ def analizar_partidos(
                         prob_elo,
                         prob_mercado,
                         source_strength=source_strength,
+                        market_support_count=consensus["support_count"],
+                        market_width_pct=consensus["width_pct"],
+                        edge_vs_consensus=consensus["edge_vs_consensus"],
                     )
                     reliability_score, reliability_tier = calcular_fiabilidad_pick(
                         sport_key=partido.get("sport_key"),
@@ -1495,6 +1678,8 @@ def analizar_partidos(
                         market_key="h2h",
                         casa=casa,
                         source_strength=source_strength,
+                        market_support_count=consensus["support_count"],
+                        market_width_pct=consensus["width_pct"],
                     )
                     elite_pick, elite_tier, quality_score = clasificar_pick_elite(
                         stake=stake,
@@ -1508,6 +1693,9 @@ def analizar_partidos(
                         league_key=partido.get("league_key"),
                         market_key="h2h",
                         casa=casa,
+                        market_support_count=consensus["support_count"],
+                        market_width_pct=consensus["width_pct"],
+                        edge_vs_consensus=consensus["edge_vs_consensus"],
                     )
 
                     recomendaciones.append(BetRecommendation(
@@ -1548,6 +1736,12 @@ def analizar_partidos(
                         elite_pick=elite_pick,
                         elite_tier=elite_tier,
                         source_strength=source_strength,
+                        market_support_count=consensus["support_count"],
+                        market_consensus_odds=consensus["consensus_odds"],
+                        market_best_odds=consensus["best_odds"],
+                        market_worst_odds=consensus["worst_odds"],
+                        market_width_pct=consensus["width_pct"],
+                        market_edge_vs_consensus=consensus["edge_vs_consensus"],
                     ).to_dict())
 
     return sorted(recomendaciones, key=lambda x: x["valor_esperado"], reverse=True)

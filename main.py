@@ -14,6 +14,49 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
 
+from app import providers as provider_layer
+from app import sports as sports_layer
+from app.audit import (
+    generate_daily_audit_report,
+    format_audit_report_telegram,
+    format_audit_report_html,
+)
+from app.calibration import (
+    generate_calibration_snapshot,
+    format_calibration_report,
+    get_penalty_factor_for_league,
+    get_market_threshold_adjustment,
+    get_tier_boost,
+    get_model_confidence_multiplier,
+)
+from app.engine import ForecastEngine, ForecastRequest
+from app.forecasting import (
+    attach_context_to_pick,
+    enrich_pick_ranking,
+    execution_score_for_pick,
+    ranking_score_for_pick,
+    source_strength_for_context,
+    stake_limit_text,
+    standard_risk_disclaimer,
+)
+from app.operating_mode import (
+    diversify_limits_for_todo,
+    multi_sport_pick_limit,
+    single_sport_pick_limit,
+    telegram_pick_limit,
+)
+from app.exposure import apply_exposure_limits
+from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
+from app.telegram_service import (
+    TelegramBotConfig,
+    TelegramClient,
+    format_pick_message,
+    format_summary_message,
+    telegram_keyboard_for_pick as telegram_keyboard_for_pick_service,
+    telegram_text as telegram_text_service,
+    telegram_tier_label as telegram_tier_label_service,
+)
+from app.ui import premium_ui_css
 from betting_model import (
     analizar_comparador_casas,
     analizar_partidos,
@@ -23,7 +66,7 @@ from betting_model import (
 from elo import obtener_elos
 from tracking import _raw_pick, actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, actualizar_resultado, estadisticas, guardar_recomendaciones, listar_picks
 from tracking import guardar_apuesta_real, marcar_apuesta_real_pick, obtener_setting
-from tracking import dashboard_data, guardar_snapshot_cuotas, aprendizaje, liquidar_picks_con_scores, obtener_bankroll, penalizaciones_historicas
+from tracking import dashboard_data, guardar_snapshot_cuotas, aprendizaje, liquidar_picks_con_scores, listar_evaluaciones_picks, obtener_bankroll, penalizaciones_historicas
 from tracking import guardar_recomendaciones_unicas, inicializar_db, listar_publicaciones_telegram, registrar_publicacion_telegram
 from translations import (
     apuesta_es,
@@ -43,11 +86,13 @@ app = FastAPI()
 telegram_scheduler_stop = threading.Event()
 telegram_scheduler_thread: threading.Thread | None = None
 telegram_updates_thread: threading.Thread | None = None
+audit_scheduler_stop = threading.Event()
+audit_scheduler_thread: threading.Thread | None = None
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
 SPORTSGAMEODDS_API_KEY = os.getenv("SPORTSGAMEODDS_API_KEY")
-ODDS_PROVIDER = os.getenv("ODDS_PROVIDER", "the_odds_api").strip().lower()
+ODDS_PROVIDER = provider_layer.ODDS_PROVIDER
 REFERENCE_BOOKMAKER = os.getenv("REFERENCE_BOOKMAKER", "Pinnacle")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -59,16 +104,19 @@ TELEGRAM_AUTOPUBLISH_MERCADOS = os.getenv("TELEGRAM_AUTOPUBLISH_MERCADOS", "todo
 TELEGRAM_AUTOPUBLISH_PARTIDO = os.getenv("TELEGRAM_AUTOPUBLISH_PARTIDO", "todos").strip() or "todos"
 TELEGRAM_AUTOPUBLISH_DEPORTE = os.getenv("TELEGRAM_AUTOPUBLISH_DEPORTE", "todo").strip() or "todo"
 TELEGRAM_AUTOPUBLISH_SOLO_STAKAZOS = os.getenv("TELEGRAM_AUTOPUBLISH_SOLO_STAKAZOS", "true").strip().lower() in {"1", "true", "yes", "si", "on"}
+TELEGRAM_AUDIT_ENABLED = os.getenv("TELEGRAM_AUDIT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "si", "on"}
+TELEGRAM_AUDIT_HOUR = int(os.getenv("TELEGRAM_AUDIT_HOUR", "21"))  # 21:00 por defecto
+RISK_OPERATING_MODE = os.getenv("RISK_OPERATING_MODE", "agresivo").strip().lower() or "agresivo"
 SPORTSGAMEODDS_HOST = "https://api.sportsgameodds.com/v2"
-SPORTSGAMEODDS_SPORT_ID = os.getenv("SPORTSGAMEODDS_SPORT_ID", "SOCCER")
-SPORTSGAMEODDS_LEAGUE_ID = os.getenv("SPORTSGAMEODDS_LEAGUE_ID", "")
+SPORTSGAMEODDS_SPORT_ID = provider_layer.SPORTSGAMEODDS_SPORT_ID
+SPORTSGAMEODDS_LEAGUE_ID = provider_layer.SPORTSGAMEODDS_LEAGUE_ID
 SPORTSGAMEODDS_BOOKMAKERS = os.getenv("SPORTSGAMEODDS_BOOKMAKERS", "")
 SPORTSGAMEODDS_MAX_EVENTS = int(os.getenv("SPORTSGAMEODDS_MAX_EVENTS", "25"))
 API_FOOTBALL_HOST = "https://v3.football.api-sports.io"
 API_FOOTBALL_LEAGUE = os.getenv("API_FOOTBALL_LEAGUE", "1")
 API_FOOTBALL_SEASON = os.getenv("API_FOOTBALL_SEASON", "2026")
 API_FOOTBALL_MAX_PAGES = int(os.getenv("API_FOOTBALL_MAX_PAGES", "1"))
-DEFAULT_SPORT = os.getenv("DEFAULT_SPORT", "worldcup").strip().lower()
+DEFAULT_SPORT = sports_layer.DEFAULT_SPORT
 PERFILES_STAKE = {"conservador", "moderado", "agresivo", "alto_riesgo"}
 MODOS_INFORME = {"comparador", "pinnacle"}
 FEATURED_MARKETS = {"h2h", "totals"}
@@ -291,63 +339,19 @@ TODO_PRIORITY_KEYWORDS = {
 
 
 def family_from_sport_key(sport_key: str) -> str:
-    return (sport_key or "").split("_", 1)[0].lower()
+    return sports_layer.family_from_sport_key(sport_key)
 
 
 def build_dynamic_context_from_sport_key(sport_key: str) -> dict:
-    family = family_from_sport_key(sport_key)
-    league_key = sport_key.split("_", 1)[1] if "_" in sport_key else sport_key
-    sport_label = SPORT_PREFIX_LABELS.get(family, family.replace("_", " ").title() or "General")
-    league_label = league_key.replace("_", " ").title()
-
-    return {
-        "catalog_key": sport_key,
-        "sport_key": sport_key,
-        "sport_label": sport_label,
-        "league_key": league_key,
-        "league_label": league_label,
-        "supports_elo": family == "soccer",
-        "default_markets": "todo" if family == "soccer" else "h2h,totals" if family == "basketball" else "h2h",
-    }
+    return sports_layer.build_dynamic_context_from_sport_key(sport_key)
 
 
 def resolver_contexto_deporte(deporte: str | None) -> dict:
-    valor = (deporte or DEFAULT_SPORT).strip().lower()
-    clave = SPORT_ALIASES.get(valor, valor)
-
-    if clave in SPORT_CATALOG:
-        contexto = SPORT_CATALOG[clave].copy()
-        contexto["catalog_key"] = clave
-        return contexto
-
-    if "_" in clave:
-        return build_dynamic_context_from_sport_key(clave)
-
-    contexto = SPORT_CATALOG["worldcup"].copy()
-    contexto["catalog_key"] = "worldcup"
-    return contexto
+    return sports_layer.resolver_contexto_deporte(deporte)
 
 
 def prioridad_contexto_todo(contexto: dict) -> tuple:
-    catalog_key = str(contexto.get("catalog_key") or "").strip().lower()
-    sport_key = str(contexto.get("sport_key") or "").strip().lower()
-    family = family_from_sport_key(sport_key)
-    league_label = str(contexto.get("league_label") or contexto.get("title") or catalog_key).strip()
-    league_text = league_label.lower()
-    score = 0
-
-    if catalog_key in SPORT_CATALOG:
-        score += 60
-    if catalog_key == "worldcup":
-        score += 30
-    if family == "soccer" and contexto.get("supports_elo"):
-        score += 8
-
-    for keyword, bonus in TODO_PRIORITY_KEYWORDS.get(family, {}).items():
-        if keyword in league_text:
-            score += bonus
-
-    return (-score, contexto.get("sport_label") or "", league_label, catalog_key)
+    return sports_layer.prioridad_contexto_todo(contexto)
 
 
 def deportes_agregados_para_todo(provider: str | None = None) -> list[str]:
@@ -381,57 +385,23 @@ def deportes_agregados_para_todo(provider: str | None = None) -> list[str]:
 
 
 def enriquecer_eventos_contexto(eventos: list[dict], contexto: dict) -> list[dict]:
-    enriched = []
-
-    for evento in eventos:
-        copia = evento.copy()
-        copia["sport_key"] = contexto["sport_key"]
-        copia["sport_label"] = contexto["sport_label"]
-        copia["league_key"] = contexto["league_key"]
-        copia["league_label"] = contexto["league_label"]
-        enriched.append(copia)
-
-    return enriched
+    return sports_layer.enriquecer_eventos_contexto(eventos, contexto)
 
 
 def config_mercados_deporte(deporte: str | None) -> dict:
-    contexto = resolver_contexto_deporte(deporte)
-    clave = contexto["catalog_key"]
-
-    if clave in SPORT_MARKET_CONFIG:
-        return SPORT_MARKET_CONFIG[clave]
-
-    family = family_from_sport_key(contexto["sport_key"])
-
-    if family == "soccer":
-        return SPORT_MARKET_CONFIG["futbol"]
-    if family == "tennis":
-        return SPORT_MARKET_CONFIG["tenis"]
-    if family == "basketball":
-        return SPORT_MARKET_CONFIG["baloncesto"]
-
-    return {
-        "default_filter": "h2h",
-        "allowed_filters": ["resultado", "h2h"],
-    }
+    return sports_layer.config_mercados_deporte(deporte)
 
 
 def etiqueta_filtro_mercado(filtro: str) -> str:
-    return SPORT_FILTER_LABELS.get(filtro, filtro)
+    return sports_layer.etiqueta_filtro_mercado(filtro)
 
 
 def telegram_text(value: Any) -> str:
-    return escape(str(value if value is not None else ""))
+    return telegram_text_service(value)
 
 
 def telegram_tier_label(tier: str | None) -> str:
-    tier_normalized = str(tier or "elite").strip().lower()
-    return {
-        "stakazo": "STAKAZO",
-        "elite": "ELITE",
-        "premium": "PREMIUM",
-        "seguimiento": "SEGUIMIENTO",
-    }.get(tier_normalized, tier_normalized.upper() or "ELITE")
+    return telegram_tier_label_service(tier)
 
 
 def resumir_penalizacion_historica(reasons: Any) -> str:
@@ -467,8 +437,11 @@ def fingerprint_pick(pick: dict[str, Any]) -> tuple[str, str, str, str, str]:
 def seleccionar_picks_para_telegram(
     data: dict[str, Any],
     solo_stakazos: bool = False,
-    max_items: int = 5,
+    max_items: int | None = None,
 ) -> list[dict[str, Any]]:
+    if max_items is None:
+        max_items = telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos)
+
     if solo_stakazos:
         return list(data.get("picks_elite", []))[:max_items]
 
@@ -488,45 +461,12 @@ def seleccionar_picks_para_telegram(
 
 
 def formatear_mensaje_telegram_pick(pick: dict) -> str:
-    cuota = pick.get("cuota_apuesta") or pick.get("cuota_pinnacle")
-    stake = pick.get("stake")
-    importe = pick.get("importe_sugerido")
-    valor = float(pick.get("valor_esperado") or 0) * 100
-    partido = pick.get("partido_es") or pick.get("partido")
-    titulo = titulo_card_apuesta(pick)
-    seleccion = pick.get("equipo_es") or pick.get("equipo")
-    liga = pick.get("league_label") or pick.get("sport_label") or "General"
-    tier = telegram_tier_label(pick.get("elite_tier"))
-    confianza = pick.get("confianza") or "Media"
-    fiabilidad = pick.get("reliability_tier") or "media"
-    fiabilidad_score = pick.get("reliability_score") or 0
-    quality_score = pick.get("quality_score") or 0
-    tipo_label, tipo_valor = etiqueta_tipo_apuesta(pick)
-    condicion = que_tiene_que_pasar(pick)
-    motivo = pick.get("motivo_es") or pick.get("motivo") or "Sin detalle adicional."
-    ajuste_historico = pick.get("historical_penalty_summary_es") or resumir_penalizacion_historica(
-        pick.get("historical_penalty_reasons")
-    )
-
-    return (
-        f"<b>{telegram_text(tier)} | {telegram_text(liga)}</b>\n"
-        f"<b>{telegram_text(titulo)}</b>\n"
-        f"<b>Pick ID:</b> {telegram_text(pick.get('id') or '-')}\n"
-        f"<b>Partido:</b> {telegram_text(partido)}\n"
-        f"<b>Seleccion:</b> {telegram_text(seleccion)}\n"
-        f"<b>{telegram_text(tipo_label)}:</b> {telegram_text(tipo_valor)}\n"
-        f"<b>Cuota:</b> {telegram_text(cuota)}\n"
-        f"<b>Stake:</b> {telegram_text(stake)}/5"
-        + (f" | <b>Importe:</b> {telegram_text(importe)} EUR\n" if importe is not None else "\n")
-        + f"<b>Value:</b> {valor:.1f}% | <b>Calidad:</b> {telegram_text(quality_score)}/100\n"
-        f"<b>Confianza:</b> {telegram_text(confianza)} | <b>Fiabilidad:</b> {telegram_text(fiabilidad)} ({telegram_text(fiabilidad_score)}/100)\n"
-        f"<b>Condicion:</b> {telegram_text(condicion)}\n"
-        f"<b>Motivo:</b> {telegram_text(motivo)}"
-        + (
-            f"\n<b>Ajuste historico:</b> {telegram_text(ajuste_historico)}"
-            if ajuste_historico
-            else ""
-        )
+    return format_pick_message(
+        pick,
+        title_builder=titulo_card_apuesta,
+        type_label_builder=etiqueta_tipo_apuesta,
+        condition_builder=que_tiene_que_pasar,
+        penalty_summary_builder=resumir_penalizacion_historica,
     )
 
 
@@ -542,6 +482,14 @@ def telegram_config() -> tuple[str, str]:
     return token, chat_id
 
 
+def telegram_client(token: str | None = None, chat_id: str | None = None) -> TelegramClient:
+    if token and chat_id:
+        return TelegramClient(TelegramBotConfig(token=token.strip(), chat_id=chat_id.strip()))
+
+    resolved_token, resolved_chat_id = telegram_config()
+    return TelegramClient(TelegramBotConfig(token=resolved_token, chat_id=resolved_chat_id))
+
+
 def telegram_api_request(
     method: str,
     payload: dict[str, Any] | None = None,
@@ -549,27 +497,8 @@ def telegram_api_request(
     timeout: int = 15,
     http_method: str = "post",
 ) -> dict:
-    bot_token = (token or os.getenv("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)).strip()
-
-    if not bot_token:
-        telegram_config()
-
-    url = f"https://api.telegram.org/bot{bot_token}/{method}"
-
-    try:
-        if http_method.lower() == "get":
-            response = requests.get(url, params=payload or {}, timeout=timeout)
-        else:
-            response = requests.post(url, json=payload or {}, timeout=timeout)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise HTTPException(status_code=502, detail=f"No se pudo completar la llamada a Telegram ({method}): {exc}") from exc
-
-    data = response.json()
-    if not isinstance(data, dict) or not data.get("ok"):
-        raise HTTPException(status_code=502, detail=f"Telegram devolvio una respuesta inesperada en {method}")
-
-    return data
+    client = telegram_client(token=token, chat_id=os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID))
+    return client.api_request(method=method, payload=payload, timeout=timeout, http_method=http_method)
 
 
 def enviar_mensaje_telegram(
@@ -578,49 +507,17 @@ def enviar_mensaje_telegram(
     chat_id: str | None = None,
     reply_markup: dict[str, Any] | None = None,
 ) -> dict:
-    bot_token = (token or os.getenv("TELEGRAM_BOT_TOKEN", TELEGRAM_BOT_TOKEN)).strip()
-    target_chat_id = (chat_id or os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID)).strip()
-
-    if not bot_token or not target_chat_id:
-        telegram_config()
-
-    payload = {
-        "chat_id": target_chat_id,
-        "text": texto,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-
-    return telegram_api_request("sendMessage", payload=payload, token=bot_token)
+    client = telegram_client(token=token, chat_id=chat_id)
+    return client.send_message(texto, reply_markup=reply_markup)
 
 
 def answer_callback_query_telegram(callback_query_id: str, text: str, token: str | None = None) -> dict:
-    return telegram_api_request(
-        "answerCallbackQuery",
-        payload={
-            "callback_query_id": callback_query_id,
-            "text": text[:180],
-            "show_alert": False,
-        },
-        token=token,
-    )
+    client = telegram_client(token=token, chat_id=os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID))
+    return client.answer_callback_query(callback_query_id, text)
 
 
 def telegram_keyboard_for_pick(pick_id: int) -> dict[str, Any]:
-    return {
-        "inline_keyboard": [
-            [
-                {"text": "Apostada", "callback_data": f"pick:{pick_id}:bet"},
-                {"text": "Ganada", "callback_data": f"pick:{pick_id}:win"},
-            ],
-            [
-                {"text": "Perdida", "callback_data": f"pick:{pick_id}:loss"},
-                {"text": "Nula", "callback_data": f"pick:{pick_id}:push"},
-            ],
-        ]
-    }
+    return telegram_keyboard_for_pick_service(pick_id)
 
 
 def procesar_callback_pick(pick_id: int, action: str) -> str:
@@ -641,33 +538,8 @@ def procesar_callback_pick(pick_id: int, action: str) -> str:
 
 
 def procesar_update_telegram(update: dict[str, Any], token: str) -> None:
-    callback = update.get("callback_query") or {}
-    callback_id = callback.get("id")
-    data = str(callback.get("data") or "").strip()
-
-    if not callback_id or not data.startswith("pick:"):
-        return
-
-    parts = data.split(":")
-    if len(parts) != 3:
-        answer_callback_query_telegram(callback_id, "Accion no valida.", token=token)
-        return
-
-    try:
-        pick_id = int(parts[1])
-    except ValueError:
-        answer_callback_query_telegram(callback_id, "Pick no valida.", token=token)
-        return
-
-    action = parts[2].strip().lower()
-    try:
-        mensaje = procesar_callback_pick(pick_id, action)
-    except ValueError as exc:
-        mensaje = str(exc)
-    except HTTPException as exc:
-        mensaje = str(exc.detail)
-
-    answer_callback_query_telegram(callback_id, mensaje, token=token)
+    client = telegram_client(token=token, chat_id=os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID))
+    client.process_update(update, procesar_callback_pick)
 
 
 def telegram_updates_loop() -> None:
@@ -754,9 +626,17 @@ def publicar_pronosticos_telegram(
             pick_publicable = pick
         picks_publicables.append(pick_publicable)
 
-    resumen = data.get("resumen_telegram", "Pronosticos")
-    if fallback_a_elite:
-        resumen += " | Sin stakazos ahora: se publican picks elite."
+    resumen = format_summary_message(
+        sport_label=data.get("deporte"),
+        league_label=data.get("liga"),
+        perfil_label=perfil_es(perfil if perfil in PERFILES_STAKE else "moderado"),
+        modo_label=modo_es(modo if modo in MODOS_INFORME else "comparador"),
+        total_elite=int(data.get("total_elite", 0) or 0),
+        total_stakazos=int(data.get("total_stakazos", 0) or 0),
+        total_messages=len(data.get("pronosticos", [])),
+        solo_stakazos=solo_stakazos,
+        fallback_a_elite=fallback_a_elite,
+    )
 
     mensajes = [resumen] + [formatear_mensaje_telegram_pick(pick) for pick in picks_publicables]
     enviados = []
@@ -845,9 +725,80 @@ def telegram_scheduler_loop() -> None:
             break
 
 
+def send_audit_report_telegram() -> dict[str, Any]:
+    """
+    Genera y envía el reporte de auditoría diaria por Telegram.
+    
+    Se ejecuta una vez al día a la hora configurada (TELEGRAM_AUDIT_HOUR).
+    """
+    
+    token, chat_id = telegram_config()
+    
+    if not token or not chat_id:
+        return {"error": "Telegram no configurado"}
+    
+    try:
+        # Generar reporte
+        report = generate_daily_audit_report()
+        
+        # Formatear para Telegram
+        report_text = format_audit_report_telegram(report)
+        
+        # Enviar por Telegram
+        client = TelegramClient(token, chat_id)
+        result = client.send_message(report_text)
+        
+        return {
+            "status": "success",
+            "telegram_result": result,
+            "date": report["date"],
+            "picks_closed": report["picks"]["closed"],
+            "roi": report["metrics"]["roi"],
+        }
+    
+    except Exception as e:
+        return {
+            "status": "error",
+            "error": str(e),
+        }
+
+
+def audit_scheduler_loop() -> None:
+    """
+    Loop que envía el reporte de auditoría una vez al día a la hora configurada.
+    """
+    from datetime import time
+    
+    while not audit_scheduler_stop.is_set():
+        try:
+            now = datetime.now()
+            target_hour = TELEGRAM_AUDIT_HOUR
+            
+            # Si la hora actual es igual a la target, enviar reporte
+            if now.hour == target_hour:
+                send_audit_report_telegram()
+                
+                # Esperar hasta que pase esta hora para no duplicar
+                wait_seconds = 3600
+            else:
+                # Calcular tiempo hasta la próxima ejecución
+                if now.hour < target_hour:
+                    seconds_until = (target_hour - now.hour) * 3600 - now.minute * 60 - now.second
+                else:
+                    seconds_until = (24 - now.hour + target_hour) * 3600 - now.minute * 60 - now.second
+                
+                wait_seconds = min(seconds_until, 3600)  # Máximo 1 hora de espera
+        
+        except Exception:
+            wait_seconds = 3600
+        
+        if audit_scheduler_stop.wait(wait_seconds):
+            break
+
+
 @app.on_event("startup")
 def startup_event() -> None:
-    global telegram_scheduler_thread, telegram_updates_thread
+    global telegram_scheduler_thread, telegram_updates_thread, audit_scheduler_thread
 
     inicializar_db()
 
@@ -862,24 +813,32 @@ def startup_event() -> None:
         )
         telegram_updates_thread.start()
 
-    if not TELEGRAM_AUTOPUBLISH_ENABLED:
-        return
-
-    if telegram_scheduler_thread and telegram_scheduler_thread.is_alive():
-        return
-
-    telegram_scheduler_stop.clear()
-    telegram_scheduler_thread = threading.Thread(
-        target=telegram_scheduler_loop,
-        name="telegram-autopublish",
-        daemon=True,
-    )
-    telegram_scheduler_thread.start()
+    if TELEGRAM_AUTOPUBLISH_ENABLED:
+        if not (telegram_scheduler_thread and telegram_scheduler_thread.is_alive()):
+            telegram_scheduler_stop.clear()
+            telegram_scheduler_thread = threading.Thread(
+                target=telegram_scheduler_loop,
+                name="telegram-autopublish",
+                daemon=True,
+            )
+            telegram_scheduler_thread.start()
+    
+    # Iniciar scheduler de auditoría diaria
+    if TELEGRAM_AUDIT_ENABLED and token and chat_id:
+        if not (audit_scheduler_thread and audit_scheduler_thread.is_alive()):
+            audit_scheduler_stop.clear()
+            audit_scheduler_thread = threading.Thread(
+                target=audit_scheduler_loop,
+                name="audit-daily",
+                daemon=True,
+            )
+            audit_scheduler_thread.start()
 
 
 @app.on_event("shutdown")
 def shutdown_event() -> None:
     telegram_scheduler_stop.set()
+    audit_scheduler_stop.set()
 
 
 def prioridad_tier_elite(tier: str | None) -> int:
@@ -895,6 +854,7 @@ def prioridad_tier_elite(tier: str | None) -> int:
 def prioridad_pick(apuesta: dict) -> tuple:
     return (
         prioridad_tier_elite(apuesta.get("elite_tier")),
+        int(apuesta.get("ranking_score") or ranking_score_for_pick(apuesta)),
         int(apuesta.get("quality_score") or 0),
         int(apuesta.get("reliability_score") or 0),
         int(apuesta.get("puntuacion_confianza") or 0),
@@ -946,6 +906,7 @@ def proximity_score_for_pick(apuesta: dict) -> int:
 def prioridad_pick_todo(apuesta: dict) -> tuple:
     return (
         prioridad_tier_elite(apuesta.get("elite_tier")),
+        int(apuesta.get("ranking_score") or ranking_score_for_pick(apuesta)),
         int(apuesta.get("reliability_score") or 0),
         int(apuesta.get("quality_score") or 0),
         proximity_score_for_pick(apuesta),
@@ -955,7 +916,9 @@ def prioridad_pick_todo(apuesta: dict) -> tuple:
     )
 
 
-def limitar_picks_todo(recomendadas: list[dict], max_total: int = 6) -> list[dict]:
+def limitar_picks_todo(recomendadas: list[dict], max_total: int = 6, operating_mode: str | None = None) -> list[dict]:
+    limits = diversify_limits_for_todo(operating_mode or "equilibrado")
+    max_total = min(max_total, limits["max_total"]) if max_total else limits["max_total"]
     seleccionadas: list[dict] = []
     por_liga: dict[str, int] = {}
     por_deporte: dict[str, int] = {}
@@ -967,9 +930,9 @@ def limitar_picks_todo(recomendadas: list[dict], max_total: int = 6) -> list[dic
         liga = str(apuesta.get("league_label") or "General")
         deporte = str(apuesta.get("sport_label") or "General")
 
-        if por_liga.get(liga, 0) >= 2:
+        if por_liga.get(liga, 0) >= limits["max_per_league"]:
             continue
-        if por_deporte.get(deporte, 0) >= 3:
+        if por_deporte.get(deporte, 0) >= limits["max_per_sport"]:
             continue
 
         seleccionadas.append(apuesta)
@@ -997,7 +960,8 @@ def aplicar_penalizacion_historica(apuesta: dict, penalizaciones: dict[str, dict
         apuesta["historical_penalty_score"] = 0
         apuesta["historical_penalty_level"] = "none"
         apuesta["historical_penalty_reasons"] = []
-        return apuesta
+        apuesta["execution_score"] = execution_score_for_pick(apuesta)
+        return enrich_pick_ranking(apuesta)
 
     total_penalty = sum(item[2]["penalty_score"] for item in penalty_items)
     reasons = []
@@ -1021,7 +985,25 @@ def aplicar_penalizacion_historica(apuesta: dict, penalizaciones: dict[str, dict
     if reasons:
         apuesta["historical_penalty_summary_es"] = resumir_penalizacion_historica(reasons)
 
-    return apuesta
+    apuesta["execution_score"] = execution_score_for_pick(apuesta)
+    return enrich_pick_ranking(apuesta)
+
+
+def politica_riesgo_actual() -> dict[str, Any]:
+    resumen = estadisticas()
+    aprendizaje_info = aprendizaje()
+    evaluated_sample = int(aprendizaje_info.get("picks_evaluadas") or 0)
+    clv_positive_pct = aprendizaje_info.get("porcentaje_clv_positivo") if evaluated_sample > 0 else None
+    roi = float(resumen.get("roi") or 0) if evaluated_sample >= 12 else 0.0
+    clv_medio = resumen.get("clv_medio") if evaluated_sample >= 12 else None
+
+    return build_risk_policy(
+        total_closed=evaluated_sample,
+        roi=roi,
+        clv_medio=clv_medio,
+        clv_positive_pct=clv_positive_pct,
+        operating_mode=RISK_OPERATING_MODE,
+    )
 
 
 class ResultadoPick(BaseModel):
@@ -1184,68 +1166,7 @@ def the_odds_api_sports() -> list[dict]:
 
 
 def discover_available_catalog(provider: str | None = None) -> dict:
-    proveedor = (provider or ODDS_PROVIDER).strip().lower()
-
-    if proveedor in {"the_odds_api", "the-odds-api", "odds_api"}:
-        deportes = []
-
-        for item in the_odds_api_sports():
-            sport_key = str(item.get("key") or "")
-            if not sport_key:
-                continue
-
-            contexto = build_dynamic_context_from_sport_key(sport_key)
-            contexto["title"] = item.get("title") or contexto["league_label"]
-            contexto["active"] = item.get("active")
-            contexto["has_outrights"] = item.get("has_outrights")
-            deportes.append(contexto)
-
-        return {
-            "provider": "the_odds_api",
-            "total": len(deportes),
-            "sports": deportes,
-        }
-
-    if proveedor in {"api_football", "api-football", "apifootball"}:
-        data = api_football_get("/leagues", {"current": "true"})
-        deportes = []
-
-        for item in data.get("response", []):
-            league = item.get("league") or {}
-            country = item.get("country") or {}
-            sport_key = f"soccer_{str(country.get('name') or 'world').strip().lower().replace(' ', '_')}_{str(league.get('name') or 'league').strip().lower().replace(' ', '_')}"
-            contexto = build_dynamic_context_from_sport_key(sport_key)
-            contexto["title"] = league.get("name") or contexto["league_label"]
-            contexto["country"] = country.get("name")
-            contexto["league_id"] = league.get("id")
-            deportes.append(contexto)
-
-        return {
-            "provider": "api_football",
-            "total": len(deportes),
-            "sports": deportes,
-        }
-
-    if proveedor in {"sportsgameodds", "sports_game_odds", "sgo"}:
-        data = sportsgameodds_get("/leagues", {"sportID": SPORTSGAMEODDS_SPORT_ID, "limit": "500"})
-        deportes = []
-
-        for item in data.get("data", []):
-            league_id = item.get("leagueID") or item.get("id") or item.get("name")
-            league_name = item.get("name") or item.get("leagueID") or "League"
-            sport_key = f"{str(SPORTSGAMEODDS_SPORT_ID).strip().lower()}_{str(league_id).strip().lower()}"
-            contexto = build_dynamic_context_from_sport_key(sport_key)
-            contexto["title"] = league_name
-            contexto["league_id"] = league_id
-            deportes.append(contexto)
-
-        return {
-            "provider": "sportsgameodds",
-            "total": len(deportes),
-            "sports": deportes,
-        }
-
-    raise HTTPException(status_code=400, detail=f"Proveedor no soportado para discovery: {proveedor}")
+    return provider_layer.discover_available_catalog(provider=provider)
 
 
 def label_deporte_option(contexto: dict) -> str:
@@ -1277,7 +1198,7 @@ def opciones_deporte_disponibles(provider: str | None = None, selected: str | No
         opciones.append(
             {
                 "value": valor,
-                "label": label_deporte_option(contexto),
+                "label": provider_layer.label_deporte_option(contexto),
             }
         )
 
@@ -1286,7 +1207,7 @@ def opciones_deporte_disponibles(provider: str | None = None, selected: str | No
         deportes = [
             item
             for item in catalogo.get("sports", [])
-            if family_from_sport_key(item.get("sport_key", "")) in {"soccer", "tennis", "basketball"}
+            if family_from_sport_key(item.get("sport_key", "")) in TODO_LIMITS_BY_FAMILY
             and item.get("active", True) is not False
         ]
         deportes.sort(
@@ -1429,100 +1350,7 @@ def mercado_sportsgameodds(odd_id: str, odd: dict, home: str, away: str) -> tupl
 
 
 def adaptar_sportsgameodds_events(events: list[dict], mercados_lista: list[str]) -> list[dict]:
-    mercados_permitidos = set(mercados_lista)
-    eventos = []
-
-    for event in events:
-        home = event_team_name_sgo(event, "home")
-        away = event_team_name_sgo(event, "away")
-        event_id = event.get("eventID") or event.get("id")
-
-        if not home or not away or not event_id:
-            continue
-
-        markets_by_bookmaker: dict[str, dict[tuple, list[dict]]] = {}
-
-        for odd_id, odd in (event.get("odds") or {}).items():
-            mercado_info = mercado_sportsgameodds(odd_id, odd, home, away)
-
-            if not mercado_info:
-                continue
-
-            market_key, outcome_name, _, description = mercado_info
-
-            if market_key not in mercados_permitidos:
-                continue
-
-            for bookmaker_id, bookmaker_odd in (odd.get("byBookmaker") or {}).items():
-                if bookmaker_odd.get("available") is False:
-                    continue
-
-                cuota = cuota_sportsgameodds_decimal(
-                    bookmaker_odd.get("odds")
-                    or bookmaker_odd.get("bookOdds")
-                    or odd.get("bookOdds")
-                    or odd.get("fairOdds")
-                )
-
-                if not cuota:
-                    continue
-
-                point_value = (
-                    bookmaker_odd.get("overUnder")
-                    or bookmaker_odd.get("bookOverUnder")
-                    or odd.get("bookOverUnder")
-                    or odd.get("fairOverUnder")
-                )
-                point = None
-
-                if point_value is not None:
-                    try:
-                        point = float(point_value)
-                    except (TypeError, ValueError):
-                        point = None
-
-                key = (
-                    market_key,
-                    description,
-                    point if market_key != "h2h" else None,
-                )
-                outcome = {
-                    "name": outcome_name,
-                    "price": cuota,
-                }
-
-                if point is not None:
-                    outcome["point"] = point
-                if description:
-                    outcome["description"] = description
-
-                markets_by_bookmaker.setdefault(bookmaker_id, {}).setdefault(key, []).append(outcome)
-
-        bookmakers = []
-
-        for bookmaker_id, grouped_markets in markets_by_bookmaker.items():
-            markets = []
-
-            for (market_key, _, _), outcomes in grouped_markets.items():
-                markets.append({"key": market_key, "outcomes": outcomes})
-
-            if markets:
-                bookmakers.append({
-                    "key": bookmaker_id,
-                    "title": bookmaker_label(bookmaker_id),
-                    "markets": markets,
-                })
-
-        if bookmakers:
-            eventos.append({
-                "id": str(event_id),
-                "commence_time": event_start_sgo(event),
-                "home_team": home,
-                "away_team": away,
-                "bookmakers": bookmakers,
-            })
-
-    return eventos
+    return provider_layer.adaptar_sportsgameodds_events(events, mercados_lista)
 
 
 def cuotas_sportsgameodds(mercados_lista: list[str]) -> list[dict]:
@@ -1747,54 +1575,7 @@ def adaptar_api_football_odds(
     fixtures: dict[int, dict],
     mercados_lista: list[str],
 ) -> list[dict]:
-    eventos: dict[str, dict] = {}
-    mercados_permitidos = set(mercados_lista)
-
-    for item in odds_items:
-        fixture_id = ((item.get("fixture") or {}).get("id"))
-
-        if fixture_id is None:
-            continue
-
-        fixture_info = fixtures.get(int(fixture_id))
-
-        if not fixture_info:
-            continue
-
-        event_id = str(fixture_id)
-        evento = eventos.setdefault(
-            event_id,
-            {
-                "id": event_id,
-                "commence_time": fixture_info.get("commence_time"),
-                "home_team": fixture_info["home_team"],
-                "away_team": fixture_info["away_team"],
-                "bookmakers": [],
-            },
-        )
-
-        for bookmaker in item.get("bookmakers", []):
-            markets = []
-
-            for bet in bookmaker.get("bets", []):
-                market = adaptar_api_football_bet(
-                    bet,
-                    fixture_info["home_team"],
-                    fixture_info["away_team"],
-                    mercados_permitidos,
-                )
-
-                if market:
-                    markets.append(market)
-
-            if markets:
-                evento["bookmakers"].append({
-                    "key": str(bookmaker.get("id") or bookmaker.get("name")),
-                    "title": bookmaker.get("name"),
-                    "markets": markets,
-                })
-
-    return list(eventos.values())
+    return provider_layer.adaptar_api_football_odds(odds_items, fixtures, mercados_lista)
 
 
 def cuotas_api_football(mercados_lista: list[str]) -> list[dict]:
@@ -1882,37 +1663,27 @@ def home():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Betting Agent</title>
         <style>
-            body {{
-                font-family: Arial, sans-serif;
-                background: #f4f6f8;
-                color: #111;
-                margin: 32px;
-            }}
-            .container {{
-                max-width: 920px;
-                margin: auto;
-            }}
             {menu_css()}
-            .card {{
-                background: white;
-                border-radius: 8px;
-                padding: 18px;
-                margin-bottom: 16px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            }}
             .grid {{
                 display: grid;
                 grid-template-columns: repeat(2, minmax(0, 1fr));
-                gap: 14px;
+                gap: 16px;
             }}
             .card a {{
-                color: #0b1f3a;
-                font-weight: bold;
+                color: var(--brand);
+                font-weight: 700;
             }}
-            @media (max-width: 720px) {{
-                body {{
-                    margin: 16px;
-                }}
+            .card h2 {{
+                margin: 0 0 10px;
+                color: var(--brand);
+            }}
+            .card p {{
+                color: var(--muted);
+            }}
+            .card-footer {{
+                margin-top: 16px;
+            }}
+            @media (max-width: 900px) {{
                 .grid {{
                     grid-template-columns: 1fr;
                 }}
@@ -1922,28 +1693,37 @@ def home():
     <body>
     <div class="container">
         {menu_html("inicio")}
-        <h1>Betting Agent</h1>
-        <p>Herramienta local para detectar picks, quedarte solo con señales élite y medir resultados por deporte, liga y mercado.</p>
+        <section class="hero">
+            <div class="eyebrow">Quant betting workflow</div>
+            <h1>Una mesa de analisis, no solo un script de picks.</h1>
+            <p>Motor multi-deporte para detectar valor, contrastarlo con mercado y ELO, registrar ejecucion real y medir si tus mejores picks lo siguen siendo cuando pasa el tiempo.</p>
+            <div class="hero-metrics">
+                <div class="hero-metric"><span>Focus</span><strong>Value</strong></div>
+                <div class="hero-metric"><span>Method</span><strong>Market + model</strong></div>
+                <div class="hero-metric"><span>Tracking</span><strong>ROI + CLV</strong></div>
+                <div class="hero-metric"><span>Output</span><strong>Elite tiers</strong></div>
+            </div>
+        </section>
         <div class="grid">
             <div class="card">
                 <h2>Buscar apuestas</h2>
-                <p>Informe con filtros, colores, razonamiento y boton para registrar una apuesta real.</p>
-                <a href="/informe-hoy?perfil=alto_riesgo&modo=pinnacle&mercados=todo&partido=todos&deporte=worldcup">Abrir informe</a>
+                <p>Informe operativo con filtros, razonamiento, score de fiabilidad, penalizacion historica y registro inmediato de apuesta real.</p>
+                <div class="card-footer"><a class="button-link" href="/informe-hoy?perfil=alto_riesgo&modo=pinnacle&mercados=todo&partido=todos&deporte=worldcup">Abrir informe</a></div>
             </div>
             <div class="card">
                 <h2>Mis apuestas</h2>
-                <p>Gestiona importes reales y marca apuestas como ganadas, perdidas o nulas.</p>
-                <a href="/mis-apuestas">Abrir mis apuestas</a>
+                <p>Gestiona ejecucion real, resultado, importe, tier y rendimiento de la cartera activa sin perder trazabilidad.</p>
+                <div class="card-footer"><a class="button-link secondary" href="/mis-apuestas">Abrir mis apuestas</a></div>
             </div>
             <div class="card">
                 <h2>Dashboard</h2>
-                <p>ROI, beneficio, acierto, rendimiento por mercado, casa, perfil y modelo.</p>
-                <a href="/dashboard">Abrir dashboard</a>
+                <p>Panel de rendimiento con ROI, hit rate, CLV, calidad media, fiabilidad media y comparativa por tier, mercado y liga.</p>
+                <div class="card-footer"><a class="button-link secondary" href="/dashboard">Abrir dashboard</a></div>
             </div>
             <div class="card">
                 <h2>API</h2>
-                <p>Endpoints JSON y pruebas manuales desde Swagger.</p>
-                <a href="/docs">Abrir API Docs</a>
+                <p>Endpoints JSON para integrar discovery, cuotas, tracking, dashboard y automatizaciones con otros sistemas.</p>
+                <div class="card-footer"><a class="button-link secondary" href="/docs">Abrir API Docs</a></div>
             </div>
         </div>
     </div>
@@ -1962,6 +1742,11 @@ def status():
         "casa_referencia": REFERENCE_BOOKMAKER,
         "deportes_disponibles": sorted(SPORT_CATALOG.keys()),
         "discovery_endpoint": "/deportes-disponibles",
+        "arquitectura": {
+            "sports_module": "app/sports.py",
+            "providers_module": "app/providers.py",
+            "schemas_module": "app/schemas.py",
+        },
         "aviso": "No garantiza beneficio. Usar solo como soporte de decision.",
     }
 
@@ -1994,73 +1779,18 @@ def cuotas(mercados: str = "h2h,totals", deporte: str | None = None):
     contexto = resolver_contexto_deporte(deporte)
 
     if ODDS_PROVIDER in {"sportsgameodds", "sports_game_odds", "sgo"}:
-        return enriquecer_eventos_contexto(cuotas_sportsgameodds(mercados_lista), contexto)
-
-    if ODDS_PROVIDER in {"api_football", "api-football", "apifootball"}:
-        return enriquecer_eventos_contexto(cuotas_api_football(mercados_lista), contexto)
-
-    if not ODDS_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="Falta ODDS_API_KEY en el archivo .env",
+        return sports_layer.enriquecer_eventos_contexto(
+            provider_layer.cuotas_sportsgameodds(mercados_lista),
+            contexto,
         )
 
-    mercados_base = [m for m in mercados_lista if m in FEATURED_MARKETS] or ["h2h"]
-    mercados_adicionales = [m for m in mercados_lista if m in ADDITIONAL_MARKETS]
-    sport_key = contexto["sport_key"]
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
+    if ODDS_PROVIDER in {"api_football", "api-football", "apifootball"}:
+        return sports_layer.enriquecer_eventos_contexto(
+            provider_layer.cuotas_api_football(mercados_lista),
+            contexto,
+        )
 
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "eu",
-        "markets": ",".join(mercados_base),
-        "oddsFormat": "decimal",
-    }
-
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-    except requests.RequestException as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=odds_api_error_detail(exc),
-        ) from exc
-
-    data = r.json()
-
-    if isinstance(data, dict) and data.get("message"):
-        raise HTTPException(status_code=502, detail=data["message"])
-
-    if not isinstance(data, list):
-        raise HTTPException(status_code=502, detail="Respuesta inesperada de The Odds API")
-
-    if mercados_adicionales:
-        for evento in data:
-            event_id = evento.get("id")
-
-            if not event_id:
-                continue
-
-            event_url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{event_id}/odds"
-            event_params = {
-                "apiKey": ODDS_API_KEY,
-                "regions": "eu",
-                "markets": ",".join(mercados_adicionales),
-                "oddsFormat": "decimal",
-            }
-
-            try:
-                extra = requests.get(event_url, params=event_params, timeout=15)
-                extra.raise_for_status()
-            except requests.RequestException:
-                continue
-
-            extra_data = extra.json()
-
-            if isinstance(extra_data, dict):
-                merge_event_markets(evento, extra_data)
-
-    return enriquecer_eventos_contexto(data, contexto)
+    return provider_layer.fetch_the_odds_odds(mercados_lista, contexto)
 
 
 @app.get("/scores")
@@ -2068,44 +1798,18 @@ def scores(days_from: int = 3, deporte: str | None = None):
     contexto = resolver_contexto_deporte(deporte)
 
     if ODDS_PROVIDER in {"sportsgameodds", "sports_game_odds", "sgo"}:
-        return enriquecer_eventos_contexto(scores_sportsgameodds(days_from=days_from), contexto)
-
-    if ODDS_PROVIDER in {"api_football", "api-football", "apifootball"}:
-        return enriquecer_eventos_contexto(scores_api_football(days_from=days_from), contexto)
-
-    if not ODDS_API_KEY:
-        raise HTTPException(
-            status_code=500,
-            detail="Falta ODDS_API_KEY en el archivo .env",
+        return sports_layer.enriquecer_eventos_contexto(
+            provider_layer.scores_sportsgameodds(days_from=days_from),
+            contexto,
         )
 
-    days_from = max(1, min(days_from, 3))
-    sport_key = contexto["sport_key"]
-    url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/scores"
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "daysFrom": days_from,
-        "dateFormat": "iso",
-    }
+    if ODDS_PROVIDER in {"api_football", "api-football", "apifootball"}:
+        return sports_layer.enriquecer_eventos_contexto(
+            provider_layer.scores_api_football(days_from=days_from),
+            contexto,
+        )
 
-    try:
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-    except requests.RequestException as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=odds_api_error_detail(exc),
-        ) from exc
-
-    data = r.json()
-
-    if isinstance(data, dict) and data.get("message"):
-        raise HTTPException(status_code=502, detail=data["message"])
-
-    if not isinstance(data, list):
-        raise HTTPException(status_code=502, detail="Respuesta inesperada de The Odds API")
-
-    return enriquecer_eventos_contexto(data, contexto)
+    return provider_layer.fetch_the_odds_scores(days_from, contexto)
 
 
 @app.get("/sportsgameodds/leagues")
@@ -2134,7 +1838,7 @@ def sportsgameodds_eventos_debug(limit: int = 3):
 
 @app.get("/deportes-disponibles")
 def deportes_disponibles(provider: str | None = None):
-    catalogo = discover_available_catalog(provider=provider)
+    catalogo = provider_layer.discover_available_catalog(provider=provider)
     recomendados = [
         item for item in catalogo["sports"]
         if family_from_sport_key(item.get("sport_key", "")) in {"soccer", "tennis", "basketball"}
@@ -2507,28 +2211,7 @@ def menu_html(active: str = "") -> str:
 
 
 def menu_css() -> str:
-    return """
-            .top-menu {
-                display: flex;
-                flex-wrap: wrap;
-                gap: 8px;
-                margin-bottom: 20px;
-                align-items: center;
-            }
-            .top-menu a {
-                background: #e2e8f0;
-                color: #0b1f3a;
-                border-radius: 6px;
-                padding: 9px 11px;
-                text-decoration: none;
-                font-weight: bold;
-                font-size: 14px;
-            }
-            .top-menu a.active {
-                background: #0b1f3a;
-                color: white;
-            }
-    """
+    return premium_ui_css()
 
 
 @app.get("/mejores-apuestas")
@@ -2597,378 +2280,79 @@ def apuestas_hoy(
     solo_elite: bool = False,
     solo_stakazos: bool = False,
 ):
-    if (deporte or "").strip().lower() == "todo":
-        deportes_agregados = deportes_agregados_para_todo()
-        total_opciones_todo = max(
-            0,
-            len([item for item in opciones_deporte_disponibles() if str(item.get("value") or "").strip().lower() != "todo"]),
-        )
-        agregado = []
-        descartadas_total = []
-        partidos_total = []
-        cobertura = []
-        errores_cobertura = []
-        total_analizadas = 0
-        total_guardadas = 0
-        total_snapshots = 0
-
-        for deporte_item in deportes_agregados:
-            try:
-                data_item = apuestas_hoy(
-                    bankroll=bankroll,
-                    perfil=perfil,
-                    modo=modo,
-                    mercados=mercados,
-                    partido=partido,
-                    guardar=guardar,
-                    deporte=deporte_item,
-                    solo_elite=solo_elite,
-                    solo_stakazos=solo_stakazos,
-                )
-            except HTTPException as exc:
-                errores_cobertura.append({
-                    "deporte": deporte_item,
-                    "detail": str(exc.detail),
-                })
-                continue
-            agregado.extend(data_item.get("mejores_apuestas", []))
-            descartadas_total.extend(data_item.get("descartadas", []))
-            liga_label = str(data_item.get("league_label") or data_item.get("sport_label") or deporte_item)
-            partidos_item = data_item.get("partidos_disponibles", [])
-            for partido_item in partidos_item:
-                partidos_total.append({
-                    **partido_item,
-                    "label": f"{liga_label} | {partido_item.get('label')}",
-                })
-            cobertura.append({
-                "deporte": deporte_item,
-                "sport_label": data_item.get("sport_label"),
-                "league_label": data_item.get("league_label"),
-                "partidos": len(partidos_item),
-                "recomendadas": len(data_item.get("mejores_apuestas", [])),
-            })
-            total_analizadas += int(data_item.get("total_analizadas", 0))
-            total_guardadas += int(data_item.get("total_guardadas", 0))
-            total_snapshots += int(data_item.get("snapshots_guardados", 0))
-
-        recomendadas_full = sorted(agregado, key=prioridad_pick_todo, reverse=True)
-        recomendadas = limitar_picks_todo(recomendadas_full, max_total=6)
-        elite = [r for r in recomendadas if r.get("elite_pick")]
-        stakazos = [r for r in elite if str(r.get("elite_tier") or "").lower() == "stakazo"]
-        premium = [r for r in recomendadas if str(r.get("elite_tier") or "").lower() == "premium"]
-        seguimiento = [r for r in recomendadas if str(r.get("elite_tier") or "").lower() == "seguimiento"]
-        partidos_unicos = list({item["id"]: item for item in partidos_total}.values())
-        deportes_con_eventos = [item for item in cobertura if item["partidos"] > 0]
-        cobertura_txt = ", ".join(
-            f"{item['league_label']} ({item['partidos']})"
-            for item in deportes_con_eventos
-        ) or "ninguno"
-        aviso_cobertura = None
-        if len(deportes_con_eventos) <= 1:
-            aviso_cobertura = f"Con 'Todo' el sistema agrega los deportes base soportados. Ahora mismo solo hay eventos en: {cobertura_txt}."
-        if total_opciones_todo > len(deportes_agregados):
-            aviso_limite = (
-                f"Modo 'Todo' limitado para cargar mas rapido: se revisan {len(deportes_agregados)} ligas priorizadas "
-                f"de {total_opciones_todo} disponibles y se muestran solo los picks mas fiables y proximos."
-            )
-            aviso_cobertura = f"{aviso_limite} {aviso_cobertura}".strip() if aviso_cobertura else aviso_limite
-        if errores_cobertura:
-            ligas_error = ", ".join(item["deporte"] for item in errores_cobertura[:5])
-            aviso_error = f"Algunas ligas se omitieron en 'Todo' porque el proveedor rechazo sus parametros: {ligas_error}."
-            aviso_cobertura = f"{aviso_cobertura} {aviso_error}".strip() if aviso_cobertura else aviso_error
-
-        if not recomendadas and not cobertura and errores_cobertura:
-            raise HTTPException(status_code=502, detail=errores_cobertura[0]["detail"])
-
-        return {
-            "criterio": "Agregado multi-deporte sobre deportes base soportados",
-            "aviso": "No garantiza beneficio. El stake esta limitado y debe subirse solo con historico, ROI y CLV positivo.",
-            "proveedor_cuotas": ODDS_PROVIDER,
-            "casa_referencia": REFERENCE_BOOKMAKER,
-            "casa_referencia_fallback": False,
-            "bankroll": obtener_bankroll() if bankroll is None else float(bankroll),
-            "perfil": perfil,
-            "perfil_es": perfil_es(perfil if perfil in PERFILES_STAKE else "moderado"),
-            "modo": modo,
-            "sport_key": "multi_sport",
-            "sport_label": "Todo",
-            "league_key": "multi_league",
-            "league_label": "Todas las ligas base",
-            "deporte": "todo",
-            "solo_elite": solo_elite,
-            "solo_stakazos": solo_stakazos,
-            "source_strength": "mixed",
-            "mercados": mercados,
-            "filtro_mercados": mercados,
-            "partido": partido,
-            "partidos_disponibles": partidos_unicos,
-            "aviso_mercados": None,
-            "aviso_cobertura": aviso_cobertura,
-            "cobertura_deportes": cobertura,
-            "errores_cobertura": errores_cobertura,
-            "snapshots_guardados": total_snapshots,
-            "modo_es": modo_es(modo if modo in MODOS_INFORME else "comparador"),
-            "stake_maximo_por_pick": {
-                "conservador": "1.5% del bankroll",
-                "moderado": "3% del bankroll",
-                "agresivo": "8% del bankroll",
-                "alto_riesgo": "50% del bankroll",
-            }.get(perfil, "3% del bankroll"),
-            "total_analizadas": total_analizadas,
-            "total_recomendadas": len(recomendadas),
-            "total_elite": len(elite),
-            "total_stakazos": len(stakazos),
-            "total_premium": len(premium),
-            "total_seguimiento": len(seguimiento),
-            "total_guardadas": total_guardadas,
-            "mejores_apuestas": recomendadas[:5],
-            "picks_elite": stakazos[:10] if solo_stakazos else elite[:10],
-            "descartadas": sorted(descartadas_total, key=prioridad_pick, reverse=True)[:5],
-        }
-
-    bankroll = obtener_bankroll() if bankroll is None else float(bankroll)
-    actualizar_bankroll(bankroll)
-    contexto_deporte = resolver_contexto_deporte(deporte)
-    deporte = contexto_deporte["catalog_key"]
-    source_strength = {
-        "worldcup": "market+model",
-        "futbol": "market+model",
-        "tenis": "tennis_model",
-        "baloncesto": "basketball_model",
-    }.get(deporte, "market_only")
-    if source_strength not in {"market+model", "tennis_model", "basketball_model"} and contexto_deporte["supports_elo"]:
-        source_strength = "market+model"
-    if source_strength not in {"market+model", "tennis_model", "basketball_model"}:
-        source_strength = "market_only"
-
-    if perfil not in PERFILES_STAKE:
-        perfil = "moderado"
-    if modo not in MODOS_INFORME:
-        modo = "comparador"
-
-    filtro_mercados = mercados
-    mercados_lista, aviso_mercados = resolver_mercados(mercados, deporte=deporte)
-
-    if not mercados_lista:
-        return {
-            "criterio": "Sin mercados disponibles para el filtro elegido",
-            "aviso": "No garantiza beneficio. El stake esta limitado y debe subirse solo con historico, ROI y CLV positivo.",
-            "bankroll": bankroll,
-            "perfil": perfil,
-            "perfil_es": perfil_es(perfil),
-            "modo": modo,
-            "modo_es": modo_es(modo),
-            "deporte": deporte,
-            "sport_key": contexto_deporte["sport_key"],
-            "sport_label": contexto_deporte["sport_label"],
-            "league_label": contexto_deporte["league_label"],
-            "solo_elite": solo_elite,
-            "solo_stakazos": solo_stakazos,
-            "mercados": "",
-            "filtro_mercados": filtro_mercados,
-            "partido": partido,
-            "partidos_disponibles": [],
-            "aviso_mercados": aviso_mercados,
-            "snapshots_guardados": 0,
-            "stake_maximo_por_pick": {
-                "conservador": "1.5% del bankroll",
-                "moderado": "3% del bankroll",
-                "agresivo": "8% del bankroll",
-                "alto_riesgo": "50% del bankroll",
-            }.get(perfil, "3% del bankroll"),
-            "total_analizadas": 0,
-            "total_recomendadas": 0,
-            "total_guardadas": 0,
-            "mejores_apuestas": [],
-            "descartadas": [],
-        }
-
-    mercados = ",".join(mercados_lista)
-    data_completa = cuotas(mercados=mercados, deporte=deporte)
-    partidos_select = partidos_disponibles(data_completa)
-    snapshots_guardados = guardar_snapshot_cuotas(data_completa)
-    data = filtrar_partidos(data_completa, partido)
-
-    if not data:
-        return {
-            "criterio": "No hay cuotas disponibles para el partido elegido",
-            "aviso": "No garantiza beneficio. El stake esta limitado y debe subirse solo con historico, ROI y CLV positivo.",
-            "proveedor_cuotas": ODDS_PROVIDER,
-            "casa_referencia": REFERENCE_BOOKMAKER,
-            "casa_referencia_fallback": False,
-            "bankroll": bankroll,
-            "perfil": perfil,
-            "perfil_es": perfil_es(perfil),
-            "modo": modo,
-            "deporte": deporte,
-            "sport_key": contexto_deporte["sport_key"],
-            "sport_label": contexto_deporte["sport_label"],
-            "league_key": contexto_deporte["league_key"],
-            "league_label": contexto_deporte["league_label"],
-            "solo_elite": solo_elite,
-            "solo_stakazos": solo_stakazos,
-            "mercados": mercados,
-            "filtro_mercados": filtro_mercados,
-            "partido": partido,
-            "partidos_disponibles": partidos_select,
-            "aviso_mercados": aviso_mercados,
-            "snapshots_guardados": snapshots_guardados,
-            "modo_es": modo_es(modo),
-            "stake_maximo_por_pick": {
-                "conservador": "1.5% del bankroll",
-                "moderado": "3% del bankroll",
-                "agresivo": "8% del bankroll",
-                "alto_riesgo": "50% del bankroll",
-            }.get(perfil, "3% del bankroll"),
-            "total_analizadas": 0,
-            "total_recomendadas": 0,
-            "total_guardadas": 0,
-            "mejores_apuestas": [],
-            "descartadas": [],
-        }
-
-    try:
-        elos = obtener_elos() if contexto_deporte["supports_elo"] else {}
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"No se pudieron descargar los ELO: {exc}",
-        ) from exc
-
-    casa_referencia, referencia_fallback = seleccionar_casa_referencia(data, REFERENCE_BOOKMAKER)
-
-    if modo == "comparador":
-        recomendaciones = analizar_comparador_casas(
-            data,
-            elos,
+    engine = ForecastEngine(
+        provider_name=ODDS_PROVIDER,
+        reference_bookmaker=REFERENCE_BOOKMAKER,
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
+        get_bankroll=obtener_bankroll,
+        update_bankroll=actualizar_bankroll,
+        resolve_context=resolver_contexto_deporte,
+        resolve_markets=resolver_mercados,
+        list_sport_options=lambda: opciones_deporte_disponibles(),
+        aggregate_sports=deportes_agregados_para_todo,
+        fetch_odds=cuotas,
+        list_matches=partidos_disponibles,
+        save_snapshots=guardar_snapshot_cuotas,
+        filter_matches=filtrar_partidos,
+        fetch_elos=obtener_elos,
+        select_reference_house=seleccionar_casa_referencia,
+        analyze_comparison=analizar_comparador_casas,
+        translate_pick=traducir_apuesta,
+        historical_penalties=penalizaciones_historicas,
+        apply_historical_penalty=aplicar_penalizacion_historica,
+        sort_key_pick=prioridad_pick,
+        sort_key_todo=prioridad_pick_todo,
+        limit_todo_picks=lambda recomendadas, max_total: limitar_picks_todo(
+            recomendadas,
+            max_total=max_total,
+            operating_mode=RISK_OPERATING_MODE,
+        ),
+        save_recommendations=guardar_recomendaciones,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
+        source_strength_for_context=source_strength_for_context,
+        stake_limit_text=stake_limit_text,
+        risk_disclaimer=standard_risk_disclaimer,
+        attach_context_to_pick=attach_context_to_pick,
+        build_risk_policy=politica_riesgo_actual,
+        apply_risk_policy_to_pick=lambda pick, policy, league_penalties=None: apply_risk_policy_to_pick(
+            pick,
+            policy=policy,
+            league_penalties=league_penalties,
+        ),
+        apply_exposure_limits=lambda picks, max_total=None: apply_exposure_limits(
+            picks,
+            operating_mode=RISK_OPERATING_MODE,
+            max_total=max_total,
+        ),
+        single_sport_pick_limit=lambda partido: single_sport_pick_limit(RISK_OPERATING_MODE, partido),
+        multi_sport_pick_limit=lambda: multi_sport_pick_limit(RISK_OPERATING_MODE),
+        run_single_request=lambda nested_request: apuestas_hoy(
+            bankroll=nested_request.bankroll,
+            perfil=nested_request.perfil,
+            modo=nested_request.modo,
+            mercados=nested_request.mercados,
+            partido=nested_request.partido,
+            guardar=nested_request.guardar,
+            deporte=nested_request.deporte,
+            solo_elite=nested_request.solo_elite,
+            solo_stakazos=nested_request.solo_stakazos,
+        ),
+    )
+    return engine.run(
+        ForecastRequest(
             bankroll=bankroll,
             perfil=perfil,
-            mercados=mercados_lista,
-            casa_referencia=casa_referencia,
-            source_strength=source_strength,
+            modo=modo,
+            mercados=mercados,
+            partido=partido,
+            guardar=guardar,
+            deporte=deporte,
+            solo_elite=solo_elite,
+            solo_stakazos=solo_stakazos,
         )
-        criterio = f"{casa_referencia} como referencia + busqueda de cuotas mejores en otras casas + modelo"
-    else:
-        recomendaciones = analizar_comparador_casas(
-            data,
-            elos,
-            bankroll=bankroll,
-            perfil=perfil,
-            mercados=mercados_lista,
-            incluir_referencia=True,
-            casa_referencia=casa_referencia,
-            solo_casa=casa_referencia,
-            source_strength=source_strength,
-        )
-        criterio = f"Solo {casa_referencia} + mercados seleccionados + modelo"
-
-    if source_strength == "market+model":
-        criterio += " (mercado + ELO)"
-    elif source_strength == "tennis_model":
-        criterio += " (moneyline tenis conservador)"
-    elif source_strength == "basketball_model":
-        criterio += " (moneyline/totales basket conservador)"
-    else:
-        criterio += " (market-only ultra conservador)"
-
-    if referencia_fallback:
-        criterio += f" (aviso: {REFERENCE_BOOKMAKER} no estaba disponible en estas cuotas)"
-
-    recomendaciones = [traducir_apuesta(r) for r in recomendaciones]
-    penalizaciones = penalizaciones_historicas()
-
-    for recomendacion in recomendaciones:
-        recomendacion["perfil"] = perfil
-        recomendacion["perfil_es"] = perfil_es(perfil)
-        recomendacion["modo"] = modo
-        recomendacion["modo_es"] = modo_es(modo)
-        recomendacion["filtro_mercados"] = filtro_mercados
-        recomendacion["sport_key"] = contexto_deporte["sport_key"]
-        recomendacion["sport_label"] = contexto_deporte["sport_label"]
-        recomendacion["league_key"] = contexto_deporte["league_key"]
-        recomendacion["league_label"] = contexto_deporte["league_label"]
-
-    recomendaciones = [aplicar_penalizacion_historica(r, penalizaciones) for r in recomendaciones]
-
-    recomendadas = sorted(
-        [r for r in recomendaciones if r["stake"] > 0],
-        key=prioridad_pick,
-        reverse=True,
     )
-    elite = sorted(
-        [r for r in recomendadas if r.get("elite_pick")],
-        key=prioridad_pick,
-        reverse=True,
-    )
-    stakazos = sorted(
-        [r for r in elite if str(r.get("elite_tier") or "").lower() == "stakazo"],
-        key=prioridad_pick,
-        reverse=True,
-    )
-    premium = sorted(
-        [r for r in recomendadas if str(r.get("elite_tier") or "").lower() == "premium"],
-        key=prioridad_pick,
-        reverse=True,
-    )
-    seguimiento = sorted(
-        [r for r in recomendadas if str(r.get("elite_tier") or "").lower() == "seguimiento"],
-        key=prioridad_pick,
-        reverse=True,
-    )
-    if solo_stakazos:
-        recomendadas = stakazos
-    elif solo_elite:
-        recomendadas = elite
-    descartadas = sorted(
-        [r for r in recomendaciones if r["stake"] == 0],
-        key=prioridad_pick,
-        reverse=True,
-    )
-    total_guardadas = guardar_recomendaciones(recomendadas) if guardar else 0
-    limite_mejores = 3 if partido and partido != "todos" else 5
-
-    return {
-        "criterio": criterio,
-        "aviso": "No garantiza beneficio. El stake esta limitado y debe subirse solo con historico, ROI y CLV positivo.",
-        "proveedor_cuotas": ODDS_PROVIDER,
-        "casa_referencia": casa_referencia,
-        "casa_referencia_fallback": referencia_fallback,
-        "bankroll": bankroll,
-        "perfil": perfil,
-        "perfil_es": perfil_es(perfil),
-        "modo": modo,
-        "deporte": deporte,
-        "sport_key": contexto_deporte["sport_key"],
-        "sport_label": contexto_deporte["sport_label"],
-        "league_key": contexto_deporte["league_key"],
-        "league_label": contexto_deporte["league_label"],
-        "solo_elite": solo_elite,
-        "solo_stakazos": solo_stakazos,
-        "source_strength": source_strength,
-        "mercados": mercados,
-        "filtro_mercados": filtro_mercados,
-        "partido": partido,
-        "partidos_disponibles": partidos_select,
-        "aviso_mercados": aviso_mercados,
-        "snapshots_guardados": snapshots_guardados,
-        "modo_es": modo_es(modo),
-        "stake_maximo_por_pick": {
-            "conservador": "1.5% del bankroll",
-            "moderado": "3% del bankroll",
-            "agresivo": "8% del bankroll",
-            "alto_riesgo": "50% del bankroll",
-        }.get(perfil, "3% del bankroll"),
-        "total_analizadas": len(recomendaciones),
-        "total_recomendadas": len(recomendadas),
-        "total_elite": len(elite),
-        "total_stakazos": len(stakazos),
-        "total_premium": len(premium),
-        "total_seguimiento": len(seguimiento),
-        "total_guardadas": total_guardadas,
-        "mejores_apuestas": recomendadas[:limite_mejores],
-        "picks_elite": stakazos[:10] if solo_stakazos else elite[:10],
-        "descartadas": descartadas[:5],
-    }
 
 
 @app.get("/informe-hoy", response_class=HTMLResponse)
@@ -3088,67 +2472,49 @@ def informe_hoy(
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Informe de apuestas</title>
         <style>
-            body {
-                font-family: Arial, sans-serif;
-                background: #f4f6f8;
-                color: #111;
-                margin: 40px;
-            }
-            .container {
-                max-width: 900px;
-                margin: auto;
-            }
             __MENU_CSS__
-            h1 {
-                color: #0b1f3a;
+            .report-shell {
+                max-width: 1180px;
+                margin: 0 auto;
             }
-            .aviso {
-                background: #fff3cd;
-                padding: 15px;
-                border-radius: 8px;
-                margin-bottom: 25px;
+            .report-grid {
+                display: grid;
+                grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.75fr);
+                gap: 18px;
+                align-items: start;
             }
-            .card {
-                background: white;
-                border-radius: 12px;
-                padding: 20px;
-                margin-bottom: 20px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            .report-sidebar {
+                display: grid;
+                gap: 16px;
             }
-            .bet-card {
-                border-left: 8px solid #94a3b8;
+            .report-main > .card {
+                margin-bottom: 18px;
             }
-            .bet-green {
-                background: #ecfdf3;
-                border-left-color: #16a34a;
+            .bet-card h3 {
+                margin-top: 0;
+                color: var(--brand);
             }
-            .bet-yellow {
-                background: #fffbeb;
-                border-left-color: #f59e0b;
+            .bet-card p {
+                margin: 8px 0;
             }
-            .bet-red {
-                background: #fef2f2;
-                border-left-color: #dc2626;
+            .kpi-stack {
+                display: grid;
+                gap: 12px;
             }
-            .badge {
-                display: inline-block;
-                border-radius: 999px;
-                padding: 5px 9px;
-                font-size: 13px;
-                font-weight: bold;
-                margin-bottom: 8px;
+            .kpi-stack .metric {
+                padding: 16px;
             }
-            .badge-green {
-                background: #dcfce7;
-                color: #166534;
+            .kpi-stack .metric strong {
+                font-size: 24px;
             }
-            .badge-yellow {
-                background: #fef3c7;
-                color: #92400e;
+            .section-card-title {
+                margin: 0 0 8px;
+                color: var(--brand);
             }
-            .badge-red {
-                background: #fee2e2;
-                color: #991b1b;
+            .tiny-list {
+                margin: 0;
+                padding-left: 18px;
+                color: var(--muted);
             }
             .bet-actions {
                 display: flex;
@@ -3157,114 +2523,44 @@ def informe_hoy(
                 flex-wrap: wrap;
                 margin-top: 14px;
                 padding-top: 14px;
-                border-top: 1px solid #e2e8f0;
+                border-top: 1px solid var(--line);
             }
             .bet-actions .field {
                 min-width: 170px;
             }
             .value {
-                font-weight: bold;
-                color: #0a7a32;
+                font-weight: 700;
+                color: var(--success);
             }
             .descartada {
-                color: #666;
+                color: var(--muted);
             }
             .stake {
-                font-weight: bold;
+                font-weight: 700;
             }
-            .filters {
-                background: white;
-                border-radius: 8px;
-                padding: 16px;
-                margin-bottom: 20px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            }
-            .filters form {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                gap: 12px;
-                align-items: end;
-            }
-            .filters .field,
-            .filters button {
-                min-width: 0;
-            }
-            .field {
-                display: flex;
-                flex-direction: column;
-                gap: 6px;
-            }
-            label {
-                font-size: 13px;
-                font-weight: bold;
-                color: #334155;
-            }
-            input,
-            select {
-                width: 100%;
-                min-width: 0;
-                height: 40px;
-                border: 1px solid #cbd5e1;
-                border-radius: 6px;
-                padding: 0 10px;
-                font-size: 15px;
-                background: white;
-                box-sizing: border-box;
-            }
-            button {
-                height: 40px;
-                border: 0;
-                border-radius: 6px;
-                padding: 0 18px;
-                background: #0b1f3a;
-                color: white;
-                font-weight: bold;
-                cursor: pointer;
-            }
-            .summary {
-                display: flex;
-                gap: 12px;
-                flex-wrap: wrap;
-                margin-top: 14px;
-                color: #334155;
-                font-size: 14px;
-            }
-            .summary span {
-                background: #e2e8f0;
-                border-radius: 6px;
-                padding: 6px 8px;
-            }
-            .checkbox-row {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-                min-height: 40px;
-                flex-wrap: wrap;
-            }
-            .checkbox-row input {
-                height: auto;
-                width: auto;
-            }
-            @media (max-width: 720px) {
-                body {
-                    margin: 18px;
-                }
-                .filters form {
+            @media (max-width: 980px) {
+                .report-grid {
                     grid-template-columns: 1fr;
-                }
-                button {
-                    width: 100%;
                 }
             }
         </style>
     </head>
     <body>
-    <div class="container">
+    <div class="report-shell">
         __MENU_HTML__
-        <h1>Informe de apuestas</h1>
-        <div class="aviso">
-            No garantiza beneficio. Modo: __MODO__. Perfil activo: __PERFIL__. El riesgo sube la varianza.
-        </div>
+        <section class="hero">
+            <div class="eyebrow">Decision desk</div>
+            <h1>Informe de apuestas</h1>
+            <p>Lectura operacional del mercado para separar picks ejecutables de ruido, manteniendo disciplina de stake, sesgo conservador y trazabilidad real de resultados.</p>
+            <div class="hero-metrics">
+                <div class="hero-metric"><span>Perfil</span><strong>__PERFIL__</strong></div>
+                <div class="hero-metric"><span>Modo</span><strong>__MODO__</strong></div>
+                <div class="hero-metric"><span>Deporte</span><strong>__DEPORTE__</strong></div>
+                <div class="hero-metric"><span>Recomendadas</span><strong>__TOTAL_RECOMENDADAS__</strong></div>
+            </div>
+        </section>
+        <div class="report-grid">
+        <div class="report-main">
         <div class="filters">
             <form method="get" action="/informe-hoy">
                 <div class="field">
@@ -3311,20 +2607,37 @@ def informe_hoy(
                 </div>
                 <button type="submit">Buscar</button>
             </form>
-            <div class="summary">
-                <span>Bankroll: __BANKROLL__ EUR</span>
-                <span>Perfil: __PERFIL__</span>
-                <span>Modo: __MODO__</span>
-                <span>Deporte: __DEPORTE__</span>
-                <span>Mercados: __MERCADOS__</span>
-                <span>Partido: __PARTIDO__</span>
-                <span>Recomendadas: __TOTAL_RECOMENDADAS__</span>
-                <span>Elite: __TOTAL_ELITE__</span>
-                <span>Stakazos: __TOTAL_STAKAZOS__</span>
-                <span>Premium: __TOTAL_PREMIUM__</span>
-                <span>Snapshots: __SNAPSHOTS__</span>
-            </div>
             __AVISO_MERCADOS__
+        </div>
+        <h2 class="section-title">Resumen ejecutivo</h2>
+        <div class="summary">
+            <span>Bankroll: __BANKROLL__ EUR</span>
+            <span>Mercados: __MERCADOS__</span>
+            <span>Partido: __PARTIDO__</span>
+            <span>Elite: __TOTAL_ELITE__</span>
+            <span>Stakazos: __TOTAL_STAKAZOS__</span>
+            <span>Premium: __TOTAL_PREMIUM__</span>
+            <span>Snapshots: __SNAPSHOTS__</span>
+        </div>
+        <aside class="report-sidebar">
+            <div class="card">
+                <h3 class="section-card-title">Contexto activo</h3>
+                <div class="kpi-stack">
+                    <div class="metric">Bankroll<strong>__BANKROLL__ EUR</strong><small>Capital operativo actual</small></div>
+                    <div class="metric">Elite<strong>__TOTAL_ELITE__</strong><small>Picks con filtro premium</small></div>
+                    <div class="metric">Stakazos<strong>__TOTAL_STAKAZOS__</strong><small>Maxima exigencia del sistema</small></div>
+                    <div class="metric">Snapshots<strong>__SNAPSHOTS__</strong><small>Huella de cuotas guardada</small></div>
+                </div>
+            </div>
+            <div class="card">
+                <h3 class="section-card-title">Como leer este informe</h3>
+                <ul class="tiny-list">
+                    <li>Prioriza fiabilidad, calidad y ajuste historico antes que el EV aislado.</li>
+                    <li>Un stakazo debe mejorar en precio y sostener contexto, no solo parecer bonito.</li>
+                    <li>Si no hay picks, el sistema te esta ahorrando decisiones malas.</li>
+                </ul>
+            </div>
+        </aside>
         </div>
     """
     html = (
@@ -3452,10 +2765,10 @@ def informe_hoy(
             <h2>Lectura final</h2>
             <p>{escape(analisis_final_texto(mejores, descartadas))}</p>
         </div>
+        </div>
     """
 
     html += """
-    </div>
     </body>
     </html>
     """
@@ -3493,16 +2806,15 @@ def pronosticos(
     for pick in picks_telegram:
         mensajes.append(formatear_mensaje_telegram_pick(pick))
 
-    resumen = (
-        f"<b>PREDI IA | INFORME PREMIUM</b>\n"
-        f"<b>Deporte:</b> {telegram_text(data.get('sport_label'))}\n"
-        f"<b>Liga:</b> {telegram_text(data.get('league_label'))}\n"
-        f"<b>Perfil:</b> {telegram_text(perfil_es(perfil if perfil in PERFILES_STAKE else 'moderado'))}\n"
-        f"<b>Modo:</b> {telegram_text(modo_es(modo if modo in MODOS_INFORME else 'comparador'))}\n"
-        f"<b>Picks elite:</b> {telegram_text(data.get('total_elite', 0))}\n"
-        f"<b>Stakazos:</b> {telegram_text(len(stakazos))}\n"
-        f"<b>Envios:</b> {telegram_text(len(picks_telegram))}\n"
-        f"<b>Filtro:</b> {'Solo stakazos' if solo_stakazos else 'Top 3-5 mejores apuestas'}"
+    resumen = format_summary_message(
+        sport_label=data.get("sport_label"),
+        league_label=data.get("league_label"),
+        perfil_label=perfil_es(perfil if perfil in PERFILES_STAKE else "moderado"),
+        modo_label=modo_es(modo if modo in MODOS_INFORME else "comparador"),
+        total_elite=int(data.get("total_elite", 0) or 0),
+        total_stakazos=len(stakazos),
+        total_messages=len(picks_telegram),
+        solo_stakazos=solo_stakazos,
     )
 
     return {
@@ -3723,9 +3035,194 @@ def tracking_aprendizaje():
     return aprendizaje()
 
 
+@app.get("/tracking/riesgo")
+def tracking_riesgo():
+    return politica_riesgo_actual()
+
+
 @app.get("/tracking/dashboard-data")
 def tracking_dashboard_data():
     return dashboard_data()
+
+
+@app.get("/tracking/evaluaciones")
+def tracking_evaluaciones(limit: int = 100):
+    return {
+        "evaluaciones": listar_evaluaciones_picks(limit=limit),
+    }
+
+
+@app.get("/api/calibration")
+def api_calibration():
+    """
+    Endpoint premium que retorna el snapshot completo de calibración.
+    
+    Incluye:
+    - Métricas por liga, mercado, tier, casa de apuestas
+    - Análisis de confianza (confidence_score)
+    - Alertas de underperformance
+    - Ajustes recomendados para el modelo
+    
+    Este es el corazón de la inteligencia adaptiva del bot.
+    """
+    calibration = generate_calibration_snapshot()
+    
+    # Serializar para JSON
+    segments_serialized = {}
+    for segment_type, metrics_dict in calibration.segments_by_type.items():
+        segments_serialized[segment_type] = {}
+        for segment_name, metric in metrics_dict.items():
+            segments_serialized[segment_type][segment_name] = {
+                "segment_name": metric.segment_name,
+                "segment_type": metric.segment_type,
+                "total_picks": metric.total_picks,
+                "total_recommended": metric.total_recommended,
+                "picks_closed": metric.picks_closed,
+                "picks_won": metric.picks_won,
+                "picks_lost": metric.picks_lost,
+                "picks_push": metric.picks_push,
+                "total_staked": round(metric.total_staked, 2),
+                "total_profit": round(metric.total_profit, 2),
+                "roi": metric.roi,
+                "hit_rate": metric.hit_rate,
+                "clv": metric.clv,
+                "clv_positive_count": metric.clv_positive_count,
+                "confidence_score": metric.confidence_score,
+                "last_pick_date": metric.last_pick_date,
+                "min_sample_warning": metric.min_sample_warning,
+                "trend": metric.trend,
+                "recommendation": metric.recommendation,
+            }
+    
+    return {
+        "timestamp": calibration.timestamp,
+        "total_picks_evaluated": calibration.total_picks_evaluated,
+        "segments_by_type": segments_serialized,
+        "model_adjustments": calibration.model_adjustments,
+        "alerts": calibration.alerts,
+    }
+
+
+@app.get("/api/calibration/report", response_class=HTMLResponse)
+def api_calibration_report():
+    """
+    Retorna un reporte premium formateado de calibración.
+    """
+    calibration = generate_calibration_snapshot()
+    report_text = format_calibration_report(calibration)
+    
+    # Formatear como HTML para lectura premium
+    html_report = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Reporte de Calibración Premium</title>
+        <style>
+            {premium_ui_css()}
+            body {{ font-family: 'Courier New', monospace; background: #0a0e27; color: #e0e0e0; padding: 20px; }}
+            .report {{ white-space: pre-wrap; background: #1a1f3a; padding: 20px; border-radius: 8px; }}
+            .alert {{ color: #ff6b6b; margin: 10px 0; }}
+            .success {{ color: #51cf66; margin: 10px 0; }}
+            .warning {{ color: #ffd43b; margin: 10px 0; }}
+        </style>
+    </head>
+    <body>
+        <div class="report">
+{escape(report_text)}
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html_report
+
+
+@app.get("/api/audit")
+def api_audit(date: str = None):
+    """
+    Retorna el reporte de auditoría para una fecha específica.
+    
+    Si no se proporciona fecha, usa hoy.
+    
+    Incluye:
+    - Picks recomendadas vs ejecutadas
+    - Resultados del día
+    - ROI intraday
+    - Comparación con histórico
+    - Alertas críticas
+    - Estado del modelo
+    """
+    try:
+        if date:
+            target_date = datetime.fromisoformat(date)
+        else:
+            target_date = datetime.now(timezone.utc)
+        
+        report = generate_daily_audit_report(target_date)
+        return report
+    
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/api/audit/report", response_class=HTMLResponse)
+def api_audit_report(date: str = None):
+    """
+    Retorna un reporte premium formateado de auditoría.
+    
+    Incluye gráficos visuales, colores por status (VERDE/AMARILLO/ROJO).
+    """
+    
+    try:
+        if date:
+            target_date = datetime.fromisoformat(date)
+        else:
+            target_date = datetime.now(timezone.utc)
+        
+        report = generate_daily_audit_report(target_date)
+        report_html = format_audit_report_html(report)
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <title>Auditoría Diaria - {report['date']}</title>
+            <style>
+                {premium_ui_css()}
+                body {{ font-family: 'Segoe UI', sans-serif; background: #0a0e27; color: #e0e0e0; padding: 20px; }}
+                .container {{ max-width: 1200px; margin: 0 auto; }}
+                h1 {{ color: #5c7eff; margin-bottom: 30px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>📊 Auditoría Diaria - {report['date']}</h1>
+                {report_html}
+                <div style="margin-top: 30px; padding: 10px; background: #1a1f3a; border-radius: 8px; color: #999; font-size: 12px;">
+                    <p>Generado: {report['timestamp']}</p>
+                    <p>Status del modelo: {report['status']} - {report['status_detail']}</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return html
+    
+    except Exception as e:
+        return f"<html><body><h1>Error</h1><p>{escape(str(e))}</p></body></html>"
+
+
+@app.post("/api/audit/send-telegram")
+def api_audit_send_telegram():
+    """
+    Endpoint para enviar manualmente el reporte de auditoría por Telegram.
+    
+    Útil para testing o envío forzado.
+    """
+    return send_audit_report_telegram()
 
 
 @app.post("/tracking/liquidar-auto")
@@ -4230,6 +3727,7 @@ def dashboard():
     data = dashboard_data()
     resumen = data["resumen"]
     aprendizaje_info = data["aprendizaje"]
+    riesgo_info = politica_riesgo_actual()
 
     def tabla(titulo: str, filas: list[dict]) -> str:
         if not filas:
@@ -4327,71 +3825,18 @@ def dashboard():
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Dashboard de rendimiento</title>
         <style>
-            body {{
-                font-family: Arial, sans-serif;
-                background: #f4f6f8;
-                color: #111;
-                margin: 40px;
-            }}
-            .container {{
-                max-width: 1120px;
-                margin: auto;
-            }}
             {menu_css()}
-            h1, h2 {{
-                color: #0b1f3a;
+            .dashboard-copy {{
+                margin: 12px 0 20px;
+                color: var(--muted);
+                font-size: 15px;
             }}
-            .grid {{
-                display: grid;
-                grid-template-columns: repeat(4, minmax(0, 1fr));
-                gap: 12px;
-                margin: 20px 0;
+            .dashboard-section {{
+                margin-top: 28px;
             }}
-            .metric {{
-                background: white;
-                border-radius: 8px;
-                padding: 16px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            }}
-            .metric strong {{
-                display: block;
-                font-size: 24px;
-                color: #0a7a32;
-                margin-top: 6px;
-            }}
-            .aviso {{
-                background: #fff3cd;
-                padding: 15px;
-                border-radius: 8px;
-                margin-bottom: 20px;
-            }}
-            table {{
-                width: 100%;
-                border-collapse: collapse;
-                background: white;
-                margin-bottom: 28px;
-                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            }}
-            th, td {{
-                padding: 10px;
-                border-bottom: 1px solid #e2e8f0;
-                text-align: left;
-                font-size: 14px;
-            }}
-            th {{
-                background: #0b1f3a;
-                color: white;
-            }}
-            @media (max-width: 800px) {{
-                body {{
-                    margin: 18px;
-                }}
-                .grid {{
-                    grid-template-columns: 1fr 1fr;
-                }}
-                table {{
-                    display: block;
-                    overflow-x: auto;
+            @media (max-width: 900px) {{
+                .dashboard-copy {{
+                    margin-bottom: 16px;
                 }}
             }}
         </style>
@@ -4399,12 +3844,22 @@ def dashboard():
     <body>
     <div class="container">
         {menu_html("dashboard")}
-        <h1>Dashboard de rendimiento</h1>
+        <section class="hero">
+            <div class="eyebrow">Performance analytics</div>
+            <h1>Dashboard de rendimiento</h1>
+            <p>Panel para distinguir si el sistema realmente encuentra ventaja o si solo esta sobreviviendo a una racha. La lectura buena no es el ROI aislado: es el conjunto de ROI, CLV, calidad y fiabilidad.</p>
+            <div class="hero-metrics">
+                <div class="hero-metric"><span>Picks cerrados</span><strong>{resumen['picks_cerrados']}</strong></div>
+                <div class="hero-metric"><span>ROI</span><strong>{resumen['roi']:.2f}%</strong></div>
+                <div class="hero-metric"><span>Hit rate</span><strong>{resumen['hit_rate']:.2f}%</strong></div>
+                <div class="hero-metric"><span>CLV medio</span><strong>{resumen['clv_medio'] if resumen['clv_medio'] is not None else 'N/D'}</strong></div>
+            </div>
+        </section>
         <div class="aviso">
             Usa este panel para decidir donde subir o bajar stake. Con poca muestra, ROI y acierto pueden moverse mucho.
             Para cerrar automaticamente picks liquidables por marcador: <code>POST /tracking/liquidar-auto</code>.
         </div>
-        <div class="grid">
+        <div class="grid-4">
             <div class="metric">Picks cerrados<strong>{resumen['picks_cerrados']}</strong></div>
             <div class="metric">Pendientes<strong>{resumen['picks_pendientes']}</strong></div>
             <div class="metric">Beneficio<strong>{resumen['beneficio']:.2f} EUR</strong></div>
@@ -4414,15 +3869,18 @@ def dashboard():
             <div class="metric">Snapshots<strong>{resumen['snapshots_cuotas']}</strong></div>
             <div class="metric">CLV medio<strong>{resumen['clv_medio'] if resumen['clv_medio'] is not None else 'N/D'}</strong></div>
         </div>
-        <h2>Filtro premium</h2>
-        <div class="grid">
+        <div class="dashboard-section">
+        <h2 class="section-title">Filtro premium</h2>
+        <div class="grid-4">
             <div class="metric">Stakazos detectados<strong>{data['solo_stakazos']['picks']}</strong></div>
             <div class="metric">Stakazos cerrados<strong>{data['solo_stakazos']['cerradas']}</strong></div>
             <div class="metric">ROI stakazos<strong>{data['solo_stakazos']['roi']:.2f}%</strong></div>
             <div class="metric">Fiabilidad media<strong>{data['solo_stakazos']['reliability_media'] if data['solo_stakazos']['reliability_media'] is not None else 'N/D'}</strong></div>
         </div>
-        <h2>Comparativa por tier</h2>
-        <div class="grid">
+        </div>
+        <div class="dashboard-section">
+        <h2 class="section-title">Comparativa por tier</h2>
+        <div class="grid-4">
             <div class="metric">CLV stakazos<strong>{data['solo_stakazos']['clv_medio'] if data['solo_stakazos']['clv_medio'] is not None else 'N/D'}</strong></div>
             <div class="metric">Acierto stakazos<strong>{data['solo_stakazos']['hit_rate']:.2f}%</strong></div>
             <div class="metric">ROI elite<strong>{data['solo_elite']['roi']:.2f}%</strong></div>
@@ -4432,7 +3890,22 @@ def dashboard():
             <div class="metric">CLV+ stakazos<strong>{data['solo_stakazos']['clv_positivo_pct'] if data['solo_stakazos']['clv_positivo_pct'] is not None else 'N/D'}</strong></div>
             <div class="metric">CLV+ elite<strong>{data['solo_elite']['clv_positivo_pct'] if data['solo_elite']['clv_positivo_pct'] is not None else 'N/D'}</strong></div>
         </div>
-        <p>{escape(aprendizaje_info['lectura'])}</p>
+        </div>
+        <div class="dashboard-section">
+        <h2 class="section-title">Control de riesgo</h2>
+        <div class="grid-4">
+            <div class="metric">Modo operativo<strong>{escape(str(riesgo_info['operating_mode']))}</strong></div>
+            <div class="metric">Fase de muestra<strong>{escape(str(riesgo_info['sample_stage']))}</strong></div>
+            <div class="metric">Multiplicador stake<strong>{float(riesgo_info['stake_multiplier']):.2f}x</strong></div>
+            <div class="metric">Stake maximo<strong>{float(riesgo_info['max_stake_units']):.2f}/5</strong></div>
+            <div class="metric">Kill switch<strong>{'Activo' if riesgo_info['block_new_picks'] else 'No'}</strong></div>
+            <div class="metric">Mercados fragiles<strong>{'Bloqueados' if riesgo_info['block_fragile_markets'] else 'Permitidos'}</strong></div>
+            <div class="metric">Solo elite<strong>{'Si' if riesgo_info['only_elite_when_cautious'] else 'No'}</strong></div>
+            <div class="metric">Motivo actual<strong>{escape(str(riesgo_info['reason']))}</strong></div>
+            <div class="metric">Evaluaciones<strong>{aprendizaje_info.get('picks_evaluadas', 0)}</strong></div>
+        </div>
+        </div>
+        <p class="dashboard-copy">{escape(aprendizaje_info['lectura'])}</p>
         {tabla("Por deporte", data["por_deporte"])}
         {tabla("Por liga", data["por_liga"])}
         {tabla("Por mercado", data["por_mercado"])}

@@ -8,11 +8,15 @@ from betting_model import (
     calcular_fiabilidad_pick,
     clasificar_pick_elite,
     calcular_kelly_fraccional,
+    market_consensus_snapshot,
     normalizar_probabilidades,
     rescatar_casi_value,
 )
+from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
+from app.operating_mode import multi_sport_pick_limit, single_sport_pick_limit, telegram_pick_limit
+from app.exposure import apply_exposure_limits
 from tracking import actualizar_resultado, estadisticas, guardar_recomendaciones
-from tracking import aprendizaje, dashboard_data, guardar_snapshot_cuotas, liquidar_picks_con_scores, listar_picks, penalizaciones_historicas
+from tracking import aprendizaje, dashboard_data, guardar_snapshot_cuotas, liquidar_picks_con_scores, listar_evaluaciones_picks, listar_picks, obtener_closing_odds_pick, penalizaciones_historicas
 from tracking import actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, guardar_apuesta_real, marcar_apuesta_real_pick, obtener_bankroll
 from tracking import guardar_recomendaciones_unicas, listar_publicaciones_telegram, registrar_publicacion_telegram
 from main import (
@@ -73,6 +77,25 @@ class BettingModelTests(unittest.TestCase):
         stake = calcular_kelly_fraccional(0.60, 2.20)
 
         self.assertLessEqual(stake, 0.015)
+
+    def test_market_consensus_snapshot_resume_soporte_y_dispersion(self):
+        partido = {
+            "id": "evt_consensus",
+            "home_team": "Belgium",
+            "away_team": "United States",
+            "bookmakers": [
+                {"title": "Pinnacle", "markets": [{"key": "h2h", "outcomes": [{"name": "Belgium", "price": 2.2}, {"name": "Draw", "price": 3.3}, {"name": "United States", "price": 3.4}]}]},
+                {"title": "Bet365", "markets": [{"key": "h2h", "outcomes": [{"name": "Belgium", "price": 2.3}, {"name": "Draw", "price": 3.25}, {"name": "United States", "price": 3.35}]}]},
+                {"title": "Unibet", "markets": [{"key": "h2h", "outcomes": [{"name": "Belgium", "price": 2.26}, {"name": "Draw", "price": 3.28}, {"name": "United States", "price": 3.38}]}]},
+            ],
+        }
+
+        consensus = market_consensus_snapshot(partido, "h2h", ("h2h", "home", None), selected_odds=2.3)
+
+        self.assertEqual(consensus["support_count"], 3)
+        self.assertAlmostEqual(consensus["consensus_odds"], 2.26, places=2)
+        self.assertGreater(consensus["edge_vs_consensus"], 0)
+        self.assertGreater(consensus["width_pct"], 0)
 
     def test_filtro_agresivo_acepta_value_no_extremo(self):
         partidos = [
@@ -291,6 +314,163 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(belgium["recomendacion"], "Value interesante")
         self.assertEqual(belgium["importe_sugerido"], 10.0)
+
+    def test_fiabilidad_mejora_con_soporte_profundo_y_mercado_ordenado(self):
+        score_alto, tier_alto = calcular_fiabilidad_pick(
+            sport_key="soccer_spain_la_liga",
+            league_key="la_liga",
+            market_key="h2h",
+            casa="Pinnacle",
+            source_strength="market+model",
+            market_support_count=6,
+            market_width_pct=0.02,
+        )
+        score_bajo, tier_bajo = calcular_fiabilidad_pick(
+            sport_key="soccer_spain_la_liga",
+            league_key="la_liga",
+            market_key="h2h",
+            casa="Pinnacle",
+            source_strength="market+model",
+            market_support_count=1,
+            market_width_pct=0.14,
+        )
+
+        self.assertGreater(score_alto, score_bajo)
+        self.assertEqual(tier_alto, "alta")
+        self.assertLess(score_bajo, 90)
+
+    def test_comparador_incluye_metricas_de_consenso_en_recomendaciones(self):
+        partidos = [
+            {
+                "id": "evt_market_depth",
+                "commence_time": "2026-06-15T20:00:00Z",
+                "sport_key": "soccer_spain_la_liga",
+                "league_key": "la_liga",
+                "home_team": "Belgium",
+                "away_team": "United States",
+                "bookmakers": [
+                    {
+                        "title": "Pinnacle",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Belgium", "price": 2.2},
+                                    {"name": "Draw", "price": 3.3},
+                                    {"name": "United States", "price": 3.4},
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "title": "Bet365",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Belgium", "price": 2.3},
+                                    {"name": "Draw", "price": 3.3},
+                                    {"name": "United States", "price": 3.3},
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "title": "Unibet",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Belgium", "price": 2.28},
+                                    {"name": "Draw", "price": 3.25},
+                                    {"name": "United States", "price": 3.32},
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ]
+        elos = {"BE": 2150, "US": 1750}
+
+        recomendaciones = analizar_comparador_casas(partidos, elos, bankroll=100, perfil="agresivo")
+        belgium_bet365 = next(r for r in recomendaciones if r["equipo"] == "Belgium" and r["casa"] == "Bet365")
+
+        self.assertEqual(belgium_bet365["market_support_count"], 3)
+        self.assertIsNotNone(belgium_bet365["market_consensus_odds"])
+        self.assertIsNotNone(belgium_bet365["market_edge_vs_consensus"])
+        self.assertGreater(belgium_bet365["market_edge_vs_consensus"], 0)
+
+    def test_build_risk_policy_activa_kill_switch_con_historico_malo(self):
+        policy = build_risk_policy(
+            total_closed=45,
+            roi=-9,
+            clv_medio=-3.5,
+            clv_positive_pct=38,
+            operating_mode="equilibrado",
+        )
+
+        self.assertTrue(policy["block_new_picks"])
+        self.assertEqual(policy["reason"], "kill_switch_rendimiento")
+
+    def test_apply_risk_policy_bloquea_mercado_fragil(self):
+        pick = {
+            "stake": 2,
+            "importe_sugerido": 8,
+            "stake_pct_bankroll": 2.5,
+            "kelly_fraccional": 0.025,
+            "market_signal": "mercado_fragil",
+            "elite_pick": False,
+            "league_label": "Liga X",
+        }
+        policy = {
+            "sample_stage": "early",
+            "stake_multiplier": 0.7,
+            "max_stake_units": 2.0,
+            "block_new_picks": False,
+            "block_fragile_markets": True,
+            "only_elite_when_cautious": False,
+            "reason": "muestra_corta",
+        }
+
+        adjusted = apply_risk_policy_to_pick(pick, policy=policy, league_penalties={})
+
+        self.assertEqual(adjusted["stake"], 0)
+        self.assertTrue(adjusted["risk_guard_blocked"])
+
+    def test_build_risk_policy_agresivo_relaja_frenos_con_muestra_corta(self):
+        policy = build_risk_policy(
+            total_closed=6,
+            roi=0,
+            clv_medio=None,
+            clv_positive_pct=None,
+            operating_mode="agresivo",
+        )
+
+        self.assertEqual(policy["operating_mode"], "agresivo")
+        self.assertEqual(policy["reason"], "muestra_corta")
+        self.assertFalse(policy["block_fragile_markets"])
+        self.assertGreaterEqual(policy["stake_multiplier"], 0.85)
+        self.assertGreaterEqual(policy["max_stake_units"], 2.5)
+
+    def test_operating_mode_agresivo_amplia_limites_de_salida(self):
+        self.assertEqual(single_sport_pick_limit("agresivo", "todos"), 7)
+        self.assertEqual(single_sport_pick_limit("agresivo", "evt_1"), 4)
+        self.assertEqual(multi_sport_pick_limit("agresivo"), 8)
+        self.assertEqual(telegram_pick_limit("agresivo", solo_stakazos=False), 7)
+
+    def test_apply_exposure_limits_controla_concentracion_por_evento(self):
+        picks = [
+            {"event_id": "evt_1", "partido": "A vs B", "league_label": "League 1", "mercado": "h2h"},
+            {"event_id": "evt_1", "partido": "A vs B", "league_label": "League 1", "mercado": "totals"},
+            {"event_id": "evt_1", "partido": "A vs B", "league_label": "League 1", "mercado": "btts"},
+            {"event_id": "evt_2", "partido": "C vs D", "league_label": "League 1", "mercado": "h2h"},
+        ]
+
+        selected = apply_exposure_limits(picks, operating_mode="agresivo", max_total=10)
+
+        self.assertEqual(len([p for p in selected if p["event_id"] == "evt_1"]), 2)
+        self.assertNotIn("btts", [p["mercado"] for p in selected if p["event_id"] == "evt_1"])
 
     def test_comparador_recomienda_casa_con_mejor_cuota_que_pinnacle(self):
         partidos = [
@@ -776,6 +956,10 @@ class BettingModelTests(unittest.TestCase):
             "puntuacion_confianza": 82,
             "valor_esperado": 0.05,
             "margen_cuota": 1.06,
+            "market_support_count": 6,
+            "market_width_pct": 0.02,
+            "market_edge_vs_consensus": 0.035,
+            "stake": 2.5,
         }
         pick_elite = {
             "elite_tier": "elite",
@@ -784,6 +968,10 @@ class BettingModelTests(unittest.TestCase):
             "puntuacion_confianza": 84,
             "valor_esperado": 0.08,
             "margen_cuota": 1.08,
+            "market_support_count": 2,
+            "market_width_pct": 0.11,
+            "market_edge_vs_consensus": 0.005,
+            "stake": 1.0,
         }
 
         self.assertGreater(prioridad_pick(pick_stakazo), prioridad_pick(pick_elite))
@@ -796,6 +984,10 @@ class BettingModelTests(unittest.TestCase):
             "puntuacion_confianza": 60,
             "valor_esperado": 0.03,
             "margen_cuota": 1.04,
+            "market_support_count": 4,
+            "market_width_pct": 0.04,
+            "market_edge_vs_consensus": 0.025,
+            "stake": 1.0,
         }
         seguimiento = {
             "elite_tier": "seguimiento",
@@ -804,9 +996,76 @@ class BettingModelTests(unittest.TestCase):
             "puntuacion_confianza": 75,
             "valor_esperado": 0.07,
             "margen_cuota": 1.08,
+            "market_support_count": 1,
+            "market_width_pct": 0.14,
+            "market_edge_vs_consensus": -0.01,
+            "stake": 0.5,
         }
 
         self.assertGreater(prioridad_pick(premium), prioridad_pick(seguimiento))
+
+    def test_apuestas_hoy_enriquece_ranking_score_y_execution_score(self):
+        import main
+
+        original_cuotas = main.cuotas
+        original_obtener_elos = main.obtener_elos
+        original_guardar_snapshot_cuotas = main.guardar_snapshot_cuotas
+        original_analizar_comparador_casas = main.analizar_comparador_casas
+        original_penalizaciones_historicas = main.penalizaciones_historicas
+
+        try:
+            main.cuotas = lambda mercados="todo", deporte="worldcup": [
+                {
+                    "id": "evt_rank",
+                    "commence_time": "2026-07-15T20:00:00Z",
+                    "sport_key": "soccer_fifa_world_cup",
+                    "sport_label": "Futbol",
+                    "league_key": "fifa_world_cup",
+                    "league_label": "FIFA World Cup",
+                    "home_team": "Spain",
+                    "away_team": "France",
+                    "bookmakers": [],
+                }
+            ]
+            main.obtener_elos = lambda: {}
+            main.guardar_snapshot_cuotas = lambda data: 0
+            main.penalizaciones_historicas = lambda: {}
+            main.analizar_comparador_casas = lambda *args, **kwargs: [
+                {
+                    "stake": 2,
+                    "elite_pick": True,
+                    "elite_tier": "elite",
+                    "quality_score": 84,
+                    "reliability_score": 80,
+                    "puntuacion_confianza": 77,
+                    "valor_esperado": 0.05,
+                    "margen_cuota": 1.05,
+                    "partido": "Spain vs France",
+                    "partido_es": "Espana vs Francia",
+                    "equipo": "Spain",
+                    "equipo_es": "Espana",
+                    "casa": "Pinnacle",
+                    "mercado": "h2h",
+                    "recomendacion": "Value interesante",
+                    "motivo": "ok",
+                    "market_support_count": 5,
+                    "market_width_pct": 0.03,
+                    "market_edge_vs_consensus": 0.028,
+                },
+            ]
+            data = apuestas_hoy()
+        finally:
+            main.cuotas = original_cuotas
+            main.obtener_elos = original_obtener_elos
+            main.guardar_snapshot_cuotas = original_guardar_snapshot_cuotas
+            main.analizar_comparador_casas = original_analizar_comparador_casas
+            main.penalizaciones_historicas = original_penalizaciones_historicas
+
+        pick = data["mejores_apuestas"][0]
+        self.assertIn("ranking_score", pick)
+        self.assertIn("execution_score", pick)
+        self.assertIn("market_signal", pick)
+        self.assertGreaterEqual(pick["ranking_score"], pick["execution_score"])
 
     def test_mensaje_telegram_incluye_fiabilidad(self):
         mensaje = formatear_mensaje_telegram_pick({
@@ -2328,6 +2587,172 @@ class BettingModelTests(unittest.TestCase):
             self.assertEqual(panel["resumen"]["ganadas"], 1)
             self.assertEqual(panel["por_mercado"][0]["nombre"], "totals")
             self.assertEqual(panel["por_perfil"][0]["nombre"], "alto_riesgo")
+
+    def test_obtener_closing_odds_pick_desde_snapshots(self):
+        recomendacion = {
+            "event_id": "evt_closing",
+            "commence_time": "2026-07-20T20:00:00Z",
+            "partido": "Spain vs France",
+            "equipo": "Spain",
+            "equipo_raw": "Spain",
+            "tipo_resultado": "home",
+            "tipo_resultado_raw": "home",
+            "casa": "Pinnacle",
+            "mercado": "h2h",
+            "cuota_apuesta": 2.00,
+            "importe_sugerido": 10,
+            "stake": 2,
+            "recomendacion": "Value moderado",
+            "motivo": "test",
+        }
+        partido = [
+            {
+                "id": "evt_closing",
+                "commence_time": "2026-07-20T20:00:00Z",
+                "sport_key": "soccer_fifa_world_cup",
+                "sport_label": "Futbol",
+                "league_key": "fifa_world_cup",
+                "league_label": "FIFA World Cup",
+                "home_team": "Spain",
+                "away_team": "France",
+                "bookmakers": [
+                    {
+                        "title": "Pinnacle",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Spain", "price": 1.91},
+                                    {"name": "Draw", "price": 3.3},
+                                    {"name": "France", "price": 4.0},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.sqlite3")
+            pick = guardar_recomendaciones_unicas([recomendacion], db_path=db_path)[0]
+            guardar_snapshot_cuotas(partido, db_path=db_path)
+
+            closing = obtener_closing_odds_pick(pick["id"], db_path=db_path)
+
+            self.assertEqual(closing, 1.91)
+
+    def test_liquidacion_auto_solo_evalua_picks_recomendadas_por_el_bot(self):
+        recomendada = {
+            "event_id": "evt_eval_yes",
+            "commence_time": "2026-07-20T20:00:00Z",
+            "partido": "Spain vs France",
+            "equipo": "Spain",
+            "equipo_raw": "Spain",
+            "tipo_resultado": "home",
+            "tipo_resultado_raw": "home",
+            "casa": "Pinnacle",
+            "mercado": "h2h",
+            "cuota_apuesta": 2.00,
+            "importe_sugerido": 10,
+            "stake": 2,
+            "recomendacion": "Value moderado",
+            "motivo": "test",
+        }
+        no_recomendada = {
+            **recomendada,
+            "event_id": "evt_eval_no",
+            "partido": "Brazil vs Norway",
+            "equipo": "Brazil",
+            "equipo_raw": "Brazil",
+            "recommended_by_bot": False,
+            "auto_eval_eligible": False,
+        }
+        partidos = [
+            {
+                "id": "evt_eval_yes",
+                "commence_time": "2026-07-20T20:00:00Z",
+                "home_team": "Spain",
+                "away_team": "France",
+                "bookmakers": [
+                    {
+                        "title": "Pinnacle",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Spain", "price": 1.88},
+                                    {"name": "Draw", "price": 3.4},
+                                    {"name": "France", "price": 4.1},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "id": "evt_eval_no",
+                "commence_time": "2026-07-20T21:00:00Z",
+                "home_team": "Brazil",
+                "away_team": "Norway",
+                "bookmakers": [
+                    {
+                        "title": "Pinnacle",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Brazil", "price": 1.72},
+                                    {"name": "Draw", "price": 3.6},
+                                    {"name": "Norway", "price": 5.0},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        ]
+        scores = [
+            {
+                "id": "evt_eval_yes",
+                "completed": True,
+                "home_team": "Spain",
+                "away_team": "France",
+                "scores": [
+                    {"name": "Spain", "score": "1"},
+                    {"name": "France", "score": "0"},
+                ],
+            },
+            {
+                "id": "evt_eval_no",
+                "completed": True,
+                "home_team": "Brazil",
+                "away_team": "Norway",
+                "scores": [
+                    {"name": "Brazil", "score": "2"},
+                    {"name": "Norway", "score": "0"},
+                ],
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.sqlite3")
+            picks = guardar_recomendaciones_unicas([recomendada, no_recomendada], db_path=db_path)
+            guardar_snapshot_cuotas(partidos, db_path=db_path)
+            resultado = liquidar_picks_con_scores(scores, db_path=db_path)
+            evaluaciones = listar_evaluaciones_picks(db_path=db_path)
+            todos = listar_picks(db_path=db_path)
+            pick_yes = next(p for p in todos if p["event_id"] == "evt_eval_yes")
+            pick_no = next(p for p in todos if p["event_id"] == "evt_eval_no")
+
+            self.assertEqual(len(picks), 2)
+            self.assertEqual(resultado["scope"], "solo_picks_recomendadas_por_el_bot")
+            self.assertEqual(resultado["liquidados"], 1)
+            self.assertEqual(pick_yes["estado"], "cerrada")
+            self.assertEqual(pick_no["estado"], "pendiente")
+            self.assertEqual(len(evaluaciones), 1)
+            self.assertEqual(evaluaciones[0]["event_id"], "evt_eval_yes")
+            self.assertEqual(evaluaciones[0]["closing_odds"], 1.88)
 
     def test_tenis_modelo_conservador_reconoce_el_deporte(self):
         partidos = [
