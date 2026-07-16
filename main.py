@@ -3191,18 +3191,15 @@ def api_audit_report(date: str = None):
             <title>Auditoría Diaria - {report['date']}</title>
             <style>
                 {premium_ui_css()}
-                body {{ font-family: 'Segoe UI', sans-serif; background: #0a0e27; color: #e0e0e0; padding: 20px; }}
-                .container {{ max-width: 1200px; margin: 0 auto; }}
-                h1 {{ color: #5c7eff; margin-bottom: 30px; }}
             </style>
         </head>
         <body>
             <div class="container">
                 <h1>📊 Auditoría Diaria - {report['date']}</h1>
                 {report_html}
-                <div style="margin-top: 30px; padding: 10px; background: #1a1f3a; border-radius: 8px; color: #999; font-size: 12px;">
-                    <p>Generado: {report['timestamp']}</p>
-                    <p>Status del modelo: {report['status']} - {report['status_detail']}</p>
+                <div style="margin-top: 30px; padding: 10px; border-radius: 8px; font-size: 12px; border-top: 1px solid var(--line);">
+                    <p style="margin: 4px 0; color: var(--muted);">Generado: {report['timestamp']}</p>
+                    <p style="margin: 4px 0; color: var(--muted);">Status del modelo: {report['status']} - {report['status_detail']}</p>
                 </div>
             </div>
         </body>
@@ -3221,6 +3218,21 @@ def api_audit_send_telegram():
     Endpoint para enviar manualmente el reporte de auditoría por Telegram.
     
     Útil para testing o envío forzado.
+    """
+    return send_audit_report_telegram()
+
+
+@app.get("/api/audit/telegram")
+def api_audit_send_telegram_get():
+    """
+    Endpoint GET para enviar auditoría por Telegram.
+    
+    Uso: http://servidor:8000/api/audit/telegram
+    
+    Sirve para:
+    - Llamar desde navegador: http://servidor:8000/api/audit/telegram
+    - Desde curl: curl http://servidor:8000/api/audit/telegram
+    - Desde cron: 0 21 * * * curl http://servidor:8000/api/audit/telegram
     """
     return send_audit_report_telegram()
 
