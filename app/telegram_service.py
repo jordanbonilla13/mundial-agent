@@ -73,6 +73,13 @@ def telegram_kickoff_label(value: Any) -> str | None:
     return f"{date_label} | en {delta_hours / 24:.1f}d"
 
 
+def telegram_ai_recommendation_icon(advice: Any) -> str:
+    normalized = str(advice or "").strip().lower()
+    if "yo si le meteria" in normalized or "yo si le entraria" in normalized:
+        return "⭐ "
+    return ""
+
+
 def format_pick_message(
     pick: dict[str, Any],
     title_builder: Callable[[dict[str, Any]], str],
@@ -102,6 +109,7 @@ def format_pick_message(
         pick.get("historical_penalty_reasons")
     )
     consejo_ia = pick.get("ai_advice_es")
+    consejo_ia_icon = telegram_ai_recommendation_icon(consejo_ia)
     lectura_ia = pick.get("ai_narrative_es")
 
     return (
@@ -118,7 +126,7 @@ def format_pick_message(
         + f"🧠 <b>Confianza:</b> {telegram_text(confianza)} | <b>Fiabilidad:</b> {telegram_text(fiabilidad)} ({telegram_text(fiabilidad_score)}/100)\n"
         + f"✅ <b>Condicion:</b> {telegram_text(condicion)}\n"
         + f"📝 <b>Motivo:</b> {telegram_text(motivo)}"
-        + (f"\n🤖 <b>Consejo IA:</b> {telegram_text(consejo_ia)}" if consejo_ia else "")
+        + (f"\n🤖 <b>Consejo IA:</b> {telegram_text(consejo_ia_icon)}{telegram_text(consejo_ia)}" if consejo_ia else "")
         + (f"\n🧬 <b>Lectura IA:</b> {telegram_text(lectura_ia)}" if lectura_ia else "")
         + (f"\n⚠️ <b>Ajuste historico:</b> {telegram_text(ajuste_historico)}" if ajuste_historico else "")
         + f"\n🆔 <b>Pick ID:</b> {telegram_text(pick.get('id') or '-')}"

@@ -1150,6 +1150,7 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("<b>Stake:</b> 2.5/5 | <b>Importe:</b> 8.0 EUR", mensaje)
         self.assertIn("<b>Empieza:</b>", mensaje)
         self.assertIn("<b>Consejo IA:</b>", mensaje)
+        self.assertIn("⭐ Yo si le entraria con stake disciplinado.", mensaje)
 
     def test_ai_advice_bloquea_pick_fragil(self):
         advice = build_pick_action_advice(
@@ -1162,6 +1163,32 @@ class BettingModelTests(unittest.TestCase):
         )
 
         self.assertIn("no le entraria", advice.lower())
+
+    def test_mensaje_telegram_no_marca_estrella_si_ia_no_respalda(self):
+        mensaje = formatear_mensaje_telegram_pick({
+            "league_label": "Premier League",
+            "elite_tier": "premium",
+            "partido_es": "Arsenal vs Chelsea",
+            "equipo_es": "Arsenal",
+            "commence_time": "2026-07-18T20:00:00Z",
+            "cuota_apuesta": 1.95,
+            "stake": 1.0,
+            "importe_sugerido": 4.0,
+            "valor_esperado": 0.021,
+            "confianza": "Media",
+            "reliability_tier": "media",
+            "reliability_score": 68,
+            "quality_score": 70,
+            "mercado": "h2h",
+            "tipo_resultado_es": "Local",
+            "tipo_resultado": "home",
+            "tipo_resultado_raw": "home",
+            "motivo_es": "Value justo.",
+            "ai_advice_es": "Yo iria con cautela o la dejaria pasar: la veo demasiado justa para forzar entrada.",
+        })
+
+        self.assertIn("<b>Consejo IA:</b>", mensaje)
+        self.assertNotIn("⭐ Yo iria con cautela", mensaje)
 
     def test_ai_batch_promotes_uno_o_dos_picks_buenos(self):
         picks = enrich_picks_with_ai_narratives(
