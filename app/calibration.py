@@ -78,7 +78,15 @@ def calculate_segment_metrics(
     """
     
     total_picks = len(picks)
-    total_recommended = sum(1 for p in picks if p.get("recomendado") in {True, 1, "1", "true"})
+    total_recommended = sum(
+        1
+        for p in picks
+        if (
+            p.get("recommended_by_bot") in {True, 1, "1", "true"}
+            or p.get("recomendado") in {True, 1, "1", "true"}
+            or p.get("elite_pick") in {True, 1, "1", "true"}
+        )
+    )
     
     closed_picks = [p for p in picks if p.get("estado") == "cerrada"]
     picks_closed = len(closed_picks)
@@ -115,9 +123,9 @@ def calculate_segment_metrics(
     
     # Fecha del último pick
     last_pick_date = None
-    for p in sorted(picks, key=lambda x: x.get("fecha_creacion", ""), reverse=True):
-        if p.get("fecha_creacion"):
-            last_pick_date = p["fecha_creacion"]
+    for p in sorted(picks, key=lambda x: x.get("created_at") or x.get("fecha_creacion") or "", reverse=True):
+        if p.get("created_at") or p.get("fecha_creacion"):
+            last_pick_date = p.get("created_at") or p.get("fecha_creacion")
             break
     
     # Determinar si hay advertencia de muestra pequeña
@@ -185,7 +193,7 @@ def analyze_by_league(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     
     picks_by_league: dict[str, list[dict]] = defaultdict(list)
     for pick in picks:
-        league = pick.get("liga", "Unknown")
+        league = pick.get("league_label") or pick.get("liga") or "Unknown"
         picks_by_league[league].append(pick)
     
     metrics = {}
@@ -219,6 +227,32 @@ def analyze_by_market(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     return metrics
 
 
+def _build_league_market_key(league: str, market: str) -> str:
+    return f"{league}::{market}"
+
+
+def analyze_by_league_market(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
+    """Analiza rendimiento por combinacion liga + mercado."""
+    picks = listar_picks(limit=10000, db_path=db_path)
+
+    picks_by_combo: dict[str, list[dict]] = defaultdict(list)
+    for pick in picks:
+        league = pick.get("league_label") or pick.get("liga") or "Unknown"
+        market = pick.get("mercado", "Unknown")
+        combo = _build_league_market_key(league, market)
+        picks_by_combo[combo].append(pick)
+
+    metrics = {}
+    for combo, combo_picks in picks_by_combo.items():
+        metrics[combo] = calculate_segment_metrics(
+            segment_name=combo,
+            segment_type="liga_mercado",
+            picks=combo_picks,
+        )
+
+    return metrics
+
+
 def analyze_by_tier(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     """Analiza rendimiento por tier (elite, premium, standard)."""
     picks = listar_picks(limit=10000, db_path=db_path)
@@ -245,7 +279,7 @@ def analyze_by_bookmaker(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     
     picks_by_bookie: dict[str, list[dict]] = defaultdict(list)
     for pick in picks:
-        bookmaker = pick.get("casa_apuestas", "Unknown")
+        bookmaker = pick.get("casa") or pick.get("casa_apuestas") or "Unknown"
         picks_by_bookie[bookmaker].append(pick)
     
     metrics = {}
@@ -270,11 +304,13 @@ def generate_calibration_snapshot(db_path: str = DB_PATH) -> CalibrationSnapshot
     """
     
     picks = listar_picks(limit=10000, db_path=db_path)
-    total_evaluated = len(picks)
+    evaluations = listar_evaluaciones_picks(limit=10000, db_path=db_path)
+    total_evaluated = len(evaluations)
     
     segments_by_type = {
         "ligas": analyze_by_league(db_path),
         "mercados": analyze_by_market(db_path),
+        "ligas_mercados": analyze_by_league_market(db_path),
         "tiers": analyze_by_tier(db_path),
         "casas": analyze_by_bookmaker(db_path),
     }
@@ -310,6 +346,13 @@ def generate_calibration_snapshot(db_path: str = DB_PATH) -> CalibrationSnapshot
                 f"🔴 TIER {tier} underperforming: ROI {metrics.roi}%, CLV {metrics.clv}%"
             )
     
+    for combo, metrics in segments_by_type["ligas_mercados"].items():
+        if not metrics.min_sample_warning and (metrics.roi < -5 or metrics.hit_rate < 45):
+            alerts.append(
+                f"Segmento en riesgo: {combo} con ROI {metrics.roi}% y hit_rate {metrics.hit_rate}%. "
+                f"Endurecer filtros para esta combinacion."
+            )
+
     # Generar ajustes de modelo sugeridos
     model_adjustments = _generate_model_adjustments(segments_by_type)
     
@@ -335,6 +378,8 @@ def _generate_model_adjustments(segments_by_type: dict[str, dict[str, SegmentMet
     adjustments = {
         "league_penalties": {},
         "market_thresholds": {},
+        "league_market_penalties": {},
+        "league_market_thresholds": {},
         "tier_boosts": {},
         "confidence_multipliers": {},
     }
@@ -362,6 +407,28 @@ def _generate_model_adjustments(segments_by_type: dict[str, dict[str, SegmentMet
                 # Reducir threshold, es confiable
                 threshold_reduction = -0.05
                 adjustments["market_thresholds"][market] = round(threshold_reduction, 3)
+
+    # Analizar combinaciones liga + mercado
+    for combo, metrics in segments_by_type.get("ligas_mercados", {}).items():
+        if metrics.min_sample_warning:
+            continue
+
+        combo_penalty = 0.0
+        combo_threshold = 0.0
+
+        if metrics.roi <= -12 or metrics.hit_rate <= 38:
+            combo_penalty = min(0.6, max(abs(metrics.roi) / 18, (45 - metrics.hit_rate) / 18))
+            combo_threshold = 0.18
+        elif metrics.roi <= -6 or metrics.hit_rate <= 44:
+            combo_penalty = min(0.35, max(abs(metrics.roi) / 30, (47 - metrics.hit_rate) / 30))
+            combo_threshold = 0.1
+        elif metrics.roi >= 8 and metrics.hit_rate >= 58:
+            combo_threshold = -0.04
+
+        if combo_penalty > 0:
+            adjustments["league_market_penalties"][combo] = round(combo_penalty, 3)
+        if combo_threshold != 0:
+            adjustments["league_market_thresholds"][combo] = round(combo_threshold, 3)
     
     # Analizar tiers
     for tier, metrics in segments_by_type["tiers"].items():
@@ -416,6 +483,31 @@ def get_market_threshold_adjustment(
     
     adjustments = calibration.model_adjustments.get("market_thresholds", {})
     return adjustments.get(market, 0.0)
+
+
+def get_penalty_factor_for_league_market(
+    league: str,
+    market: str,
+    calibration: CalibrationSnapshot,
+) -> float:
+    """Retorna el factor de penalidad para una combinacion liga + mercado."""
+
+    penalties = calibration.model_adjustments.get("league_market_penalties", {})
+    combo_key = _build_league_market_key(league, market)
+    penalty = penalties.get(combo_key, 0)
+    return 1.0 - penalty
+
+
+def get_league_market_threshold_adjustment(
+    league: str,
+    market: str,
+    calibration: CalibrationSnapshot,
+) -> float:
+    """Retorna el ajuste de threshold para una combinacion liga + mercado."""
+
+    adjustments = calibration.model_adjustments.get("league_market_thresholds", {})
+    combo_key = _build_league_market_key(league, market)
+    return adjustments.get(combo_key, 0.0)
 
 
 def get_tier_boost(
@@ -483,6 +575,20 @@ def format_calibration_report(calibration: CalibrationSnapshot) -> str:
             f"  {icon} {market}: ROI {metrics.roi}% | Hit {metrics.hit_rate}% | "
             f"Conf {metrics.confidence_score} | Picks {metrics.picks_closed}"
         )
+
+    league_market_segments = calibration.segments_by_type.get("ligas_mercados", {})
+    if league_market_segments:
+        report.append("\n🧠 RENDIMIENTO POR NICHO LIGA + MERCADO:")
+        for combo, metrics in sorted(
+            league_market_segments.items(),
+            key=lambda x: x[1].confidence_score,
+            reverse=True
+        ):
+            icon = "✅" if metrics.recommendation == "confiable" else "⚠️" if metrics.recommendation == "revisar" else "❌"
+            report.append(
+                f"  {icon} {combo}: ROI {metrics.roi}% | Hit {metrics.hit_rate}% | "
+                f"Conf {metrics.confidence_score} | Picks {metrics.picks_closed}"
+            )
     
     # Tiers
     report.append("\n⭐ RENDIMIENTO POR TIER:")
@@ -516,6 +622,17 @@ def format_calibration_report(calibration: CalibrationSnapshot) -> str:
             for market, adj in adjustments["market_thresholds"].items():
                 direction = "↑ requerir más" if adj > 0 else "↓ aceptar menos"
                 report.append(f"    - {market}: {direction} ({adj*100:+.1f}%)")
+
+        if adjustments.get("league_market_penalties"):
+            report.append("  Penalidades por nicho liga + mercado:")
+            for combo, penalty in adjustments["league_market_penalties"].items():
+                report.append(f"    - {combo}: -{penalty*100:.1f}%")
+
+        if adjustments.get("league_market_thresholds"):
+            report.append("  Ajustes de threshold por nicho liga + mercado:")
+            for combo, adj in adjustments["league_market_thresholds"].items():
+                direction = "↑ requerir más" if adj > 0 else "↓ aceptar menos"
+                report.append(f"    - {combo}: {direction} ({adj*100:+.1f}%)")
         
         if adjustments.get("tier_boosts"):
             report.append("  Boosts por tier:")

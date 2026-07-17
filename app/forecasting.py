@@ -56,12 +56,104 @@ def market_signal_label(
     return "consenso_medio"
 
 
+def _is_over_pick(pick: dict[str, Any]) -> bool:
+    candidates = (
+        pick.get("equipo"),
+        pick.get("equipo_raw"),
+        pick.get("tipo_resultado"),
+        pick.get("tipo_resultado_raw"),
+    )
+    normalized = " ".join(str(value or "").strip().lower() for value in candidates)
+    return any(token in normalized for token in ("over", "mas de", "más de"))
+
+
+def apply_market_regime_guard(pick: dict[str, Any]) -> dict[str, Any]:
+    adjusted = pick.copy()
+    sport_key = str(adjusted.get("sport_key") or "").lower()
+    market = str(adjusted.get("mercado") or "").lower()
+
+    adjusted["market_guard_penalty_score"] = 0
+    adjusted["market_guard_level"] = "none"
+    adjusted["market_guard_blocked"] = False
+    adjusted["market_guard_reasons"] = []
+
+    if not sport_key.startswith("basketball_") or market not in {"totals", "alternate_totals"}:
+        return adjusted
+
+    support = int(adjusted.get("market_support_count") or 0)
+    width = float(adjusted.get("market_width_pct") or 0)
+    edge = float(adjusted.get("market_edge_vs_consensus") or 0)
+    margin = float(adjusted.get("margen_cuota") or 0)
+    value = float(adjusted.get("valor_esperado") or 0)
+
+    is_wnba = "wnba" in sport_key
+    is_over = _is_over_pick(adjusted)
+    reasons: list[str] = []
+    penalty = 0
+
+    min_support = 4 if is_wnba else 3
+    if support < min_support:
+        penalty += 10 if is_wnba else 8
+        reasons.append(f"support_bajo:{support}")
+
+    fragile_width = 0.065 if is_wnba else 0.08
+    caution_width = 0.04 if is_wnba else 0.05
+    if width >= fragile_width:
+        penalty += 9 if is_wnba else 7
+        reasons.append(f"width_alta:{width:.3f}")
+    elif width >= caution_width:
+        penalty += 5 if is_wnba else 4
+        reasons.append(f"width_media:{width:.3f}")
+
+    min_edge = 0.025 if is_wnba else 0.015
+    if edge < min_edge:
+        penalty += 10 if is_wnba else 8
+        reasons.append(f"edge_bajo:{edge:.3f}")
+    elif edge < (0.035 if is_wnba else 0.025):
+        penalty += 5 if is_wnba else 4
+        reasons.append(f"edge_justo:{edge:.3f}")
+
+    if margin < (1.04 if is_wnba else 1.03):
+        penalty += 6
+        reasons.append(f"margen_justo:{margin:.3f}")
+
+    if value < (0.035 if is_wnba else 0.03):
+        penalty += 6
+        reasons.append(f"value_bajo:{value:.3f}")
+
+    if is_wnba and is_over:
+        penalty += 6
+        reasons.append("wnba_over_regla_estricta")
+        if support < 5:
+            penalty += 4
+            reasons.append("wnba_over_soporte_insuficiente")
+        if edge < 0.03:
+            penalty += 4
+            reasons.append("wnba_over_edge_insuficiente")
+
+    adjusted["market_guard_penalty_score"] = penalty
+    adjusted["market_guard_reasons"] = reasons
+
+    if penalty >= 26 or (is_wnba and is_over and (support < 4 or edge < 0.02 or width >= 0.07)):
+        adjusted["market_guard_level"] = "block"
+        adjusted["market_guard_blocked"] = True
+    elif penalty >= 16:
+        adjusted["market_guard_level"] = "high"
+    elif penalty >= 8:
+        adjusted["market_guard_level"] = "medium"
+    elif penalty > 0:
+        adjusted["market_guard_level"] = "low"
+
+    return adjusted
+
+
 def execution_score_for_pick(pick: dict[str, Any]) -> int:
     support = int(pick.get("market_support_count") or 0)
     width = float(pick.get("market_width_pct") or 0)
     edge = float(pick.get("market_edge_vs_consensus") or 0)
     stake = float(pick.get("stake") or 0)
     margin = float(pick.get("margen_cuota") or 0)
+    market_guard_penalty = float(pick.get("market_guard_penalty_score") or 0)
 
     score = 45.0
 
@@ -104,6 +196,8 @@ def execution_score_for_pick(pick: dict[str, Any]) -> int:
     elif margin < 1.01:
         score -= 4
 
+    score -= market_guard_penalty * 0.85
+
     return int(round(_clamp(score, 0, 100)))
 
 
@@ -123,6 +217,7 @@ def ranking_score_for_pick(pick: dict[str, Any]) -> int:
     margin = min(15.0, max(0.0, (float(pick.get("margen_cuota") or 0) - 1.0) * 250))
     execution = float(pick.get("execution_score") or execution_score_for_pick(pick))
     historical_penalty = float(pick.get("historical_penalty_score") or 0)
+    market_guard_penalty = float(pick.get("market_guard_penalty_score") or 0)
     stake = float(pick.get("stake") or 0)
 
     score = 0.0
@@ -135,6 +230,7 @@ def ranking_score_for_pick(pick: dict[str, Any]) -> int:
     score += tier_bonus
     score += min(6.0, stake * 2.0)
     score -= historical_penalty * 1.35
+    score -= market_guard_penalty * 1.15
 
     return int(round(_clamp(score, 0, 100)))
 
@@ -146,7 +242,7 @@ def enrich_pick_ranking(pick: dict[str, Any]) -> dict[str, Any]:
     Si está disponible el módulo de calibración, usa scores mejorados
     con penalizaciones dinámicas. Si no, usa los scores base.
     """
-    enriched = pick.copy()
+    enriched = apply_market_regime_guard(pick)
     enriched["market_signal"] = market_signal_label(
         enriched.get("market_support_count"),
         enriched.get("market_width_pct"),

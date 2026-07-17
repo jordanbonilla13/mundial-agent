@@ -14,6 +14,7 @@ El objetivo del proyecto no es "apostar más", sino tomar decisiones más discip
 - Tracking persistente de picks, resultados, ROI y `CLV`.
 - Dashboard HTML para revisión rápida.
 - Publicación opcional de picks en Telegram.
+- Narrativa premium con OpenAI para resúmenes y explicación de picks en Telegram.
 
 ## Estado del proyecto
 
@@ -125,6 +126,16 @@ Configuración opcional para Telegram:
 TELEGRAM_BOT_TOKEN=tu_token
 TELEGRAM_CHAT_ID=tu_chat_id
 TELEGRAM_AUTOPUBLISH_ENABLED=true
+```
+
+Configuración opcional para OpenAI:
+
+```env
+OPENAI_ENABLED=true
+OPENAI_API_KEY=tu_api_key
+OPENAI_MODEL=gpt-5
+OPENAI_TIMEOUT_SECONDS=20
+OPENAI_TELEGRAM_PICKS_MAX=3
 ```
 
 La plantilla completa está en [.env.example](C:/mundial-agent/mundial-agent/.env.example:1).

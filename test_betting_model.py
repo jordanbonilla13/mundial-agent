@@ -1,10 +1,12 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from betting_model import (
     analizar_comparador_casas,
     analizar_partidos,
+    ajustar_probabilidad_por_mercado,
     calcular_fiabilidad_pick,
     clasificar_pick_elite,
     calcular_kelly_fraccional,
@@ -12,6 +14,14 @@ from betting_model import (
     normalizar_probabilidades,
     rescatar_casi_value,
 )
+from app.ai_service import build_pick_action_advice
+from app.calibration import (
+    CalibrationSnapshot,
+    SegmentMetrics,
+    _generate_model_adjustments,
+)
+import app.calibrated_scoring as calibrated_scoring
+from app.forecasting import apply_market_regime_guard
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
 from app.operating_mode import multi_sport_pick_limit, single_sport_pick_limit, telegram_pick_limit
 from app.exposure import apply_exposure_limits
@@ -437,6 +447,51 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(adjusted["stake"], 0)
         self.assertTrue(adjusted["risk_guard_blocked"])
+
+    def test_market_regime_guard_bloquea_wnba_over_fragil(self):
+        guarded = apply_market_regime_guard(
+            {
+                "sport_key": "basketball_wnba",
+                "mercado": "totals",
+                "equipo": "Over",
+                "market_support_count": 2,
+                "market_width_pct": 0.082,
+                "market_edge_vs_consensus": 0.011,
+                "margen_cuota": 1.018,
+                "valor_esperado": 0.019,
+            }
+        )
+
+        self.assertTrue(guarded["market_guard_blocked"])
+        self.assertEqual(guarded["market_guard_level"], "block")
+        self.assertGreaterEqual(guarded["market_guard_penalty_score"], 26)
+
+    def test_apply_risk_policy_bloquea_market_guard_especializado(self):
+        pick = {
+            "stake": 2,
+            "importe_sugerido": 8,
+            "stake_pct_bankroll": 2.5,
+            "kelly_fraccional": 0.025,
+            "market_signal": "consenso_medio",
+            "market_guard_blocked": True,
+            "elite_pick": True,
+            "league_label": "WNBA",
+        }
+        policy = {
+            "sample_stage": "growing",
+            "stake_multiplier": 1.0,
+            "max_stake_units": 3.0,
+            "block_new_picks": False,
+            "block_fragile_markets": False,
+            "only_elite_when_cautious": False,
+            "reason": "normal",
+        }
+
+        adjusted = apply_risk_policy_to_pick(pick, policy=policy, league_penalties={})
+
+        self.assertEqual(adjusted["stake"], 0)
+        self.assertTrue(adjusted["risk_guard_blocked"])
+        self.assertIn("guard de mercado", adjusted["motivo"])
 
     def test_build_risk_policy_agresivo_relaja_frenos_con_muestra_corta(self):
         policy = build_risk_policy(
@@ -1073,6 +1128,7 @@ class BettingModelTests(unittest.TestCase):
             "elite_tier": "stakazo",
             "partido_es": "Arsenal vs Chelsea",
             "equipo_es": "Arsenal",
+            "commence_time": "2026-07-18T20:00:00Z",
             "cuota_apuesta": 1.95,
             "stake": 2.5,
             "importe_sugerido": 8.0,
@@ -1086,11 +1142,26 @@ class BettingModelTests(unittest.TestCase):
             "tipo_resultado": "home",
             "tipo_resultado_raw": "home",
             "motivo_es": "Value claro frente a mercado.",
+            "ai_advice_es": "Yo si le entraria con stake disciplinado.",
         })
 
         self.assertIn("<b>Fiabilidad:</b> alta (86/100)", mensaje)
-        self.assertIn("<b>STAKAZO | Premier League</b>", mensaje)
+        self.assertIn("🔥 STAKAZO | Premier League", mensaje)
         self.assertIn("<b>Stake:</b> 2.5/5 | <b>Importe:</b> 8.0 EUR", mensaje)
+        self.assertIn("<b>Empieza:</b>", mensaje)
+        self.assertIn("<b>Consejo IA:</b>", mensaje)
+
+    def test_ai_advice_bloquea_pick_fragil(self):
+        advice = build_pick_action_advice(
+            {
+                "stake": 0,
+                "market_guard_blocked": True,
+                "market_guard_level": "block",
+                "historical_penalty_level": "alta",
+            }
+        )
+
+        self.assertIn("no le entraria", advice.lower())
 
     def test_dashboard_data_calcula_metricas_quality_y_reliability(self):
         recomendacion = {
@@ -1232,6 +1303,48 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Test League", penal["ligas"])
         self.assertIn("stakazo", penal["tiers"])
         self.assertGreaterEqual(penal["ligas"]["Test League"]["penalty_score"], 8)
+
+    def test_penalizaciones_historicas_detectan_deriva_clv_en_liga_mercado(self):
+        pick = {
+            "commence_time": "2026-07-15T20:00:00Z",
+            "sport_key": "basketball_wnba",
+            "sport_label": "Baloncesto",
+            "league_key": "wnba",
+            "league_label": "WNBA",
+            "partido": "A vs B",
+            "equipo": "Over",
+            "tipo_resultado": "over",
+            "casa": "Pinnacle",
+            "mercado": "totals",
+            "cuota_apuesta": 1.95,
+            "cuota_minima_aceptable": 1.84,
+            "probabilidad_mercado": 0.51,
+            "probabilidad_modelo": 0.56,
+            "valor_esperado": 0.05,
+            "margen_cuota": 1.04,
+            "kelly_fraccional": 0.01,
+            "stake_pct_bankroll": 1.5,
+            "importe_sugerido": 3,
+            "stake": 1.5,
+            "recomendacion": "Value moderado",
+            "motivo": "test clv drift",
+            "quality_score": 76,
+            "reliability_score": 74,
+            "elite_pick": False,
+            "elite_tier": "premium",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.sqlite3")
+            guardar_recomendaciones([dict(pick, event_id=f"wnba_{i}", partido=f"A vs B {i}") for i in range(4)], db_path=db_path)
+            picks = listar_picks(db_path=db_path)
+            for row in picks:
+                actualizar_resultado(row["id"], "loss", closing_odds=2.18, db_path=db_path)
+            penal = penalizaciones_historicas(db_path=db_path)
+
+        combo_key = "WNBA::totals"
+        self.assertIn(combo_key, penal["ligas_mercados"])
+        self.assertTrue(any("CLV" in reason for reason in penal["ligas_mercados"][combo_key]["reasons"]))
 
     def test_listar_picks_filtra_y_ordena_en_modo_premium(self):
         pick_stakazo = {
@@ -1416,6 +1529,77 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(data["total_recomendadas"], 1)
         self.assertEqual(data["mejores_apuestas"][0]["elite_tier"], "stakazo")
 
+    def test_apuestas_hoy_omite_eventos_mas_alla_de_72_horas(self):
+        import main
+
+        original_cuotas = main.cuotas
+        original_obtener_elos = main.obtener_elos
+        original_guardar_snapshot_cuotas = main.guardar_snapshot_cuotas
+        original_analizar_comparador_casas = main.analizar_comparador_casas
+
+        try:
+            main.cuotas = lambda mercados="todo", deporte="worldcup": [
+                {
+                    "id": "evt_near",
+                    "commence_time": "2026-07-18T20:00:00Z",
+                    "sport_key": "soccer_fifa_world_cup",
+                    "sport_label": "Futbol",
+                    "league_key": "fifa_world_cup",
+                    "league_label": "FIFA World Cup",
+                    "home_team": "Spain",
+                    "away_team": "France",
+                    "bookmakers": [],
+                },
+                {
+                    "id": "evt_far",
+                    "commence_time": "2026-08-17T20:00:00Z",
+                    "sport_key": "soccer_fifa_world_cup",
+                    "sport_label": "Futbol",
+                    "league_key": "fifa_world_cup",
+                    "league_label": "FIFA World Cup",
+                    "home_team": "Barcelona",
+                    "away_team": "Athletic",
+                    "bookmakers": [],
+                },
+            ]
+            main.obtener_elos = lambda: {}
+            main.guardar_snapshot_cuotas = lambda data: len(data)
+
+            def fake_analizar(partidos, *args, **kwargs):
+                return [
+                    {
+                        "stake": 2,
+                        "elite_pick": True,
+                        "elite_tier": "elite",
+                        "quality_score": 88,
+                        "reliability_score": 84,
+                        "puntuacion_confianza": 80,
+                        "valor_esperado": 0.05,
+                        "margen_cuota": 1.05,
+                        "partido": f"{partido['home_team']} vs {partido['away_team']}",
+                        "equipo": partido["home_team"],
+                        "casa": "Pinnacle",
+                        "mercado": "h2h",
+                        "recomendacion": "Value interesante",
+                        "motivo": "ok",
+                        "commence_time": partido["commence_time"],
+                    }
+                    for partido in partidos
+                ]
+
+            main.analizar_comparador_casas = fake_analizar
+            data = apuestas_hoy()
+        finally:
+            main.cuotas = original_cuotas
+            main.obtener_elos = original_obtener_elos
+            main.guardar_snapshot_cuotas = original_guardar_snapshot_cuotas
+            main.analizar_comparador_casas = original_analizar_comparador_casas
+
+        partidos = [pick["partido"] for pick in data["mejores_apuestas"]]
+        self.assertIn("España vs Francia", partidos)
+        self.assertNotIn("Barcelona vs Athletic", partidos)
+        self.assertEqual(data["snapshots_guardados"], 1)
+
     def test_apuestas_hoy_con_deporte_todo_agrega_deportes_base(self):
         import main
 
@@ -1578,6 +1762,14 @@ class BettingModelTests(unittest.TestCase):
                         "sample_closed": 8,
                     }
                 },
+                "ligas_mercados": {
+                    "FIFA World Cup::h2h": {
+                        "penalty_score": 6,
+                        "level": "moderada",
+                        "reasons": ["Racha CLV negativa reciente"],
+                        "sample_closed": 4,
+                    }
+                },
                 "tiers": {
                     "stakazo": {
                         "penalty_score": 8,
@@ -1619,7 +1811,8 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(pick["elite_tier"], "seguimiento")
         self.assertFalse(pick["elite_pick"])
         self.assertEqual(pick["historical_penalty_level"], "alta")
-        self.assertGreaterEqual(pick["historical_penalty_score"], 20)
+        self.assertGreaterEqual(pick["historical_penalty_score"], 26)
+        self.assertTrue(any("liga_mercado:FIFA World Cup::h2h" in reason for reason in pick["historical_penalty_reasons"]))
 
     def test_opciones_deporte_disponibles_mantiene_seleccion_dinamica(self):
         import main
@@ -2209,6 +2402,64 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(data["pronosticos"][0]["event_id"], "evt_2")
         self.assertEqual(data["pronosticos"][1]["event_id"], "evt_1")
 
+    def test_pronosticos_expone_resumen_ia_y_narrativa_si_openai_esta_activa(self):
+        import main
+
+        original_apuestas_hoy = main.apuestas_hoy
+        original_openai_available = main.openai_available
+        original_generate_publication_ai_summary = main.generate_publication_ai_summary
+        original_enrich_picks_with_ai_narratives = main.enrich_picks_with_ai_narratives
+
+        try:
+            main.apuestas_hoy = lambda **kwargs: {
+                "sport_label": "Baloncesto",
+                "league_label": "WNBA",
+                "criterio": "test",
+                "total_elite": 1,
+                "total_stakazos": 0,
+                "picks_elite": [{"event_id": "evt_1", "elite_tier": "elite"}],
+                "mejores_apuestas": [
+                    {
+                        "event_id": "evt_1",
+                        "commence_time": "2026-07-18T20:00:00Z",
+                        "mercado": "totals",
+                        "tipo_resultado": "over",
+                        "equipo": "Over 164.5",
+                        "equipo_es": "Mas de 164.5",
+                        "casa": "Pinnacle",
+                        "partido": "A vs B",
+                        "partido_es": "A vs B",
+                        "stake": 2.5,
+                        "valor_esperado": 0.05,
+                        "quality_score": 60,
+                        "confianza": "Media",
+                        "reliability_tier": "media",
+                        "reliability_score": 55,
+                        "elite_tier": "elite",
+                        "motivo_es": "Value",
+                    },
+                ],
+            }
+            main.openai_available = lambda: True
+            main.generate_publication_ai_summary = lambda picks, sport_label=None, league_label=None, solo_stakazos=False: "Resumen IA premium."
+            main.enrich_picks_with_ai_narratives = lambda picks: [
+                {**pick, "ai_narrative_es": "Lectura IA del pick.", "ai_advice_es": "Yo si le entraria con stake prudente."}
+                for pick in picks
+            ]
+
+            data = main.pronosticos(perfil="alto_riesgo", modo="pinnacle", deporte="todo")
+        finally:
+            main.apuestas_hoy = original_apuestas_hoy
+            main.openai_available = original_openai_available
+            main.generate_publication_ai_summary = original_generate_publication_ai_summary
+            main.enrich_picks_with_ai_narratives = original_enrich_picks_with_ai_narratives
+
+        self.assertTrue(data["ia_activa"])
+        self.assertEqual(data["ia_resumen"], "Resumen IA premium.")
+        self.assertEqual(data["pronosticos"][0]["ai_narrative_es"], "Lectura IA del pick.")
+        self.assertEqual(data["pronosticos"][0]["ai_advice_es"], "Yo si le entraria con stake prudente.")
+        self.assertIn("🧬 <b>Lectura IA:</b>", data["resumen_telegram"])
+
     def test_auto_publicar_telegram_once_respeta_configuracion(self):
         import main
 
@@ -2234,6 +2485,51 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(resultado["publication_type"], "auto")
         self.assertTrue(resultado["solo_stakazos"])
+
+    def test_auditoria_diaria_incluye_lectura_ia_si_openai_esta_activa(self):
+        import app.audit as audit_module
+
+        original_get_picks_for_date = audit_module.get_picks_for_date
+        original_dashboard_data = audit_module.dashboard_data
+        original_generate_calibration_snapshot = audit_module.generate_calibration_snapshot
+        original_openai_available = audit_module.openai_available
+        original_generate_audit_ai_brief = audit_module.generate_audit_ai_brief
+
+        class DummyCalibration:
+            total_picks_evaluated = 12
+            alerts = ["Alerta 1"]
+            model_adjustments = {"confidence_multipliers": {"model_general": 1.0}}
+
+        try:
+            audit_module.get_picks_for_date = lambda target_date, db_path=None: {
+                "date": "2026-07-17",
+                "recommended": 4,
+                "executed": 3,
+                "closed": 3,
+                "won": 2,
+                "lost": 1,
+                "total_staked": 12.0,
+                "total_profit": 3.5,
+                "roi_pct": 29.17,
+                "hitrate": 66.67,
+                "picks_list": {"recommended": [], "executed": [], "closed": []},
+            }
+            audit_module.dashboard_data = lambda db_path=None: {"resumen": {"roi": 8.0, "hit_rate": 54.0}}
+            audit_module.generate_calibration_snapshot = lambda: DummyCalibration()
+            audit_module.openai_available = lambda: True
+            audit_module.generate_audit_ai_brief = lambda report: "Lectura IA de la auditoria."
+
+            report = audit_module.generate_daily_audit_report()
+            text = audit_module.format_audit_report_telegram(report)
+        finally:
+            audit_module.get_picks_for_date = original_get_picks_for_date
+            audit_module.dashboard_data = original_dashboard_data
+            audit_module.generate_calibration_snapshot = original_generate_calibration_snapshot
+            audit_module.openai_available = original_openai_available
+            audit_module.generate_audit_ai_brief = original_generate_audit_ai_brief
+
+        self.assertEqual(report["ai_insights"], "Lectura IA de la auditoria.")
+        self.assertIn("🧬 LECTURA IA:", text)
 
     def test_opciones_deporte_disponibles_incluye_todo(self):
         opciones = opciones_deporte_disponibles(selected="futbol")
@@ -2857,6 +3153,120 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(over["sport_label"], "Baloncesto")
         self.assertEqual(over["modelo_mercado"], "Basket total baseline")
+
+    def test_basket_totals_wnba_usa_un_baseline_distinto(self):
+        prob_wnba, etiqueta_wnba = ajustar_probabilidad_por_mercado(
+            market_key="totals",
+            nombre="Over",
+            point=166.5,
+            description=None,
+            prob_mercado=0.50,
+            home="Liberty",
+            away="Aces",
+            elos={},
+            sport_key="basketball_wnba",
+        )
+        prob_nba, etiqueta_nba = ajustar_probabilidad_por_mercado(
+            market_key="totals",
+            nombre="Over",
+            point=166.5,
+            description=None,
+            prob_mercado=0.50,
+            home="Lakers",
+            away="Celtics",
+            elos={},
+            sport_key="basketball_nba",
+        )
+
+        self.assertEqual(etiqueta_wnba, "WNBA total baseline")
+        self.assertEqual(etiqueta_nba, "Basket total baseline")
+        self.assertLess(prob_wnba, prob_nba)
+
+    def test_calibration_generates_league_market_penalty_for_bad_wnba_totals(self):
+        bad_combo = SegmentMetrics(
+            segment_name="WNBA::totals",
+            segment_type="liga_mercado",
+            total_picks=16,
+            total_recommended=16,
+            picks_closed=16,
+            picks_won=5,
+            picks_lost=11,
+            picks_push=0,
+            total_staked=16.0,
+            total_profit=-5.2,
+            roi=-32.5,
+            hit_rate=31.25,
+            clv=-4.0,
+            clv_positive_count=4,
+            confidence_score=0.19,
+            last_pick_date="2026-07-16T12:00:00Z",
+            min_sample_warning=False,
+            trend="weak",
+            recommendation="penalizar",
+        )
+        solid_tier = SegmentMetrics(
+            segment_name="elite",
+            segment_type="tier",
+            total_picks=20,
+            total_recommended=20,
+            picks_closed=20,
+            picks_won=12,
+            picks_lost=8,
+            picks_push=0,
+            total_staked=20.0,
+            total_profit=2.0,
+            roi=10.0,
+            hit_rate=60.0,
+            clv=2.0,
+            clv_positive_count=12,
+            confidence_score=0.72,
+            last_pick_date="2026-07-16T12:00:00Z",
+            min_sample_warning=False,
+            trend="strong",
+            recommendation="confiable",
+        )
+
+        adjustments = _generate_model_adjustments(
+            {
+                "ligas": {},
+                "mercados": {},
+                "ligas_mercados": {"WNBA::totals": bad_combo},
+                "tiers": {"elite": solid_tier},
+                "casas": {},
+            }
+        )
+
+        self.assertGreater(adjustments["league_market_penalties"]["WNBA::totals"], 0)
+        self.assertGreater(adjustments["league_market_thresholds"]["WNBA::totals"], 0)
+
+    def test_calibration_metadata_includes_league_market_adjustments(self):
+        snapshot = CalibrationSnapshot(
+            timestamp="2026-07-17T10:00:00Z",
+            total_picks_evaluated=24,
+            segments_by_type={},
+            model_adjustments={
+                "league_penalties": {},
+                "market_thresholds": {"totals": 0.08},
+                "league_market_penalties": {"WNBA::totals": 0.22},
+                "league_market_thresholds": {"WNBA::totals": 0.18},
+                "tier_boosts": {},
+                "confidence_multipliers": {"model_general": 1.0},
+            },
+            alerts=[],
+        )
+
+        calibrated_scoring.clear_calibration_cache()
+        with patch("app.calibrated_scoring.generate_calibration_snapshot", return_value=snapshot):
+            metadata = calibrated_scoring.get_calibration_metadata(
+                {
+                    "league_label": "WNBA",
+                    "mercado": "totals",
+                    "elite_tier": "premium",
+                }
+            )
+
+        self.assertEqual(metadata["league_market_penalty_factor"], 0.78)
+        self.assertEqual(metadata["league_market_threshold_adjustment"], 0.18)
 
 
 if __name__ == "__main__":

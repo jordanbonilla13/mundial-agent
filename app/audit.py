@@ -20,6 +20,7 @@ from tracking import (
     dashboard_data,
     DB_PATH,
 )
+from app.ai_service import generate_audit_ai_brief, openai_available
 from app.calibration import generate_calibration_snapshot
 
 
@@ -152,7 +153,7 @@ def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_
         status = "🔴 ROJO"
         status_detail = "Día negativo. Verificar modelo."
     
-    return {
+    report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "date": day_data["date"],
         "status": status,
@@ -181,8 +182,14 @@ def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_
             "total_picks_evaluated": calibration.total_picks_evaluated,
             "model_confidence": round(calibration.model_adjustments.get("confidence_multipliers", {}).get("model_general", 1.0), 3),
         },
+        "ai_insights": None,
         "picks_detail": day_data["picks_list"],
     }
+
+    if openai_available():
+        report["ai_insights"] = generate_audit_ai_brief(report)
+
+    return report
 
 
 def format_audit_report_telegram(report: dict[str, Any]) -> str:
@@ -235,6 +242,10 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
             lines.append(f"  {alert}")
     else:
         lines.append("\n✅ Sin alertas críticas.")
+
+    if report.get("ai_insights"):
+        lines.append("\n🧬 LECTURA IA:")
+        lines.append(f"  {report['ai_insights']}")
     
     lines.append("\n" + "=" * 50)
     

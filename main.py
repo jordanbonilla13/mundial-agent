@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from app import providers as provider_layer
 from app import sports as sports_layer
+from app.ai_service import enrich_picks_with_ai_narratives, generate_publication_ai_summary, openai_available
 from app.audit import (
     generate_daily_audit_report,
     format_audit_report_telegram,
@@ -626,6 +627,14 @@ def publicar_pronosticos_telegram(
             pick_publicable = pick
         picks_publicables.append(pick_publicable)
 
+    picks_publicables = enrich_picks_with_ai_narratives(picks_publicables)
+    ai_summary = generate_publication_ai_summary(
+        picks_publicables,
+        sport_label=data.get("deporte"),
+        league_label=data.get("liga"),
+        solo_stakazos=solo_stakazos,
+    ) if openai_available() else None
+
     resumen = format_summary_message(
         sport_label=data.get("deporte"),
         league_label=data.get("liga"),
@@ -636,6 +645,7 @@ def publicar_pronosticos_telegram(
         total_messages=len(data.get("pronosticos", [])),
         solo_stakazos=solo_stakazos,
         fallback_a_elite=fallback_a_elite,
+        ai_summary=ai_summary,
     )
 
     mensajes = [resumen] + [formatear_mensaje_telegram_pick(pick) for pick in picks_publicables]
@@ -946,12 +956,18 @@ def limitar_picks_todo(recomendadas: list[dict], max_total: int = 6, operating_m
 def aplicar_penalizacion_historica(apuesta: dict, penalizaciones: dict[str, dict[str, Any]]) -> dict:
     apuesta = apuesta.copy()
     league_label = str(apuesta.get("league_label") or "")
+    market_label = str(apuesta.get("mercado") or "")
     elite_tier = str(apuesta.get("elite_tier") or "seguimiento")
     penalty_items = []
 
     liga_penalty = penalizaciones.get("ligas", {}).get(league_label)
     if liga_penalty:
         penalty_items.append(("liga", league_label, liga_penalty))
+
+    league_market_key = f"{league_label}::{market_label}"
+    league_market_penalty = penalizaciones.get("ligas_mercados", {}).get(league_market_key)
+    if league_market_penalty:
+        penalty_items.append(("liga_mercado", league_market_key, league_market_penalty))
 
     tier_penalty = penalizaciones.get("tiers", {}).get(elite_tier)
     if tier_penalty:
@@ -2803,6 +2819,13 @@ def pronosticos(
         if str(pick.get("elite_tier") or "").lower() == "stakazo"
     ]
     picks_telegram = seleccionar_picks_para_telegram(data, solo_stakazos=solo_stakazos)
+    picks_telegram = enrich_picks_with_ai_narratives(picks_telegram)
+    ai_summary = generate_publication_ai_summary(
+        picks_telegram,
+        sport_label=data.get("sport_label"),
+        league_label=data.get("league_label"),
+        solo_stakazos=solo_stakazos,
+    ) if openai_available() else None
 
     for pick in picks_telegram:
         mensajes.append(formatear_mensaje_telegram_pick(pick))
@@ -2816,6 +2839,7 @@ def pronosticos(
         total_stakazos=len(stakazos),
         total_messages=len(picks_telegram),
         solo_stakazos=solo_stakazos,
+        ai_summary=ai_summary,
     )
 
     return {
@@ -2823,6 +2847,8 @@ def pronosticos(
         "deporte": data.get("sport_label"),
         "liga": data.get("league_label"),
         "criterio": data.get("criterio"),
+        "ia_activa": openai_available(),
+        "ia_resumen": ai_summary,
         "resumen_telegram": resumen,
         "total_elite": data.get("total_elite", 0),
         "total_stakazos": len(stakazos),

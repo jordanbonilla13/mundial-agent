@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 
@@ -92,6 +93,45 @@ class ForecastEngine:
         self.single_sport_pick_limit = single_sport_pick_limit
         self.multi_sport_pick_limit = multi_sport_pick_limit
         self.apply_exposure_limits = apply_exposure_limits
+
+    @staticmethod
+    def _parse_commence_time(value: str | None) -> datetime | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+
+        try:
+            if text.endswith("Z"):
+                text = f"{text[:-1]}+00:00"
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    def _filter_events_by_publication_window(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        max_hours: int = 72,
+    ) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        filtered: list[dict[str, Any]] = []
+
+        for event in events:
+            commence = self._parse_commence_time(event.get("commence_time"))
+            if commence is None:
+                filtered.append(event)
+                continue
+
+            delta_hours = (commence - now).total_seconds() / 3600
+            if delta_hours <= max_hours:
+                filtered.append(event)
+
+        return filtered
 
     def run(self, request: ForecastRequest) -> dict[str, Any]:
         if (request.deporte or "").strip().lower() == "todo":
@@ -287,6 +327,7 @@ class ForecastEngine:
 
         mercados = ",".join(mercados_lista)
         data_completa = self.fetch_odds(mercados=mercados, deporte=deporte)
+        data_completa = self._filter_events_by_publication_window(data_completa, max_hours=72)
         partidos_select = self.list_matches(data_completa)
         snapshots_guardados = self.save_snapshots(data_completa)
         data = self.filter_matches(data_completa, request.partido)

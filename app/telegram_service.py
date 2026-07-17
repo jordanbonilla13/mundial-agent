@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html import escape
 from typing import Any, Callable
 
@@ -26,6 +27,52 @@ def telegram_tier_label(tier: str | None) -> str:
     }.get(tier_normalized, tier_normalized.upper() or "ELITE")
 
 
+def telegram_tier_icon(tier: str | None) -> str:
+    tier_normalized = str(tier or "").strip().lower()
+    return {
+        "stakazo": "🔥",
+        "elite": "⭐",
+        "premium": "💎",
+        "seguimiento": "📌",
+    }.get(tier_normalized, "📊")
+
+
+def parse_commence_time(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    try:
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+
+    return dt.astimezone(timezone.utc)
+
+
+def telegram_kickoff_label(value: Any) -> str | None:
+    commence = parse_commence_time(value)
+    if commence is None:
+        return None
+
+    now = datetime.now(timezone.utc)
+    delta_hours = (commence - now).total_seconds() / 3600
+    date_label = commence.strftime("%d/%m %H:%M UTC")
+
+    if delta_hours < 0:
+        return f"{date_label} | iniciado"
+    if delta_hours < 1:
+        return f"{date_label} | en menos de 1h"
+    if delta_hours < 24:
+        return f"{date_label} | en {int(round(delta_hours))}h"
+    return f"{date_label} | en {delta_hours / 24:.1f}d"
+
+
 def format_pick_message(
     pick: dict[str, Any],
     title_builder: Callable[[dict[str, Any]], str],
@@ -42,6 +89,7 @@ def format_pick_message(
     seleccion = pick.get("equipo_es") or pick.get("equipo")
     liga = pick.get("league_label") or pick.get("sport_label") or "General"
     tier = telegram_tier_label(pick.get("elite_tier"))
+    tier_icon = telegram_tier_icon(pick.get("elite_tier"))
     confianza = pick.get("confianza") or "Media"
     fiabilidad = pick.get("reliability_tier") or "media"
     fiabilidad_score = pick.get("reliability_score") or 0
@@ -49,25 +97,31 @@ def format_pick_message(
     tipo_label, tipo_valor = type_label_builder(pick)
     condicion = condition_builder(pick)
     motivo = pick.get("motivo_es") or pick.get("motivo") or "Sin detalle adicional."
+    kickoff = telegram_kickoff_label(pick.get("commence_time"))
     ajuste_historico = pick.get("historical_penalty_summary_es") or penalty_summary_builder(
         pick.get("historical_penalty_reasons")
     )
+    consejo_ia = pick.get("ai_advice_es")
+    lectura_ia = pick.get("ai_narrative_es")
 
     return (
-        f"<b>{telegram_text(tier)} | {telegram_text(liga)}</b>\n"
+        f"<b>{telegram_text(tier_icon)} {telegram_text(tier)} | {telegram_text(liga)}</b>\n"
         f"<b>{telegram_text(titulo)}</b>\n"
-        f"<b>Pick ID:</b> {telegram_text(pick.get('id') or '-')}\n"
-        f"<b>Partido:</b> {telegram_text(partido)}\n"
-        f"<b>Seleccion:</b> {telegram_text(seleccion)}\n"
-        f"<b>{telegram_text(tipo_label)}:</b> {telegram_text(tipo_valor)}\n"
-        f"<b>Cuota:</b> {telegram_text(cuota)}\n"
-        f"<b>Stake:</b> {telegram_text(stake)}/5"
+        f"🏟️ <b>Partido:</b> {telegram_text(partido)}\n"
+        f"🎯 <b>Seleccion:</b> {telegram_text(seleccion)}\n"
+        f"📌 <b>{telegram_text(tipo_label)}:</b> {telegram_text(tipo_valor)}\n"
+        + (f"🕒 <b>Empieza:</b> {telegram_text(kickoff)}\n" if kickoff else "")
+        + f"💸 <b>Cuota:</b> {telegram_text(cuota)}\n"
+        + f"💼 <b>Stake:</b> {telegram_text(stake)}/5"
         + (f" | <b>Importe:</b> {telegram_text(importe)} EUR\n" if importe is not None else "\n")
-        + f"<b>Value:</b> {valor:.1f}% | <b>Calidad:</b> {telegram_text(quality_score)}/100\n"
-        f"<b>Confianza:</b> {telegram_text(confianza)} | <b>Fiabilidad:</b> {telegram_text(fiabilidad)} ({telegram_text(fiabilidad_score)}/100)\n"
-        f"<b>Condicion:</b> {telegram_text(condicion)}\n"
-        f"<b>Motivo:</b> {telegram_text(motivo)}"
-        + (f"\n<b>Ajuste historico:</b> {telegram_text(ajuste_historico)}" if ajuste_historico else "")
+        + f"📈 <b>Value:</b> {valor:.1f}% | <b>Calidad:</b> {telegram_text(quality_score)}/100\n"
+        + f"🧠 <b>Confianza:</b> {telegram_text(confianza)} | <b>Fiabilidad:</b> {telegram_text(fiabilidad)} ({telegram_text(fiabilidad_score)}/100)\n"
+        + f"✅ <b>Condicion:</b> {telegram_text(condicion)}\n"
+        + f"📝 <b>Motivo:</b> {telegram_text(motivo)}"
+        + (f"\n🤖 <b>Consejo IA:</b> {telegram_text(consejo_ia)}" if consejo_ia else "")
+        + (f"\n🧬 <b>Lectura IA:</b> {telegram_text(lectura_ia)}" if lectura_ia else "")
+        + (f"\n⚠️ <b>Ajuste historico:</b> {telegram_text(ajuste_historico)}" if ajuste_historico else "")
+        + f"\n🆔 <b>Pick ID:</b> {telegram_text(pick.get('id') or '-')}"
     )
 
 
@@ -82,21 +136,23 @@ def format_summary_message(
     total_messages: int,
     solo_stakazos: bool,
     fallback_a_elite: bool = False,
+    ai_summary: str | None = None,
 ) -> str:
     filtro = "Solo stakazos" if solo_stakazos else "Top 3-5 mejores apuestas"
     footer = "Sin stakazos ahora: se publica seleccion elite." if fallback_a_elite else "Seleccion priorizada por calidad, value y fiabilidad."
 
     return (
-        f"<b>PREDI IA | INFORME PREMIUM</b>\n"
-        f"<b>Deporte:</b> {telegram_text(sport_label or 'General')}\n"
-        f"<b>Liga:</b> {telegram_text(league_label or 'General')}\n"
-        f"<b>Perfil:</b> {telegram_text(perfil_label)}\n"
-        f"<b>Modo:</b> {telegram_text(modo_label)}\n"
-        f"<b>Picks elite:</b> {telegram_text(total_elite)}\n"
-        f"<b>Stakazos:</b> {telegram_text(total_stakazos)}\n"
-        f"<b>Envios:</b> {telegram_text(total_messages)}\n"
-        f"<b>Filtro:</b> {telegram_text(filtro)}\n"
-        f"<b>Nota:</b> {telegram_text(footer)}"
+        f"<b>📊 PREDI IA | INFORME PREMIUM</b>\n"
+        f"🏅 <b>Deporte:</b> {telegram_text(sport_label or 'General')}\n"
+        f"🌍 <b>Liga:</b> {telegram_text(league_label or 'General')}\n"
+        f"⚙️ <b>Perfil:</b> {telegram_text(perfil_label)}\n"
+        f"🧭 <b>Modo:</b> {telegram_text(modo_label)}\n"
+        f"⭐ <b>Picks elite:</b> {telegram_text(total_elite)}\n"
+        f"🔥 <b>Stakazos:</b> {telegram_text(total_stakazos)}\n"
+        f"📨 <b>Envios:</b> {telegram_text(total_messages)}\n"
+        f"🎛️ <b>Filtro:</b> {telegram_text(filtro)}\n"
+        f"🛡️ <b>Nota:</b> {telegram_text(footer)}"
+        + (f"\n🧬 <b>Lectura IA:</b> {telegram_text(ai_summary)}" if ai_summary else "")
     )
 
 

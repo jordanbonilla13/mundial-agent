@@ -1665,9 +1665,85 @@ def _evaluar_penalizacion_historica(metricas: dict[str, Any]) -> dict[str, Any] 
     }
 
 
+def _recent_clv_streak_penalty(
+    rows: list[dict[str, Any]],
+    *,
+    min_streak: int = 3,
+) -> dict[str, Any] | None:
+    negatives: list[float] = []
+
+    for row in rows:
+        clv_raw = row.get("clv_pct")
+        if clv_raw is None:
+            continue
+        clv = float(clv_raw)
+        if clv < 0:
+            negatives.append(clv)
+            continue
+        break
+
+    streak = len(negatives)
+    if streak < min_streak:
+        return None
+
+    avg_negative = sum(negatives) / streak if negatives else 0.0
+    score = 0
+    reasons = []
+
+    if streak >= 5 and avg_negative <= -2.5:
+        score += 14
+        reasons.append("Racha CLV muy negativa reciente")
+    elif streak >= 4 and avg_negative <= -1.75:
+        score += 10
+        reasons.append("Racha CLV negativa reciente")
+    elif streak >= 3 and avg_negative <= -1.0:
+        score += 6
+        reasons.append("Inicio de deriva CLV reciente")
+
+    if score == 0:
+        return None
+
+    level = "alta" if score >= 14 else "media" if score >= 10 else "moderada"
+    return {
+        "penalty_score": score,
+        "level": level,
+        "reasons": reasons,
+        "streak_size": streak,
+        "streak_avg_clv": round(avg_negative, 2),
+    }
+
+
+def _build_league_market_key(league: str, market: str) -> str:
+    return f"{league}::{market}"
+
+
+def _penalizaciones_por_racha_clv(
+    *,
+    db_path: str = DB_PATH,
+) -> dict[str, dict[str, Any]]:
+    evaluaciones = listar_evaluaciones_picks(limit=5000, db_path=db_path)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+
+    for item in evaluaciones:
+        payload = json.loads(item.get("payload_json") or "{}")
+        league = str(payload.get("league_label") or item.get("league_label") or "sin_liga")
+        market = str(payload.get("mercado") or item.get("mercado") or "sin_mercado")
+        combo = _build_league_market_key(league, market)
+        grouped.setdefault(combo, []).append(item)
+
+    penalties: dict[str, Any] = {}
+    for combo, rows in grouped.items():
+        penalty = _recent_clv_streak_penalty(rows)
+        if penalty:
+            penalties[combo] = penalty
+
+    return penalties
+
+
 def penalizaciones_historicas(db_path: str = DB_PATH) -> dict[str, dict[str, Any]]:
     data = dashboard_data(db_path=db_path)
     ligas: dict[str, Any] = {}
+    ligas_mercados: dict[str, Any] = {}
     tiers: dict[str, Any] = {}
 
     for fila in data["por_liga"]:
@@ -1680,8 +1756,45 @@ def penalizaciones_historicas(db_path: str = DB_PATH) -> dict[str, dict[str, Any
         if evaluacion:
             tiers[str(fila["nombre"])] = evaluacion
 
+    # Construir penalizaciones por combinacion liga + mercado usando picks cerrados
+    with conectar(db_path) as conn:
+        rows = conn.execute("SELECT * FROM picks ORDER BY id DESC").fetchall()
+    picks = [dict(row) for row in rows]
+    grouped_combo: dict[str, list[dict[str, Any]]] = {}
+    for pick in picks:
+        league = str((_raw_pick(pick).get("league_label") or pick.get("league_label") or "sin_liga"))
+        market = str((_raw_pick(pick).get("mercado") or pick.get("mercado") or "sin_mercado"))
+        combo = _build_league_market_key(league, market)
+        grouped_combo.setdefault(combo, []).append(pick)
+
+    for combo, combo_picks in grouped_combo.items():
+        evaluacion = _evaluar_penalizacion_historica(_metricas_grupo(combo_picks))
+        if evaluacion:
+            ligas_mercados[combo] = evaluacion
+
+    # Sumar penalizaciones rapidas por racha de CLV reciente
+    for combo, drift_penalty in _penalizaciones_por_racha_clv(db_path=db_path).items():
+        base_penalty = ligas_mercados.get(combo)
+        if base_penalty is None:
+            ligas_mercados[combo] = drift_penalty
+            continue
+
+        merged_reasons = list(base_penalty.get("reasons", [])) + [
+            reason for reason in drift_penalty.get("reasons", []) if reason not in base_penalty.get("reasons", [])
+        ]
+        merged_score = int(base_penalty.get("penalty_score") or 0) + int(drift_penalty.get("penalty_score") or 0)
+        ligas_mercados[combo] = {
+            **base_penalty,
+            "penalty_score": merged_score,
+            "level": "alta" if merged_score >= 18 else "media" if merged_score >= 12 else "moderada",
+            "reasons": merged_reasons,
+            "clv_drift_streak": drift_penalty.get("streak_size"),
+            "clv_drift_avg": drift_penalty.get("streak_avg_clv"),
+        }
+
     return {
         "ligas": ligas,
+        "ligas_mercados": ligas_mercados,
         "tiers": tiers,
     }
 

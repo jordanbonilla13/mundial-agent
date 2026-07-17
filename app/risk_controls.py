@@ -140,6 +140,16 @@ def apply_risk_policy_to_pick(
         adjusted["risk_guard_blocked"] = True
         return adjusted
 
+    if bool(adjusted.get("market_guard_blocked")):
+        adjusted["stake"] = 0
+        adjusted["importe_sugerido"] = 0
+        adjusted["stake_pct_bankroll"] = 0
+        adjusted["kelly_fraccional"] = 0
+        adjusted["recomendacion"] = "No apostar"
+        adjusted["motivo"] = "Bloqueado por guard de mercado: falta confirmacion suficiente para este total de baloncesto."
+        adjusted["risk_guard_blocked"] = True
+        return adjusted
+
     if policy.get("only_elite_when_cautious") and not bool(adjusted.get("elite_pick")):
         adjusted["stake"] = 0
         adjusted["importe_sugerido"] = 0

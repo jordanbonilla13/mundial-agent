@@ -370,12 +370,23 @@ def ajustar_probabilidad_por_mercado(
 
             baseline = 221.5
             spread = 15.0
+            etiqueta = "Basket total baseline"
+
+            if "wnba" in sport_key:
+                baseline = 164.5
+                spread = 11.0
+                etiqueta = "WNBA total baseline"
+            elif any(tag in sport_key for tag in {"ncaab", "ncaa"}):
+                baseline = 146.5
+                spread = 10.5
+                etiqueta = "NCAA total baseline"
+
             prob_over = clamp(0.5 + ((baseline - float(point)) / spread), 0.08, 0.92)
 
             if nombre_norm == "over":
-                return mezclar(prob_over, 0.12, "Basket total baseline")
+                return mezclar(prob_over, 0.12, etiqueta)
             if nombre_norm == "under":
-                return mezclar(1 - prob_over, 0.12, "Basket total baseline")
+                return mezclar(1 - prob_over, 0.12, etiqueta)
 
     if market_key in {"totals", "alternate_totals", "totals_h1", "totals_h2"}:
         factor_tiempo = 0.46 if market_key == "totals_h1" else 0.54 if market_key == "totals_h2" else 1.0
