@@ -110,12 +110,74 @@ def build_pick_action_advice(pick: dict[str, Any]) -> str:
     if market_guard_level == "high":
         return "Yo la dejaria pasar salvo que aceptes mucho riesgo: el mercado no la confirma lo suficiente."
     if elite_tier == "stakazo" and quality >= 88 and reliability >= 84 and value_pct >= 5:
-        return "Yo si le entraria: es de las pocas que aceptaria con conviccion alta y stake disciplinado."
-    if elite_tier in {"elite", "premium"} and quality >= 78 and reliability >= 74 and value_pct >= 3.5:
-        return "Yo si le entraria, pero con stake contenido: tiene argumentos, aunque no es para sobreactuar."
-    if confidence == "alta" and quality >= 72 and reliability >= 70 and value_pct >= 2.5:
-        return "Yo solo le entraria con gestion prudente: hay valor, pero sin volverla una apuesta fuerte."
-    return "Yo iria con mucha cautela o directamente no la tocaria: la veo demasiado justa para forzar entrada."
+        return "Yo si le meteria: esta si me gusta de verdad y la veo para stake disciplinado."
+    if elite_tier in {"elite", "premium"} and quality >= 74 and reliability >= 70 and value_pct >= 2.6:
+        return "Yo si le meteria, pero con stake contenido: tiene argumentos serios y no me parece humo."
+    if confidence == "alta" and quality >= 70 and reliability >= 68 and value_pct >= 2.2:
+        return "Yo si le entraria con gestion prudente: me convence, aunque sin volverme loco con el stake."
+    if quality >= 66 and reliability >= 64 and value_pct >= 1.8 and historical_penalty_level not in {"media", "alta"}:
+        return "Yo la podria tocar con cautela: no es de mis favoritas, pero tampoco la descartaria."
+    return "Yo iria con cautela o la dejaria pasar: la veo demasiado justa para forzar entrada."
+
+
+def _is_positive_advice(advice: str) -> bool:
+    normalized = str(advice or "").lower()
+    return "yo si le meteria" in normalized or "yo si le entraria" in normalized
+
+
+def _promotion_candidate_score(pick: dict[str, Any]) -> tuple[float, float, float, float]:
+    return (
+        float(pick.get("stake") or 0),
+        float(pick.get("quality_score") or 0),
+        float(pick.get("reliability_score") or 0),
+        float(pick.get("valor_esperado") or 0),
+    )
+
+
+def _can_promote_pick(pick: dict[str, Any]) -> bool:
+    if float(pick.get("stake") or 0) <= 0:
+        return False
+    if bool(pick.get("market_guard_blocked")):
+        return False
+    if str(pick.get("market_guard_level") or "").lower() in {"block", "high"}:
+        return False
+    if str(pick.get("historical_penalty_level") or "").lower() == "alta":
+        return False
+    return (
+        float(pick.get("quality_score") or 0) >= 68
+        and float(pick.get("reliability_score") or 0) >= 66
+        and (float(pick.get("valor_esperado") or 0) * 100) >= 2.0
+    )
+
+
+def _promote_batch_advice(picks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not picks:
+        return picks
+
+    target_positive = 2 if len(picks) >= 3 else 1
+    positive_count = sum(1 for pick in picks if _is_positive_advice(pick.get("ai_advice_es")))
+    if positive_count >= target_positive:
+        return picks
+
+    eligible_indexes = [
+        index for index, pick in enumerate(picks)
+        if _can_promote_pick(pick) and not _is_positive_advice(pick.get("ai_advice_es"))
+    ]
+    eligible_indexes.sort(key=lambda index: _promotion_candidate_score(picks[index]), reverse=True)
+
+    promoted = list(picks)
+    for index in eligible_indexes:
+        if positive_count >= target_positive:
+            break
+        pick = promoted[index].copy()
+        if float(pick.get("stake") or 0) >= 2 and str(pick.get("elite_tier") or "").lower() in {"stakazo", "elite"}:
+            pick["ai_advice_es"] = "Yo si le meteria: de este envio es de las que mas me convence y si la tomaria."
+        else:
+            pick["ai_advice_es"] = "Yo si le entraria con stake prudente: la veo suficientemente buena para darle opcion."
+        promoted[index] = pick
+        positive_count += 1
+
+    return promoted
 
 
 def generate_pick_ai_narrative(pick: dict[str, Any]) -> str | None:
@@ -235,4 +297,4 @@ def enrich_picks_with_ai_narratives(picks: list[dict[str, Any]]) -> list[dict[st
         if openai_available() and index < _openai_telegram_picks_max():
             pick_copy["ai_narrative_es"] = generate_pick_ai_narrative(pick_copy)
         enriched.append(pick_copy)
-    return enriched
+    return _promote_batch_advice(enriched)

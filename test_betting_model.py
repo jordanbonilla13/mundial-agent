@@ -14,7 +14,7 @@ from betting_model import (
     normalizar_probabilidades,
     rescatar_casi_value,
 )
-from app.ai_service import build_pick_action_advice
+from app.ai_service import build_pick_action_advice, enrich_picks_with_ai_narratives
 from app.calibration import (
     CalibrationSnapshot,
     SegmentMetrics,
@@ -1162,6 +1162,48 @@ class BettingModelTests(unittest.TestCase):
         )
 
         self.assertIn("no le entraria", advice.lower())
+
+    def test_ai_batch_promotes_uno_o_dos_picks_buenos(self):
+        picks = enrich_picks_with_ai_narratives(
+            [
+                {
+                    "event_id": "a",
+                    "stake": 2.5,
+                    "elite_tier": "elite",
+                    "quality_score": 81,
+                    "reliability_score": 78,
+                    "valor_esperado": 0.034,
+                    "historical_penalty_level": "none",
+                    "market_guard_level": "medium",
+                },
+                {
+                    "event_id": "b",
+                    "stake": 2.0,
+                    "elite_tier": "premium",
+                    "quality_score": 74,
+                    "reliability_score": 71,
+                    "valor_esperado": 0.028,
+                    "historical_penalty_level": "none",
+                    "market_guard_level": "low",
+                },
+                {
+                    "event_id": "c",
+                    "stake": 1.0,
+                    "elite_tier": "seguimiento",
+                    "quality_score": 62,
+                    "reliability_score": 60,
+                    "valor_esperado": 0.012,
+                    "historical_penalty_level": "media",
+                    "market_guard_level": "low",
+                },
+            ]
+        )
+
+        positivos = [
+            pick for pick in picks
+            if "yo si le meteria" in pick["ai_advice_es"].lower() or "yo si le entraria" in pick["ai_advice_es"].lower()
+        ]
+        self.assertGreaterEqual(len(positivos), 2)
 
     def test_dashboard_data_calcula_metricas_quality_y_reliability(self):
         recomendacion = {
