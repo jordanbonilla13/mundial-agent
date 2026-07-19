@@ -16,12 +16,74 @@ from typing import Any
 from collections import defaultdict
 
 from tracking import (
+    _bool_pick_flag,
+    _pick_field,
     listar_picks,
     dashboard_data,
     DB_PATH,
 )
 from app.ai_service import generate_audit_ai_brief, openai_available
 from app.calibration import generate_calibration_snapshot
+
+
+def _published_model_metrics(
+    picks: list[dict[str, Any]],
+    *,
+    target_date: datetime,
+) -> dict[str, Any]:
+    published = [p for p in picks if _bool_pick_flag(p, "telegram_publicada", False)]
+    published_today = []
+
+    for pick in published:
+        try:
+            created_str = (
+                pick.get("created_at")
+                or pick.get("fecha_creacion")
+                or _pick_field(pick, "created_at", "")
+            )
+            if not created_str:
+                continue
+            created_date = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            if created_date.tzinfo is None:
+                created_date = created_date.replace(tzinfo=timezone.utc)
+            else:
+                created_date = created_date.astimezone(timezone.utc)
+            if created_date.date() == target_date.date():
+                published_today.append(pick)
+        except (ValueError, AttributeError):
+            continue
+
+    closed = [p for p in published if p.get("estado") == "cerrada"]
+    closed_today = [p for p in published_today if p.get("estado") == "cerrada"]
+
+    def _stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        staked = sum(float(p.get("importe_sugerido") or 0) for p in rows)
+        profit = sum(float(p.get("profit_loss") or 0) for p in rows)
+        won = sum(1 for p in rows if p.get("resultado") == "win")
+        lost = sum(1 for p in rows if p.get("resultado") == "loss")
+        push = sum(1 for p in rows if p.get("resultado") == "push")
+        return {
+            "published": len(rows),
+            "won": won,
+            "lost": lost,
+            "push": push,
+            "roi": round((profit / staked) * 100, 2) if staked > 0 else 0,
+            "profit": round(profit, 2),
+            "hit_rate": round((won / len(rows)) * 100, 2) if rows else 0,
+        }
+
+    return {
+        "today": {
+            "published": len(published_today),
+            "pending": sum(1 for p in published_today if p.get("estado") != "cerrada"),
+            **_stats(closed_today),
+        },
+        "all_time": {
+            "published": len(published),
+            "pending": sum(1 for p in published if p.get("estado") != "cerrada"),
+            **_stats(closed),
+        },
+    }
 
 
 def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[str, Any]:
@@ -41,21 +103,29 @@ def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[st
     picks_today = []
     for pick in all_picks:
         try:
-            created_str = pick.get("fecha_creacion", "")
+            created_str = (
+                pick.get("created_at")
+                or pick.get("fecha_creacion")
+                or _pick_field(pick, "created_at", "")
+            )
             if not created_str:
                 continue
             
-            # Parsear fecha (formato YYYY-MM-DD HH:MM:SS o similar)
             created_date = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+            if created_date.tzinfo is None:
+                created_date = created_date.replace(tzinfo=timezone.utc)
+            else:
+                created_date = created_date.astimezone(timezone.utc)
             if created_date.date() == target_date.date():
                 picks_today.append(pick)
         except (ValueError, AttributeError):
             continue
     
     # Clasificar
-    recommended = [p for p in picks_today if p.get("recomendado") in {True, 1, "1", "true"}]
-    executed = [p for p in picks_today if p.get("importe_sugerido") and float(p.get("importe_sugerido", 0)) > 0]
-    closed = [p for p in picks_today if p.get("estado") == "cerrada"]
+    recommended = [p for p in picks_today if _bool_pick_flag(p, "recommended_by_bot", True)]
+    executed = [p for p in picks_today if _bool_pick_flag(p, "apuesta_real", False)]
+    closed = [p for p in picks_today if p.get("estado") == "cerrada" and _bool_pick_flag(p, "apuesta_real", False)]
+    model_published = _published_model_metrics(all_picks, target_date=target_date)
     
     # Métricas
     total_staked = sum(float(p.get("importe_sugerido") or 0) for p in closed)
@@ -77,6 +147,7 @@ def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[st
         "total_profit": round(total_profit, 2),
         "roi_pct": round(roi_pct, 2),
         "hitrate": round(hitrate, 2),
+        "model_published": model_published,
         "picks_list": {
             "recommended": recommended,
             "executed": executed,
@@ -182,6 +253,7 @@ def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_
             "total_picks_evaluated": calibration.total_picks_evaluated,
             "model_confidence": round(calibration.model_adjustments.get("confidence_multipliers", {}).get("model_general", 1.0), 3),
         },
+        "model_portfolio": day_data["model_published"],
         "ai_insights": None,
         "picks_detail": day_data["picks_list"],
     }
@@ -234,6 +306,33 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
     lines.append("\n⚙️ MODELO:")
     lines.append(f"  Picks evaluadas: {report['calibration']['total_picks_evaluated']}")
     lines.append(f"  Confianza: {report['calibration']['model_confidence']:.1%}")
+
+    portfolio = report.get("model_portfolio") or {}
+    today_portfolio = portfolio.get("today") or {}
+    all_time_portfolio = portfolio.get("all_time") or {}
+    lines.append("\n🤖 PORTFOLIO PUBLICADO:")
+    lines.append(
+        "  Hoy: "
+        f"{today_portfolio.get('published', 0)} publicadas | "
+        f"{today_portfolio.get('pending', 0)} pendientes | "
+        f"{today_portfolio.get('won', 0)}W-{today_portfolio.get('lost', 0)}L-{today_portfolio.get('push', 0)}N"
+    )
+    lines.append(
+        "  Hoy ROI/Hit: "
+        f"{today_portfolio.get('roi', 0):+.2f}% | "
+        f"{today_portfolio.get('hit_rate', 0):.2f}%"
+    )
+    lines.append(
+        "  Global: "
+        f"{all_time_portfolio.get('published', 0)} publicadas | "
+        f"{all_time_portfolio.get('pending', 0)} pendientes | "
+        f"{all_time_portfolio.get('won', 0)}W-{all_time_portfolio.get('lost', 0)}L-{all_time_portfolio.get('push', 0)}N"
+    )
+    lines.append(
+        "  Global ROI/Hit: "
+        f"{all_time_portfolio.get('roi', 0):+.2f}% | "
+        f"{all_time_portfolio.get('hit_rate', 0):.2f}%"
+    )
     
     # Alertas
     if report['alerts']:

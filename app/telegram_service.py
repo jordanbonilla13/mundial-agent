@@ -233,31 +233,44 @@ class TelegramClient:
         self,
         update: dict[str, Any],
         action_handler: Callable[[int, str], str],
+        command_handler: Callable[[str], str] | None = None,
     ) -> None:
         callback = update.get("callback_query") or {}
         callback_id = callback.get("id")
         data = str(callback.get("data") or "").strip()
 
-        if not callback_id or not data.startswith("pick:"):
+        if callback_id and data.startswith("pick:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                self.answer_callback_query(callback_id, "Accion no valida.")
+                return
+
+            try:
+                pick_id = int(parts[1])
+            except ValueError:
+                self.answer_callback_query(callback_id, "Pick no valida.")
+                return
+
+            action = parts[2].strip().lower()
+            try:
+                mensaje = action_handler(pick_id, action)
+            except ValueError as exc:
+                mensaje = str(exc)
+            except HTTPException as exc:
+                mensaje = str(exc.detail)
+
+            self.answer_callback_query(callback_id, mensaje)
             return
 
-        parts = data.split(":")
-        if len(parts) != 3:
-            self.answer_callback_query(callback_id, "Accion no valida.")
+        if command_handler is None:
+            return
+
+        message = update.get("message") or {}
+        text = str(message.get("text") or "").strip()
+        if not text.startswith("/"):
             return
 
         try:
-            pick_id = int(parts[1])
-        except ValueError:
-            self.answer_callback_query(callback_id, "Pick no valida.")
+            command_handler(text)
+        except HTTPException:
             return
-
-        action = parts[2].strip().lower()
-        try:
-            mensaje = action_handler(pick_id, action)
-        except ValueError as exc:
-            mensaje = str(exc)
-        except HTTPException as exc:
-            mensaje = str(exc.detail)
-
-        self.answer_callback_query(callback_id, mensaje)

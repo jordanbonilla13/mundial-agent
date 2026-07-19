@@ -66,7 +66,7 @@ from betting_model import (
 )
 from elo import obtener_elos
 from tracking import _raw_pick, actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, actualizar_resultado, estadisticas, guardar_recomendaciones, listar_picks
-from tracking import guardar_apuesta_real, marcar_apuesta_real_pick, obtener_setting
+from tracking import guardar_apuesta_real, guardar_setting, marcar_apuesta_real_pick, obtener_setting
 from tracking import dashboard_data, guardar_snapshot_cuotas, aprendizaje, liquidar_picks_con_scores, listar_evaluaciones_picks, obtener_bankroll, penalizaciones_historicas
 from tracking import guardar_recomendaciones_unicas, inicializar_db, listar_publicaciones_telegram, registrar_publicacion_telegram
 from translations import (
@@ -538,9 +538,57 @@ def procesar_callback_pick(pick_id: int, action: str) -> str:
     return "Accion no soportada."
 
 
+def construir_resumen_telegram(force_refresh_scores: bool = True) -> tuple[str, dict[str, Any]]:
+    liquidation_result: dict[str, Any] | None = None
+
+    if force_refresh_scores:
+        try:
+            recent_scores = scores(days_from=3)
+            liquidation_result = liquidar_picks_con_scores(recent_scores)
+        except Exception as exc:
+            liquidation_result = {
+                "status": "error",
+                "error": str(exc),
+                "liquidados": 0,
+                "pendientes": 0,
+            }
+
+    report = generate_daily_audit_report()
+    report_text = format_audit_report_telegram(report)
+
+    if liquidation_result is not None:
+        if liquidation_result.get("status") == "error":
+            suffix = "\n\n♻️ Autoevaluacion: no pude refrescar marcadores ahora mismo."
+        else:
+            suffix = (
+                "\n\n♻️ Autoevaluacion:"
+                f" {int(liquidation_result.get('liquidados', 0) or 0)} pick(s) liquidadas,"
+                f" {int(liquidation_result.get('pendientes', 0) or 0)} pendientes."
+            )
+        report_text = f"{report_text}{suffix}"
+
+    return report_text, report
+
+
+def procesar_comando_telegram(command_text: str) -> str:
+    command = str(command_text or "").strip().lower()
+
+    if command.startswith("/resumen"):
+        token, chat_id = telegram_config()
+        client = telegram_client(token=token, chat_id=chat_id)
+        report_text, report = construir_resumen_telegram(force_refresh_scores=True)
+        client.send_message(report_text)
+        return (
+            f"Resumen enviado. ROI hoy: {report['metrics']['roi']:+.2f}% | "
+            f"Portfolio publicado: {report['model_portfolio']['all_time']['published']} picks."
+        )
+
+    return "Comando no soportado. Usa /resumen."
+
+
 def procesar_update_telegram(update: dict[str, Any], token: str) -> None:
     client = telegram_client(token=token, chat_id=os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID))
-    client.process_update(update, procesar_callback_pick)
+    client.process_update(update, procesar_callback_pick, procesar_comando_telegram)
 
 
 def telegram_updates_loop() -> None:
@@ -559,7 +607,7 @@ def telegram_updates_loop() -> None:
                 payload={
                     "timeout": 20,
                     "offset": offset + 1,
-                    "allowed_updates": ["callback_query"],
+                    "allowed_updates": ["callback_query", "message"],
                 },
                 token=token,
                 timeout=25,
@@ -748,13 +796,7 @@ def send_audit_report_telegram() -> dict[str, Any]:
         return {"error": "Telegram no configurado"}
     
     try:
-        # Generar reporte
-        report = generate_daily_audit_report()
-        
-        # Formatear para Telegram
-        report_text = format_audit_report_telegram(report)
-        
-        # Enviar por Telegram
+        report_text, report = construir_resumen_telegram(force_refresh_scores=True)
         config = TelegramBotConfig(token=token, chat_id=chat_id)
         client = TelegramClient(config)
         result = client.send_message(report_text)

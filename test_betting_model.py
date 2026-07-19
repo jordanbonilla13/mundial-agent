@@ -41,6 +41,7 @@ from main import (
     opciones_deporte_disponibles,
     partidos_disponibles,
     procesar_callback_pick,
+    procesar_comando_telegram,
     publicar_pronosticos_telegram,
     prioridad_pick,
     resolver_contexto_deporte,
@@ -2581,6 +2582,10 @@ class BettingModelTests(unittest.TestCase):
                 "total_profit": 3.5,
                 "roi_pct": 29.17,
                 "hitrate": 66.67,
+                "model_published": {
+                    "today": {"published": 2, "pending": 1, "won": 1, "lost": 0, "push": 0, "roi": 14.0, "profit": 1.4, "hit_rate": 100.0},
+                    "all_time": {"published": 8, "pending": 2, "won": 4, "lost": 2, "push": 0, "roi": 11.5, "profit": 4.6, "hit_rate": 66.67},
+                },
                 "picks_list": {"recommended": [], "executed": [], "closed": []},
             }
             audit_module.dashboard_data = lambda db_path=None: {"resumen": {"roi": 8.0, "hit_rate": 54.0}}
@@ -2599,6 +2604,122 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(report["ai_insights"], "Lectura IA de la auditoria.")
         self.assertIn("🧬 LECTURA IA:", text)
+
+        self.assertIn("PORTFOLIO PUBLICADO", text)
+        self.assertIn("8 publicadas", text)
+
+    def test_auditoria_diaria_cuenta_solo_picks_apostadas_y_cerradas(self):
+        import app.audit as audit_module
+        from datetime import datetime, timezone
+
+        recomendacion = {
+            "event_id": "audit_exec_1",
+            "commence_time": "2026-07-19T20:00:00Z",
+            "sport_key": "soccer_spain_la_liga",
+            "sport_label": "Futbol",
+            "league_key": "la_liga",
+            "league_label": "La Liga",
+            "partido": "A vs B",
+            "equipo": "A",
+            "tipo_resultado": "home",
+            "casa": "Pinnacle",
+            "mercado": "h2h",
+            "cuota_apuesta": 2.0,
+            "importe_sugerido": 5.0,
+            "stake": 1.0,
+            "recomendacion": "Value",
+            "motivo": "Test",
+            "recommended_by_bot": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "tracker.sqlite3")
+            pick = guardar_recomendaciones_unicas([recomendacion], db_path=db_path)[0]
+            marcar_apuesta_real_pick(pick["id"], db_path=db_path)
+            actualizar_resultado(pick["id"], "win", db_path=db_path)
+            report = audit_module.get_picks_for_date(datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc), db_path=db_path)
+
+        self.assertEqual(report["recommended"], 1)
+        self.assertEqual(report["executed"], 1)
+        self.assertEqual(report["closed"], 1)
+        self.assertEqual(report["won"], 1)
+        self.assertEqual(report["model_published"]["today"]["published"], 0)
+
+    def test_auditoria_diaria_modelo_cuenta_picks_publicadas_aunque_no_apostadas(self):
+        import app.audit as audit_module
+        from datetime import datetime, timezone
+
+        recomendacion = {
+            "event_id": "audit_pub_1",
+            "commence_time": "2026-07-19T20:00:00Z",
+            "sport_key": "basketball_wnba",
+            "sport_label": "Baloncesto",
+            "league_key": "wnba",
+            "league_label": "WNBA",
+            "partido": "Aces vs Liberty",
+            "equipo": "Under",
+            "tipo_resultado": "totals",
+            "casa": "Pinnacle",
+            "mercado": "totals",
+            "cuota_apuesta": 1.95,
+            "importe_sugerido": 5.0,
+            "stake": 1.0,
+            "recomendacion": "Value",
+            "motivo": "Test",
+            "recommended_by_bot": True,
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "tracker.sqlite3")
+            pick = guardar_recomendaciones_unicas([recomendacion], db_path=db_path)[0]
+            registrar_publicacion_telegram(
+                publication_type="manual",
+                payload={"deporte": "Baloncesto"},
+                items=[{"pick_id": pick["id"], "message_kind": "pick", "text": "Pick publicada", "telegram_message_id": 77}],
+                db_path=db_path,
+            )
+            actualizar_resultado(pick["id"], "loss", db_path=db_path)
+            report = audit_module.get_picks_for_date(datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc), db_path=db_path)
+
+        self.assertEqual(report["executed"], 0)
+        self.assertEqual(report["model_published"]["today"]["published"], 1)
+        self.assertEqual(report["model_published"]["today"]["lost"], 1)
+        self.assertEqual(report["model_published"]["all_time"]["pending"], 0)
+
+    def test_procesar_comando_resumen_envia_auditoria_por_telegram(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_construir_resumen = main.construir_resumen_telegram
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main.construir_resumen_telegram = lambda force_refresh_scores=True: (
+                "Resumen premium del modelo",
+                {
+                    "metrics": {"roi": 8.25},
+                    "model_portfolio": {"all_time": {"published": 12}},
+                },
+            )
+
+            response = procesar_comando_telegram("/resumen")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main.construir_resumen_telegram = original_construir_resumen
+
+        self.assertEqual(sent_messages, ["Resumen premium del modelo"])
+        self.assertIn("Resumen enviado", response)
+        self.assertIn("12 picks", response)
 
     def test_opciones_deporte_disponibles_incluye_todo(self):
         opciones = opciones_deporte_disponibles(selected="futbol")
