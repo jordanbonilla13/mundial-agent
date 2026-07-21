@@ -435,6 +435,67 @@ def fingerprint_pick(pick: dict[str, Any]) -> tuple[str, str, str, str, str]:
     )
 
 
+def _diversified_telegram_picks(
+    picks: list[dict[str, Any]],
+    *,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    by_sport: dict[str, list[dict[str, Any]]] = {}
+    sport_order: list[str] = []
+
+    for pick in picks:
+        sport = str(pick.get("sport_label") or "General").strip() or "General"
+        if sport not in by_sport:
+            by_sport[sport] = []
+            sport_order.append(sport)
+        by_sport[sport].append(pick)
+
+    per_sport_limit = 2 if len(by_sport) >= 3 else 3
+    selected: list[dict[str, Any]] = []
+    selected_keys: set[tuple[str, str, str, str, str]] = set()
+    used_per_sport: dict[str, int] = {sport: 0 for sport in by_sport}
+
+    # Primera pasada: dar una oportunidad a cada deporte con su mejor pick.
+    for sport in sport_order:
+        if len(selected) >= max_items:
+            break
+        for pick in by_sport.get(sport, []):
+            key = fingerprint_pick(pick)
+            if key in selected_keys:
+                continue
+            selected.append(pick)
+            selected_keys.add(key)
+            used_per_sport[sport] += 1
+            break
+
+    # Segunda pasada: completar por ranking sin dejar que un deporte monopolice el canal.
+    for sport in sport_order:
+        if len(selected) >= max_items:
+            break
+        for pick in by_sport.get(sport, [])[1:]:
+            if len(selected) >= max_items or used_per_sport[sport] >= per_sport_limit:
+                break
+            key = fingerprint_pick(pick)
+            if key in selected_keys:
+                continue
+            selected.append(pick)
+            selected_keys.add(key)
+            used_per_sport[sport] += 1
+
+    # Último relleno por si no había suficiente variedad real.
+    if len(selected) < max_items:
+        for pick in picks:
+            if len(selected) >= max_items:
+                break
+            key = fingerprint_pick(pick)
+            if key in selected_keys:
+                continue
+            selected.append(pick)
+            selected_keys.add(key)
+
+    return selected[:max_items]
+
+
 def seleccionar_picks_para_telegram(
     data: dict[str, Any],
     solo_stakazos: bool = False,
@@ -446,10 +507,20 @@ def seleccionar_picks_para_telegram(
     if solo_stakazos:
         return list(data.get("picks_elite", []))[:max_items]
 
+    base_picks = list(data.get("mejores_apuestas", []))
+    sport_labels = {
+        str(pick.get("sport_label") or "").strip().lower()
+        for pick in base_picks
+        if pick.get("sport_label")
+    }
+
+    if str(data.get("sport_label") or "").strip().lower() == "todo" or len(sport_labels) > 1:
+        return _diversified_telegram_picks(base_picks, max_items=max_items)
+
     seleccionados: list[dict[str, Any]] = []
     vistos: set[tuple[str, str, str, str, str]] = set()
 
-    for pick in data.get("mejores_apuestas", []):
+    for pick in base_picks:
         clave = fingerprint_pick(pick)
         if clave in vistos:
             continue
@@ -543,7 +614,7 @@ def construir_resumen_telegram(force_refresh_scores: bool = True) -> tuple[str, 
 
     if force_refresh_scores:
         try:
-            recent_scores = scores(days_from=3)
+            recent_scores = scores_for_pending_bot_picks(days_from=3)
             liquidation_result = liquidar_picks_con_scores(recent_scores)
         except Exception as exc:
             liquidation_result = {
@@ -584,6 +655,49 @@ def procesar_comando_telegram(command_text: str) -> str:
         )
 
     return "Comando no soportado. Usa /resumen."
+
+
+def _pending_bot_score_contexts() -> list[dict[str, Any]]:
+    picks = listar_picks(limit=500, estado="pendiente")
+    contexts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for pick in picks:
+        if not _bool_pick_flag(pick, "recommended_by_bot", True):
+            continue
+        if not _bool_pick_flag(pick, "auto_eval_eligible", True):
+            continue
+
+        raw = _raw_pick(pick)
+        sport_key = str(raw.get("sport_key") or pick.get("sport_key") or "").strip().lower()
+        if not sport_key or sport_key in seen:
+            continue
+
+        seen.add(sport_key)
+        contexts.append(resolver_contexto_deporte(sport_key))
+
+    if contexts:
+        return contexts
+
+    return [resolver_contexto_deporte(DEFAULT_SPORT)]
+
+
+def scores_for_pending_bot_picks(days_from: int = 3) -> list[dict[str, Any]]:
+    events_by_id: dict[str, dict[str, Any]] = {}
+
+    for contexto in _pending_bot_score_contexts():
+        deporte = str(contexto.get("catalog_key") or contexto.get("sport_key") or DEFAULT_SPORT)
+        try:
+            eventos = scores(days_from=days_from, deporte=deporte)
+        except Exception:
+            continue
+
+        for evento in eventos:
+            event_id = evento.get("id")
+            if event_id:
+                events_by_id[str(event_id)] = evento
+
+    return list(events_by_id.values())
 
 
 def procesar_update_telegram(update: dict[str, Any], token: str) -> None:
@@ -3308,7 +3422,7 @@ def api_audit_send_telegram_get():
 
 @app.post("/tracking/liquidar-auto")
 def tracking_liquidar_auto(days_from: int = 3):
-    marcadores = scores(days_from=days_from)
+    marcadores = scores_for_pending_bot_picks(days_from=days_from)
     return liquidar_picks_con_scores(marcadores)
 
 
