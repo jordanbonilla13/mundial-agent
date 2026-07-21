@@ -1,75 +1,177 @@
 # Mundial Agent
 
-Plataforma en Python/FastAPI para detectar, filtrar y seguir oportunidades de `value betting` en fútbol a partir de cuotas reales, señales ELO y gestión de stake controlada.
+Plataforma en `Python` + `FastAPI` para detectar, filtrar y seguir oportunidades de `value betting` en futbol a partir de cuotas reales, señales de mercado, ratings ELO y control de stake.
 
-El objetivo del proyecto no es "apostar más", sino tomar decisiones más disciplinadas, registrar resultados y medir si la ventaja existe de verdad.
+El objetivo del proyecto no es "apostar mas", sino tomar decisiones mas disciplinadas, registrar resultados y comprobar con datos si la ventaja existe de verdad.
 
-## Qué ofrece hoy
+## Que hace hoy
 
 - Ingesta de cuotas desde `The Odds API` como proveedor principal.
 - Soporte alternativo para `API-Football` y `SportsGameOdds`.
-- Comparación contra `Pinnacle` como referencia de mercado.
-- Modelo de probabilidad que combina mercado y ELO de forma conservadora.
-- Cálculo de valor esperado, cuota mínima aceptable y stake por perfil.
-- Tracking persistente de picks, resultados, ROI y `CLV`.
-- Dashboard HTML para revisión rápida.
-- Publicación opcional de picks en Telegram.
-- Narrativa premium con OpenAI para resúmenes y explicación de picks en Telegram.
+- Comparacion contra `Pinnacle` como referencia de mercado.
+- Modelo de probabilidad que mezcla señal de mercado, contexto deportivo y ELO.
+- Scoring de picks con filtros de riesgo, exposicion y ranking operativo.
+- Tracking persistente de picks, apuestas reales, bankroll, ROI y `CLV`.
+- Dashboard HTML y vistas operativas para revisar picks, resultados y aprendizaje.
+- Publicacion opcional de picks en Telegram con botones y registro historico.
+- Resumenes premium con OpenAI para picks y auditorias diarias.
+- Endpoints de calibracion y auditoria para medir calidad real del modelo.
 
-## Estado del proyecto
+## Estado actual
 
-La base funcional ya existe y resuelve un flujo real de análisis. La siguiente etapa es profesionalizar tres áreas:
+La base funcional ya existe y cubre un flujo real de analisis:
 
-1. Arquitectura: separar la app monolítica en capas más claras.
-2. Producto: mejorar UX, narrativa visual y coherencia del dashboard.
-3. Confianza: reforzar testing, observabilidad y trazabilidad del modelo.
+1. Descargar cuotas y resultados.
+2. Generar picks segun mercado, perfil y modo operativo.
+3. Guardar recomendaciones y apuestas ejecutadas.
+4. Liquidar resultados manual o automaticamente.
+5. Revisar metricas, aprendizaje, calibracion y auditoria.
+
+La app sigue teniendo bastante logica concentrada en [`main.py`](./main.py), pero ya se ha empezado a extraer funcionalidad a modulos mas claros en `app/`.
 
 ## Stack
 
 - `Python`
 - `FastAPI`
+- `Pydantic`
 - `SQLite` o `PostgreSQL`
 - `Requests`
 - `Uvicorn`
 
-## Estructura actual
+## Estructura real del proyecto
 
 ```text
 app/
-  __init__.py            Paquete base de la aplicacion
-  providers.py           Integraciones y adaptadores de proveedores
-  schemas.py             Modelos Pydantic compartidos
-  sports.py              Configuracion deportiva y helpers de contexto
-main.py                  API FastAPI, HTML y orquestación principal
-betting_model.py         Probabilidades, value, stake y scoring
-tracking.py              Persistencia, métricas y liquidación de picks
-elo.py                   Descarga y uso de ratings ELO
-translations.py          Etiquetas y traducciones para la UI
-form.py                  Lógica auxiliar de forma manual
-analyzer.py              Módulo experimental no integrado
-test_betting_model.py    Tests unitarios principales
-render.yaml              Despliegue en Render
-start-server.ps1         Arranque local en Windows
+  __init__.py              Paquete base
+  ai_service.py            Integracion con OpenAI para narrativas y resúmenes
+  audit.py                 Auditoria diaria del rendimiento publicado
+  calibrated_scoring.py    Ajustes de scoring apoyados en calibracion historica
+  calibration.py           Analisis de calibracion por liga, mercado, tier y casa
+  engine.py                ForecastEngine y request model del flujo principal
+  exposure.py              Limites de exposicion por evento, liga y mercado
+  forecasting.py           Ranking, execution score y enriquecimiento de picks
+  operating_mode.py        Modos operativos y limites de diversificacion
+  providers.py             Integraciones y adaptadores de proveedores
+  risk_controls.py         Politicas de riesgo y filtros aplicados a picks
+  schemas.py               Modelos Pydantic de la API
+  sports.py                Catalogo deportivo y helpers de contexto
+  telegram_service.py      Formateo y cliente de Telegram
+  ui.py                    CSS y helpers visuales del dashboard
+main.py                    API FastAPI, HTML y orquestacion principal
+betting_model.py           Probabilidades, value, stake, confianza y analisis
+tracking.py                Persistencia, metricas, liquidacion y dashboards
+elo.py                     Descarga y uso de ratings ELO
+translations.py            Etiquetas y traducciones para la UI
+form.py                    Logica auxiliar de forma manual
+analyzer.py                Modulo experimental no integrado
+test_betting_model.py      Suite principal de tests
+render.yaml                Despliegue en Render
+start-server.ps1           Arranque local en Windows
 ```
+
+## Componentes clave
+
+### 1. Motor de analisis
+
+El nucleo del analisis esta repartido entre:
+
+- [`betting_model.py`](./betting_model.py): probabilidad implicita, valor esperado, cuota minima, stake, confianza y seleccion de picks.
+- [`app/engine.py`](./app/engine.py): orquesta el flujo principal de forecasting.
+- [`app/forecasting.py`](./app/forecasting.py): execution score, ranking score y contexto operativo.
+- [`app/calibrated_scoring.py`](./app/calibrated_scoring.py): adapta scoring y penalizaciones usando rendimiento historico.
+
+### 2. Datos y proveedores
+
+- [`app/providers.py`](./app/providers.py): conecta con `The Odds API`, `API-Football` y `SportsGameOdds`.
+- [`app/sports.py`](./app/sports.py): resuelve el contexto del deporte, familias y mercados disponibles.
+- [`elo.py`](./elo.py): aporta señal ELO cuando el contexto lo soporta.
+
+### 3. Riesgo y disciplina operativa
+
+- [`app/risk_controls.py`](./app/risk_controls.py): aplica filtros por perfil y calidad del pick.
+- [`app/exposure.py`](./app/exposure.py): evita sobreexposicion por evento, liga o mercado.
+- [`app/operating_mode.py`](./app/operating_mode.py): controla limites de picks, agresividad y diversificacion.
+
+### 4. Tracking, aprendizaje y control de calidad
+
+- [`tracking.py`](./tracking.py): guarda picks, apuestas reales, bankroll, resultados, `CLV` y metricas.
+- [`app/calibration.py`](./app/calibration.py): mide calibracion real del modelo por segmentos.
+- [`app/audit.py`](./app/audit.py): genera auditorias diarias de picks publicados.
+
+### 5. Publicacion y narrativa
+
+- [`app/telegram_service.py`](./app/telegram_service.py): mensajes, resumenes y botones para Telegram.
+- [`app/ai_service.py`](./app/ai_service.py): narrativas y resumenes con OpenAI.
+- [`app/ui.py`](./app/ui.py): capa visual de la UI HTML.
 
 ## Endpoints principales
 
+### Salud y catalogo
+
 ```text
-GET  /
-GET  /status
-GET  /cuotas
-GET  /scores
-GET  /hoy
-GET  /informe-hoy
-GET  /pronosticos
-GET  /mis-apuestas
-GET  /dashboard
+GET /status
+GET /deportes-disponibles
+GET /sportsgameodds/leagues
+GET /sportsgameodds/eventos-debug
+```
+
+### Datos base
+
+```text
+GET /cuotas
+GET /scores
+GET /bankroll
+POST /bankroll
+POST /bankroll-form
+```
+
+### Analisis y picks
+
+```text
+GET /
+GET /hoy
+GET /informe-hoy
+GET /pronosticos
+GET /mejores-apuestas
+GET /mis-apuestas
+GET /dashboard
+```
+
+### Tracking y resultados
+
+```text
 GET  /tracking/picks
+POST /tracking/apuestas
+POST /tracking/registrar-apuesta-form
+POST /tracking/picks/{pick_id}/importe
+POST /tracking/picks/{pick_id}/cuota
+POST /tracking/picks/{pick_id}/resultado
+POST /tracking/liquidar-auto
 GET  /tracking/stats
 GET  /tracking/aprendizaje
+GET  /tracking/riesgo
 GET  /tracking/dashboard-data
-POST /tracking/liquidar-auto
-POST /tracking/picks/{pick_id}/resultado
+GET  /tracking/evaluaciones
+```
+
+### Calibracion y auditoria
+
+```text
+GET  /api/calibration
+GET  /api/calibration/report
+GET  /api/audit
+GET  /api/audit/report
+POST /api/audit/send-telegram
+GET  /api/audit/telegram
+```
+
+### Telegram
+
+```text
+GET /telegram/test
+GET /telegram/test-botones
+GET /telegram/enviar-pronosticos
+GET /telegram/publicaciones
 ```
 
 ## Puesta en marcha
@@ -82,7 +184,7 @@ python -m venv venv
 
 2. Activarlo en Windows:
 
-```bash
+```powershell
 venv\Scripts\activate
 ```
 
@@ -92,9 +194,9 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. Copiar configuración:
+4. Copiar la configuracion:
 
-```bash
+```powershell
 copy .env.example .env
 ```
 
@@ -104,7 +206,7 @@ copy .env.example .env
 uvicorn main:app --reload
 ```
 
-También puedes usar:
+Tambien puedes usar:
 
 ```powershell
 .\start-server.ps1
@@ -112,104 +214,141 @@ También puedes usar:
 
 ## Variables de entorno
 
-Configuración mínima:
+Configuracion minima:
 
 ```env
 ODDS_PROVIDER=the_odds_api
-ODDS_API_KEY=tu_api_key
+ODDS_API_KEY=tu_api_key_de_the_odds_api
 REFERENCE_BOOKMAKER=Pinnacle
 ```
 
-Configuración opcional para Telegram:
+Configuracion opcional para Telegram:
 
 ```env
-TELEGRAM_BOT_TOKEN=tu_token
-TELEGRAM_CHAT_ID=tu_chat_id
+TELEGRAM_BOT_TOKEN=tu_token_de_botfather
+TELEGRAM_CHAT_ID=tu_chat_id_o_id_del_canal
 TELEGRAM_AUTOPUBLISH_ENABLED=true
+TELEGRAM_AUTOPUBLISH_INTERVAL_HOURS=6
+TELEGRAM_AUTOPUBLISH_DEPORTE=todo
+TELEGRAM_AUTOPUBLISH_PERFIL=alto_riesgo
+TELEGRAM_AUTOPUBLISH_MODO=pinnacle
+TELEGRAM_AUTOPUBLISH_MERCADOS=todo
+TELEGRAM_AUTOPUBLISH_PARTIDO=todos
+TELEGRAM_AUTOPUBLISH_SOLO_STAKAZOS=true
 ```
 
-Configuración opcional para OpenAI:
+Configuracion opcional para OpenAI:
 
 ```env
 OPENAI_ENABLED=true
-OPENAI_API_KEY=tu_api_key
+OPENAI_API_KEY=tu_api_key_de_openai
 OPENAI_MODEL=gpt-5
 OPENAI_TIMEOUT_SECONDS=20
 OPENAI_TELEGRAM_PICKS_MAX=3
 ```
 
-La plantilla completa está en [.env.example](C:/mundial-agent/mundial-agent/.env.example:1).
+Configuracion opcional de proveedores alternativos:
+
+```env
+SPORTSGAMEODDS_API_KEY=tu_api_key_de_sportsgameodds
+SPORTSGAMEODDS_SPORT_ID=SOCCER
+SPORTSGAMEODDS_LEAGUE_ID=MLS
+SPORTSGAMEODDS_BOOKMAKERS=
+SPORTSGAMEODDS_MAX_EVENTS=25
+
+API_FOOTBALL_KEY=tu_api_key_de_api_football
+API_FOOTBALL_LEAGUE=1
+API_FOOTBALL_SEASON=2026
+API_FOOTBALL_MAX_PAGES=1
+```
+
+La plantilla completa esta en [.env.example](./.env.example).
 
 ## Flujo recomendado
 
-1. Revisar picks del día en `/informe-hoy`.
-2. Guardar recomendaciones cuando quieras trackearlas.
-3. Registrar solo las apuestas realmente ejecutadas.
-4. Liquidar resultados manual o automáticamente.
-5. Revisar `ROI`, `hit rate` y `CLV` en el dashboard.
+1. Revisar picks del dia en `/informe-hoy` o `/pronosticos`.
+2. Guardar recomendaciones solo cuando quieras trackearlas.
+3. Registrar aparte las apuestas realmente ejecutadas.
+4. Liquidar resultados manual o automaticamente con scores.
+5. Revisar `ROI`, `CLV`, aprendizaje, riesgo y calibracion.
+6. Auditar periodicamente lo publicado para comprobar consistencia real.
 
-## Modos de análisis
+## Modos de analisis
 
-- `comparador`: usa Pinnacle como referencia y busca mejores cuotas en otras casas.
-- `pinnacle`: analiza directamente la cuota de Pinnacle.
+- `comparador`: usa `Pinnacle` como referencia y busca mejor precio en otras casas.
+- `pinnacle`: analiza directamente la cuota de `Pinnacle`.
 
-El modo recomendado es `comparador`, porque refleja mejor un flujo real de captura de precio.
+En general, `comparador` es el modo mas cercano a un flujo real de captura de precio.
 
 ## Perfil de riesgo
 
-El sistema incluye perfiles de stake con filtros y exposición diferentes:
+El sistema incluye perfiles de stake con filtros y exposicion diferentes:
 
 - `conservador`
 - `moderado`
 - `agresivo`
 - `alto_riesgo`
 
-Esto permite separar claramente una estrategia disciplinada de una estrategia más especulativa.
+Esto permite separar una estrategia disciplinada de una mas especulativa.
+
+## Base de datos y persistencia
+
+Por defecto el proyecto trabaja con `SQLite` y deja trazabilidad de:
+
+- Picks recomendados
+- Apuestas reales ejecutadas
+- Cambios de importe y cuota
+- Resultados y liquidacion
+- Publicaciones en Telegram
+- Evaluaciones historicas
+- Bankroll y settings
+
+`tracking.py` tambien contiene compatibilidad para `PostgreSQL` en parte de la capa de persistencia.
 
 ## Despliegue
 
-El proyecto incluye [render.yaml](C:/mundial-agent/mundial-agent/render.yaml:1) para desplegarlo como servicio web en Render.
+El proyecto incluye [`render.yaml`](./render.yaml) para desplegarlo como servicio web en Render.
 
-Comando de arranque en producción:
+Comando de arranque en produccion:
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port $PORT
 ```
 
-## Riesgos y limitaciones actuales
+## Limitaciones actuales
 
-- La app está muy concentrada en [`main.py`](C:/mundial-agent/mundial-agent/main.py:1).
-- Parte de la UI HTML está acoplada a la lógica de negocio.
-- Hay mercados y deportes con soporte parcial según proveedor.
-- El proyecto tiene tests útiles, pero aún no cubre todas las rutas críticas.
-- `analyzer.py` sigue siendo un módulo experimental sin integrar.
+- Sigue habiendo demasiada responsabilidad acumulada en [`main.py`](./main.py).
+- La capa HTML continua acoplada a parte de la logica de presentacion y flujo.
+- Hay soporte desigual por deporte y mercado segun proveedor.
+- El repositorio tiene tests utiles, pero no cubre todas las rutas criticas.
+- `analyzer.py` continua siendo experimental y no forma parte del flujo principal.
 
-## Roadmap de profesionalización
+## Roadmap tecnico sugerido
 
 ### Fase 1
 
-- Corregir detalles de presentación, naming y consistencia.
-- Limpiar textos y mensajes visibles.
-- Reducir deuda de estructura en la capa API.
+- Seguir sacando rutas, helpers HTML y orquestacion fuera de `main.py`.
+- Alinear naming y contratos entre API, tracking y forecast engine.
+- Reducir duplicacion entre funciones historicas y modulos nuevos de `app/`.
 
 ### Fase 2
 
-- Separar `routes`, `services`, `providers`, `schemas` y `repositories`.
-- Extraer los adaptadores de Odds API, API-Football y SportsGameOdds.
-- Unificar validación y respuestas con modelos Pydantic.
+- Separar claramente `routes`, `services`, `providers`, `repositories` y `templates`.
+- Mover la persistencia de `tracking.py` a una capa mas aislada.
+- Unificar respuestas con modelos Pydantic donde hoy aun salen dicts libres.
 
 ### Fase 3
 
-- Mejorar el dashboard con una UI más sobria y más premium.
-- Añadir observabilidad, logging estructurado y health metrics.
-- Incorporar backtesting y reporting histórico más serio.
+- Mejorar observabilidad, logging estructurado y metricas operativas.
+- Añadir mas tests de integracion para flujos de picks, liquidacion y auditoria.
+- Reforzar calibracion y backtesting historico del modelo.
 
 ### Fase 4
 
-- Multiusuario, autenticación y configuración persistente.
-- Panel de administración y gestión avanzada de bankroll.
-- Evaluación del proyecto como producto SaaS especializado.
+- Multiusuario, autenticacion y configuracion persistente por cuenta.
+- Panel de administracion y gestion de bankroll mas avanzada.
+- Evolucionar hacia producto SaaS especializado si la validacion acompaña.
 
-## Próximo paso recomendado
+## Siguiente paso recomendado
 
-Si queremos subir realmente el nivel del repositorio, el siguiente paso más rentable es dividir [`main.py`](C:/mundial-agent/mundial-agent/main.py:1) por dominios y dejar la lógica de presentación fuera de la capa principal.
+La mejora tecnica mas rentable ahora mismo es dividir [`main.py`](./main.py) por dominios y mover la UI HTML a una capa mas separada del flujo de negocio.

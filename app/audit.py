@@ -19,6 +19,7 @@ from tracking import (
     _bool_pick_flag,
     _pick_field,
     listar_picks,
+    listar_publicaciones_telegram,
     dashboard_data,
     DB_PATH,
 )
@@ -63,7 +64,7 @@ def _published_model_metrics(
         lost = sum(1 for p in rows if p.get("resultado") == "loss")
         push = sum(1 for p in rows if p.get("resultado") == "push")
         return {
-            "published": len(rows),
+            "closed": len(rows),
             "won": won,
             "lost": lost,
             "push": push,
@@ -84,6 +85,50 @@ def _published_model_metrics(
             **_stats(closed),
         },
     }
+
+
+def _latest_publications(limit: int = 5) -> list[dict[str, Any]]:
+    publications = listar_publicaciones_telegram(limit=limit)
+    latest: list[dict[str, Any]] = []
+
+    for publication in publications:
+        summary = publication.get("resultado_resumen") or {}
+        pick_items = [item for item in publication.get("items", []) if item.get("message_kind") == "pick"]
+        picks_preview = []
+
+        for item in pick_items[:3]:
+            match_label = str(item.get("partido") or "Partido").strip()
+            team_label = str(item.get("equipo") or "Seleccion").strip()
+            result = str(item.get("resultado") or "").strip().lower()
+            state = str(item.get("estado") or "").strip().lower()
+            if result == "win":
+                outcome = "ganada"
+            elif result == "loss":
+                outcome = "perdida"
+            elif result == "push":
+                outcome = "nula"
+            elif state == "cerrada":
+                outcome = "cerrada"
+            else:
+                outcome = "pendiente"
+            picks_preview.append(f"{match_label} | {team_label} | {outcome}")
+
+        latest.append(
+            {
+                "id": publication.get("id"),
+                "created_at": publication.get("created_at"),
+                "sport_label": publication.get("sport_label") or "Deporte",
+                "league_label": publication.get("league_label") or "Liga",
+                "total_picks": len(pick_items),
+                "pending": int(summary.get("pendientes") or 0),
+                "won": int(summary.get("ganadas") or 0),
+                "lost": int(summary.get("perdidas") or 0),
+                "push": int(summary.get("nulas") or 0),
+                "picks_preview": picks_preview,
+            }
+        )
+
+    return latest
 
 
 def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[str, Any]:
@@ -254,6 +299,7 @@ def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_
             "model_confidence": round(calibration.model_adjustments.get("confidence_multipliers", {}).get("model_general", 1.0), 3),
         },
         "model_portfolio": day_data["model_published"],
+        "latest_publications": _latest_publications(),
         "ai_insights": None,
         "picks_detail": day_data["picks_list"],
     }
@@ -314,6 +360,7 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
     lines.append(
         "  Hoy: "
         f"{today_portfolio.get('published', 0)} publicadas | "
+        f"{today_portfolio.get('closed', 0)} cerradas | "
         f"{today_portfolio.get('pending', 0)} pendientes | "
         f"{today_portfolio.get('won', 0)}W-{today_portfolio.get('lost', 0)}L-{today_portfolio.get('push', 0)}N"
     )
@@ -325,6 +372,7 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
     lines.append(
         "  Global: "
         f"{all_time_portfolio.get('published', 0)} publicadas | "
+        f"{all_time_portfolio.get('closed', 0)} cerradas | "
         f"{all_time_portfolio.get('pending', 0)} pendientes | "
         f"{all_time_portfolio.get('won', 0)}W-{all_time_portfolio.get('lost', 0)}L-{all_time_portfolio.get('push', 0)}N"
     )
@@ -333,6 +381,20 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
         f"{all_time_portfolio.get('roi', 0):+.2f}% | "
         f"{all_time_portfolio.get('hit_rate', 0):.2f}%"
     )
+
+    latest_publications = report.get("latest_publications") or []
+    if latest_publications:
+        lines.append("\n🧾 ULTIMAS PUBLICACIONES:")
+        for publication in latest_publications:
+            lines.append(
+                "  "
+                f"#{publication.get('id')} {publication.get('sport_label')} / {publication.get('league_label')}: "
+                f"{publication.get('total_picks', 0)} picks | "
+                f"{publication.get('pending', 0)} pendientes | "
+                f"{publication.get('won', 0)}W-{publication.get('lost', 0)}L-{publication.get('push', 0)}N"
+            )
+            for preview in publication.get("picks_preview", []):
+                lines.append(f"    - {preview}")
     
     # Alertas
     if report['alerts']:
