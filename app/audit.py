@@ -323,40 +323,14 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
     lines.append(f"Status: {report['status']}")
     lines.append("=" * 50)
     
-    # Status detail
-    lines.append(f"\n{report['status_detail']}")
-    
-    # Picks del día
-    lines.append("\n📈 PICKS:")
-    lines.append(f"  Recomendadas: {report['picks']['recommended']}")
-    lines.append(f"  Ejecutadas: {report['picks']['executed']}")
-    lines.append(f"  Cerradas: {report['picks']['closed']}")
-    
-    if report['picks']['closed'] > 0:
-        lines.append(f"  ✅ Ganadas: {report['picks']['won']}")
-        lines.append(f"  ❌ Perdidas: {report['picks']['lost']}")
-    
-    # Métricas
-    lines.append("\n💰 RESULTADOS:")
-    lines.append(f"  Apostado: €{report['metrics']['staked']:.2f}")
-    lines.append(f"  Beneficio: €{report['metrics']['profit']:+.2f}")
-    lines.append(f"  ROI: {report['metrics']['roi']:+.2f}%")
-    lines.append(f"  Hit Rate: {report['metrics']['hitrate']:.2f}%")
-    
-    # Comparación histórica
-    lines.append("\n📊 vs HISTÓRICO:")
-    lines.append(f"  ROI: {report['vs_historical']['roi_delta']:+.2f}% (Hist: {report['vs_historical']['historical_roi']:.2f}%)")
-    lines.append(f"  Hit Rate: {report['vs_historical']['hitrate_delta']:+.2f}pp (Hist: {report['vs_historical']['historical_hitrate']:.2f}%)")
-    
-    # Calibración
-    lines.append("\n⚙️ MODELO:")
-    lines.append(f"  Picks evaluadas: {report['calibration']['total_picks_evaluated']}")
-    lines.append(f"  Confianza: {report['calibration']['model_confidence']:.1%}")
-
     portfolio = report.get("model_portfolio") or {}
     today_portfolio = portfolio.get("today") or {}
     all_time_portfolio = portfolio.get("all_time") or {}
-    lines.append("\n🤖 PORTFOLIO PUBLICADO:")
+
+    # Status detail
+    lines.append(f"\n{report['status_detail']}")
+
+    lines.append("\n🤖 PORTFOLIO PUBLICADO EN TELEGRAM:")
     lines.append(
         "  Hoy: "
         f"{today_portfolio.get('published', 0)} publicadas | "
@@ -381,6 +355,32 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
         f"{all_time_portfolio.get('roi', 0):+.2f}% | "
         f"{all_time_portfolio.get('hit_rate', 0):.2f}%"
     )
+
+    # Picks del día
+    lines.append("\n📈 APUESTAS REALES DEL DIA:")
+    lines.append(f"  Recomendadas por el modelo: {report['picks']['recommended']}")
+    lines.append(f"  Marcadas como ejecutadas: {report['picks']['executed']}")
+    lines.append(f"  Cerradas hoy: {report['picks']['closed']}")
+
+    if report['picks']['closed'] > 0:
+        lines.append(f"  ✅ Ganadas: {report['picks']['won']}")
+        lines.append(f"  ❌ Perdidas: {report['picks']['lost']}")
+        lines.append(f"  💰 Apostado: €{report['metrics']['staked']:.2f}")
+        lines.append(f"  Beneficio: €{report['metrics']['profit']:+.2f}")
+        lines.append(f"  ROI: {report['metrics']['roi']:+.2f}%")
+        lines.append(f"  Hit Rate: {report['metrics']['hitrate']:.2f}%")
+    else:
+        lines.append("  Sin apuestas reales cerradas hoy, por eso ROI/beneficio del dia salen a 0.")
+    
+    # Comparación histórica
+    lines.append("\n📊 vs HISTÓRICO:")
+    lines.append(f"  ROI: {report['vs_historical']['roi_delta']:+.2f}% (Hist: {report['vs_historical']['historical_roi']:.2f}%)")
+    lines.append(f"  Hit Rate: {report['vs_historical']['hitrate_delta']:+.2f}pp (Hist: {report['vs_historical']['historical_hitrate']:.2f}%)")
+    
+    # Calibración
+    lines.append("\n⚙️ MODELO:")
+    lines.append(f"  Picks evaluadas: {report['calibration']['total_picks_evaluated']}")
+    lines.append(f"  Confianza: {report['calibration']['model_confidence']:.1%}")
 
     latest_publications = report.get("latest_publications") or []
     if latest_publications:
