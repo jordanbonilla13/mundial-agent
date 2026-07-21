@@ -298,6 +298,62 @@ def median(values: list[float]) -> float | None:
     return (cleaned[half - 1] + cleaned[half]) / 2
 
 
+def is_tennis_doubles_match(home: str | None, away: str | None, sport_key: str | None = None) -> bool:
+    sport_key_norm = str(sport_key or "").lower()
+    if not sport_key_norm.startswith("tennis_"):
+        return False
+
+    home_text = str(home or "").lower()
+    away_text = str(away or "").lower()
+    doubles_markers = ("/", " & ", " and ")
+
+    return any(marker in home_text for marker in doubles_markers) or any(marker in away_text for marker in doubles_markers)
+
+
+def tennis_context_profile(sport_key: str | None) -> dict[str, float | str]:
+    key = str(sport_key or "").lower()
+    profile: dict[str, float | str] = {
+        "surface": "unknown",
+        "speed": "medium",
+        "favorite_bias": 0.0,
+        "underdog_penalty": 0.0,
+        "variance_penalty": 0.0,
+    }
+
+    if any(tag in key for tag in {"wimbledon", "grass", "mallorca", "halle", "eastbourne", "segovia"}):
+        profile.update({
+            "surface": "fast",
+            "speed": "fast",
+            "favorite_bias": 0.014,
+            "underdog_penalty": 0.009,
+        })
+    elif any(tag in key for tag in {"us_open", "australian_open", "hard", "indoor"}):
+        profile.update({
+            "surface": "hard",
+            "speed": "medium_fast",
+            "favorite_bias": 0.010,
+            "underdog_penalty": 0.006,
+        })
+    elif any(tag in key for tag in {"roland_garros", "french_open", "clay", "estoril", "kitzbuhel", "tampere"}):
+        profile.update({
+            "surface": "clay",
+            "speed": "slow",
+            "favorite_bias": 0.006,
+            "underdog_penalty": 0.003,
+        })
+
+    if any(tag in key for tag in {"segovia", "kitzbuhel", "altitude"}):
+        profile["favorite_bias"] = float(profile["favorite_bias"]) + 0.006
+        profile["underdog_penalty"] = float(profile["underdog_penalty"]) + 0.004
+
+    if "challenger" in key:
+        profile["variance_penalty"] = 0.004
+    elif any(tag in key for tag in {"itf", "m15", "m25"}):
+        profile["variance_penalty"] = 0.007
+
+    return profile
+
+
 def poisson_cdf(k: int, media: float) -> float:
     if k < 0:
         return 0
@@ -340,16 +396,25 @@ def ajustar_probabilidad_por_mercado(
         return clamp(prob, 0.01, 0.99), etiqueta
 
     if sport_key.startswith("tennis_") and market_key == "h2h":
+        profile = tennis_context_profile(sport_key)
+        favorite_bias = float(profile["favorite_bias"] or 0)
+        underdog_penalty = float(profile["underdog_penalty"] or 0)
+        variance_penalty = float(profile["variance_penalty"] or 0)
         ajuste = 0.0
 
-        if prob_mercado >= 0.72:
-            ajuste = 0.02
-        elif prob_mercado >= 0.60:
-            ajuste = 0.012
-        elif prob_mercado <= 0.38:
-            ajuste = -0.015
+        if prob_mercado >= 0.74:
+            ajuste = 0.022 + favorite_bias - variance_penalty
+        elif prob_mercado >= 0.64:
+            ajuste = 0.014 + favorite_bias - variance_penalty
+        elif prob_mercado >= 0.56:
+            ajuste = 0.008 + (favorite_bias * 0.6) - variance_penalty
+        elif prob_mercado <= 0.34:
+            ajuste = -(0.014 + underdog_penalty + variance_penalty)
+        elif prob_mercado <= 0.42:
+            ajuste = -(0.008 + (underdog_penalty * 0.8) + variance_penalty)
 
-        return clamp(prob_mercado + ajuste, 0.01, 0.99), "Tenis moneyline conservador"
+        etiqueta = f"Tenis singles {profile['surface']} conservador"
+        return clamp(prob_mercado + ajuste, 0.01, 0.99), etiqueta
 
     if sport_key.startswith("basketball_"):
         if market_key == "h2h":
@@ -825,11 +890,11 @@ def decidir_stake(
         if valor < max(perfil_stake["min_valor_esperado"], 0.03):
             return 0, 0, 0, "No apostar", "Sin ELO solo aceptamos value claramente positivo"
     elif source_strength == "tennis_model":
-        if cuota > 2.60:
+        if cuota > 2.85:
             return 0, 0, 0, "No apostar", "En tenis solo buscamos favoritos o cuotas medias muy justificadas"
-        if margen_cuota < max(perfil_stake["min_margen_cuota"], 1.025):
+        if margen_cuota < max(perfil_stake["min_margen_cuota"], 1.018):
             return 0, 0, 0, "No apostar", "En tenis exigimos margen claro frente al precio de mercado"
-        if valor < max(perfil_stake["min_valor_esperado"], 0.02):
+        if valor < max(perfil_stake["min_valor_esperado"], 0.015):
             return 0, 0, 0, "No apostar", "En tenis exigimos value positivo y estable"
     elif source_strength == "basketball_model":
         if cuota > 2.80:
@@ -1391,6 +1456,8 @@ def analizar_comparador_casas(
 
         if not home or not away:
             continue
+        if is_tennis_doubles_match(home, away, partido.get("sport_key")):
+            continue
 
         for market_key in mercados:
             modelo_referencia = construir_modelo_referencia_generico(
@@ -1594,6 +1661,8 @@ def analizar_partidos(
         away = partido.get("away_team")
 
         if not home or not away:
+            continue
+        if is_tennis_doubles_match(home, away, partido.get("sport_key")):
             continue
 
         for bookmaker in partido.get("bookmakers", []):
