@@ -2,6 +2,15 @@ import os
 from typing import Any, Callable
 
 
+def _csv_env(name: str) -> set[str]:
+    raw = os.getenv(name, "")
+    return {
+        item.strip().lower()
+        for item in raw.split(",")
+        if item and item.strip()
+    }
+
+
 def _float_env(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
@@ -31,6 +40,8 @@ def build_performance_guard(
     min_roi = _float_env("PERF_GUARD_MIN_ROI", -2.0)
     min_hit_rate = _float_env("PERF_GUARD_MIN_HIT_RATE", 42.0)
     min_clv_positive_pct = _float_env("PERF_GUARD_MIN_CLV_POSITIVE_PCT", 45.0)
+    allowed_sports = _csv_env("PERF_GUARD_ALLOW_SPORTS")
+    allowed_leagues = _csv_env("PERF_GUARD_ALLOW_LEAGUES")
 
     blocked_sports: dict[str, dict[str, Any]] = {}
     blocked_leagues: dict[str, dict[str, Any]] = {}
@@ -70,9 +81,29 @@ def build_performance_guard(
     _evaluate_bucket(dashboard.get("por_deporte") or [], blocked_sports)
     _evaluate_bucket(dashboard.get("por_liga") or [], blocked_leagues)
 
+    unblocked_sports = [
+        key for key in list(blocked_sports)
+        if key.strip().lower() in allowed_sports
+    ]
+    for key in unblocked_sports:
+        blocked_sports.pop(key, None)
+
+    unblocked_leagues = [
+        key for key in list(blocked_leagues)
+        if key.strip().lower() in allowed_leagues
+    ]
+    for key in unblocked_leagues:
+        blocked_leagues.pop(key, None)
+
     return {
         "blocked_sports": blocked_sports,
         "blocked_leagues": blocked_leagues,
+        "overrides": {
+            "allowed_sports": sorted(allowed_sports),
+            "allowed_leagues": sorted(allowed_leagues),
+            "unblocked_sports": unblocked_sports,
+            "unblocked_leagues": unblocked_leagues,
+        },
         "thresholds": {
             "min_sample": min_sample,
             "min_roi": min_roi,

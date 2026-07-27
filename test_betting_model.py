@@ -3584,6 +3584,44 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(adjusted["stake"], 0)
         self.assertEqual(adjusted["recomendacion"], "No apostar")
 
+
+    def test_build_performance_guard_permita_baloncesto_por_override(self):
+        with patch.dict(os.environ, {"PERF_GUARD_ALLOW_SPORTS": "Baloncesto"}, clear=False):
+            guard = build_performance_guard(
+                load_dashboard=lambda: {
+                    "por_deporte": [
+                        {
+                            "nombre": "Baloncesto",
+                            "cerradas": 20,
+                            "roi": -12.0,
+                            "hit_rate": 31.0,
+                            "clv_positivo_pct": 28.0,
+                        }
+                    ],
+                    "por_liga": [],
+                }
+            )
+
+        adjusted = apply_performance_guard_to_pick(
+            {
+                "league_label": "WNBA",
+                "sport_label": "Baloncesto",
+                "stake": 2,
+                "importe_sugerido": 5,
+                "stake_pct_bankroll": 1.5,
+                "kelly_fraccional": 0.01,
+                "recomendacion": "Value",
+                "motivo": "test",
+            },
+            guard,
+        )
+
+        self.assertNotIn("Baloncesto", guard["blocked_sports"])
+        self.assertIn("baloncesto", guard["overrides"]["allowed_sports"])
+        self.assertIn("Baloncesto", guard["overrides"]["unblocked_sports"])
+        self.assertFalse(adjusted["performance_guard_blocked"])
+        self.assertEqual(adjusted["stake"], 2)
+
     def test_build_lab_run_resume_decision_y_bloqueos(self):
         result = build_lab_run(
             runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
