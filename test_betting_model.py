@@ -22,7 +22,12 @@ from app.calibration import (
 )
 import app.calibrated_scoring as calibrated_scoring
 from app.forecasting import apply_market_regime_guard
+from app.lab_service import build_lab_run
+from app.performance_guard_service import apply_performance_guard_to_pick, build_performance_guard
+from app.publication_service import publish_telegram_predictions
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
+from app.runtime_settings import RuntimeSettings
+from app.safety_service import publication_guard_state
 from app.operating_mode import multi_sport_pick_limit, single_sport_pick_limit, telegram_pick_limit
 from app.exposure import apply_exposure_limits
 from tracking import actualizar_resultado, estadisticas, guardar_recomendaciones
@@ -2280,6 +2285,8 @@ class BettingModelTests(unittest.TestCase):
         original_enviar = main.enviar_mensaje_telegram
         original_guardar = main.guardar_recomendaciones_unicas
         original_registrar = main.registrar_publicacion_telegram
+        original_runtime_settings = main.RUNTIME_SETTINGS
+        original_publication_guard_state = main.publication_guard_state
         original_token = main.TELEGRAM_BOT_TOKEN
         original_chat_id = main.TELEGRAM_CHAT_ID
         sent_texts = []
@@ -2287,6 +2294,12 @@ class BettingModelTests(unittest.TestCase):
         try:
             main.TELEGRAM_BOT_TOKEN = "token_test"
             main.TELEGRAM_CHAT_ID = "chat_test"
+            main.RUNTIME_SETTINGS = RuntimeSettings(environment="production", shadow_mode=False)
+            main.publication_guard_state = lambda **kwargs: {
+                "allow_live_publication": True,
+                "mode": "live",
+                "reasons": [],
+            }
             main.pronosticos = lambda **kwargs: {
                 "deporte": "Futbol",
                 "liga": "La Liga",
@@ -2321,6 +2334,8 @@ class BettingModelTests(unittest.TestCase):
             main.enviar_mensaje_telegram = original_enviar
             main.guardar_recomendaciones_unicas = original_guardar
             main.registrar_publicacion_telegram = original_registrar
+            main.RUNTIME_SETTINGS = original_runtime_settings
+            main.publication_guard_state = original_publication_guard_state
             main.TELEGRAM_BOT_TOKEN = original_token
             main.TELEGRAM_CHAT_ID = original_chat_id
 
@@ -2336,6 +2351,8 @@ class BettingModelTests(unittest.TestCase):
         original_enviar = main.enviar_mensaje_telegram
         original_guardar = main.guardar_recomendaciones_unicas
         original_registrar = main.registrar_publicacion_telegram
+        original_runtime_settings = main.RUNTIME_SETTINGS
+        original_publication_guard_state = main.publication_guard_state
         original_token = main.TELEGRAM_BOT_TOKEN
         original_chat_id = main.TELEGRAM_CHAT_ID
         llamadas = []
@@ -2373,6 +2390,12 @@ class BettingModelTests(unittest.TestCase):
         try:
             main.TELEGRAM_BOT_TOKEN = "token_test"
             main.TELEGRAM_CHAT_ID = "chat_test"
+            main.RUNTIME_SETTINGS = RuntimeSettings(environment="production", shadow_mode=False)
+            main.publication_guard_state = lambda **kwargs: {
+                "allow_live_publication": True,
+                "mode": "live",
+                "reasons": [],
+            }
             main.pronosticos = fake_pronosticos
             main.enviar_mensaje_telegram = lambda texto, token=None, chat_id=None, reply_markup=None: {"ok": True, "result": {"message_id": 1}}
             main.guardar_recomendaciones_unicas = lambda recomendaciones: [{"id": 88, **recomendaciones[0]}]
@@ -2384,6 +2407,8 @@ class BettingModelTests(unittest.TestCase):
             main.enviar_mensaje_telegram = original_enviar
             main.guardar_recomendaciones_unicas = original_guardar
             main.registrar_publicacion_telegram = original_registrar
+            main.RUNTIME_SETTINGS = original_runtime_settings
+            main.publication_guard_state = original_publication_guard_state
             main.TELEGRAM_BOT_TOKEN = original_token
             main.TELEGRAM_CHAT_ID = original_chat_id
 
@@ -2637,7 +2662,7 @@ class BettingModelTests(unittest.TestCase):
             pick = guardar_recomendaciones_unicas([recomendacion], db_path=db_path)[0]
             marcar_apuesta_real_pick(pick["id"], db_path=db_path)
             actualizar_resultado(pick["id"], "win", db_path=db_path)
-            report = audit_module.get_picks_for_date(datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc), db_path=db_path)
+            report = audit_module.get_picks_for_date(datetime.now(timezone.utc), db_path=db_path)
 
         self.assertEqual(report["recommended"], 1)
         self.assertEqual(report["executed"], 1)
@@ -2679,7 +2704,7 @@ class BettingModelTests(unittest.TestCase):
                 db_path=db_path,
             )
             actualizar_resultado(pick["id"], "loss", db_path=db_path)
-            report = audit_module.get_picks_for_date(datetime(2026, 7, 19, 12, 0, tzinfo=timezone.utc), db_path=db_path)
+            report = audit_module.get_picks_for_date(datetime.now(timezone.utc), db_path=db_path)
 
         self.assertEqual(report["executed"], 0)
         self.assertEqual(report["model_published"]["today"]["published"], 1)
@@ -3290,7 +3315,7 @@ class BettingModelTests(unittest.TestCase):
         favorita = next(r for r in recomendaciones if r["equipo"] == "Player A")
 
         self.assertEqual(favorita["sport_label"], "Tenis")
-        self.assertEqual(favorita["modelo_mercado"], "Tenis moneyline conservador")
+        self.assertEqual(favorita["modelo_mercado"], "Tenis singles fast conservador")
 
     def test_basket_totals_modelo_conservador_reconoce_el_deporte(self):
         partidos = [
@@ -3457,6 +3482,192 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(metadata["league_market_penalty_factor"], 0.78)
         self.assertEqual(metadata["league_market_threshold_adjustment"], 0.18)
+
+    def test_publication_guard_en_shadow_mode_bloquea_publicacion_real(self):
+        guard = publication_guard_state(
+            runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
+            load_stats=lambda: {"picks_cerrados": 999, "roi": 12.0, "hit_rate": 60.0, "clv_medio": 1.4},
+            load_learning=lambda: {"porcentaje_clv_positivo": 66.0, "picks_evaluadas": 150, "picks_con_clv": 120},
+        )
+
+        self.assertFalse(guard["allow_live_publication"])
+        self.assertEqual(guard["mode"], "shadow")
+        self.assertIn("shadow_mode_activo", guard["reasons"])
+
+    def test_publish_telegram_predictions_shadow_mode_registra_preview(self):
+        sent_messages: list[dict] = []
+        publications: list[dict] = []
+
+        result = publish_telegram_predictions(
+            runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
+            publication_guard=lambda: {"allow_live_publication": False, "mode": "shadow", "reasons": ["shadow_mode_activo"]},
+            pronosticos_fn=lambda **kwargs: {
+                "pronosticos": [
+                    {
+                        "event_id": "evt_shadow",
+                        "mercado": "h2h",
+                        "tipo_resultado": "home",
+                        "equipo": "Spain",
+                        "casa": "Pinnacle",
+                        "id": 7,
+                    }
+                ],
+                "total_elite": 1,
+                "total_stakazos": 0,
+                "deporte": "Futbol",
+                "liga": "La Liga",
+            },
+            save_unique_recommendations=lambda picks: [{"id": 7, **picks[0]}],
+            read_raw_pick=lambda pick: {},
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            ai_available=lambda: False,
+            format_summary=lambda **kwargs: "Resumen",
+            format_pick_message=lambda pick: f"Pick {pick['equipo']}",
+            telegram_keyboard_for_pick=lambda pick_id: {"inline_keyboard": []},
+            send_message=lambda *args, **kwargs: sent_messages.append({"args": args, "kwargs": kwargs}) or {"result": {"message_id": 101}},
+            register_publication=lambda **kwargs: publications.append(kwargs) or {"id": 55},
+            perfil_label=lambda perfil: perfil or "moderado",
+            modo_label=lambda modo: modo or "comparador",
+            perfiles_stake={"moderado"},
+            modos_informe={"comparador"},
+            bankroll=None,
+            perfil="moderado",
+            modo="comparador",
+            mercados="todo",
+            partido="todos",
+            deporte="worldcup",
+            solo_stakazos=False,
+            token="token",
+            chat_id="chat",
+            publication_type="manual",
+        )
+
+        self.assertEqual(result["runtime_mode"], "shadow")
+        self.assertEqual(result["mensajes_enviados"], 0)
+        self.assertEqual(result["shadow_messages"], ["Resumen", "Pick Spain"])
+        self.assertEqual(sent_messages, [])
+        self.assertEqual(publications[0]["publication_type"], "manual_shadow")
+        self.assertEqual(publications[0]["items"][1]["pick_id"], 7)
+
+    def test_build_performance_guard_y_bloqueo_por_liga(self):
+        guard = build_performance_guard(
+            load_dashboard=lambda: {
+                "por_deporte": [],
+                "por_liga": [
+                    {
+                        "nombre": "WNBA",
+                        "cerradas": 20,
+                        "roi": -15.0,
+                        "hit_rate": 35.0,
+                        "clv_positivo_pct": 30.0,
+                    }
+                ],
+            }
+        )
+        adjusted = apply_performance_guard_to_pick(
+            {
+                "league_label": "WNBA",
+                "sport_label": "Baloncesto",
+                "stake": 2,
+                "importe_sugerido": 5,
+                "stake_pct_bankroll": 1.5,
+                "kelly_fraccional": 0.01,
+                "recomendacion": "Value",
+                "motivo": "test",
+            },
+            guard,
+        )
+
+        self.assertIn("WNBA", guard["blocked_leagues"])
+        self.assertTrue(adjusted["performance_guard_blocked"])
+        self.assertEqual(adjusted["stake"], 0)
+        self.assertEqual(adjusted["recomendacion"], "No apostar")
+
+    def test_build_lab_run_resume_decision_y_bloqueos(self):
+        result = build_lab_run(
+            runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
+            publication_guard=lambda: {"allow_live_publication": False, "mode": "shadow", "reasons": ["shadow_mode_activo"]},
+            run_forecast=lambda request: {
+                "sport_label": "Baloncesto",
+                "league_label": "WNBA",
+                "total_analizadas": 8,
+                "total_recomendadas": 1,
+                "mejores_apuestas": [
+                    {
+                        "event_id": "evt_ok",
+                        "sport_label": "Baloncesto",
+                        "league_label": "WNBA",
+                        "partido": "Aces vs Liberty",
+                        "equipo": "Under 166.5",
+                        "mercado": "totals",
+                        "casa": "Pinnacle",
+                        "stake": 1,
+                        "importe_sugerido": 3.0,
+                        "recomendacion": "Value",
+                        "motivo": "test",
+                    }
+                ],
+                "descartadas": [
+                    {
+                        "event_id": "evt_blocked",
+                        "sport_label": "Baloncesto",
+                        "league_label": "WNBA",
+                        "partido": "Fever vs Storm",
+                        "equipo": "Over 177.5",
+                        "mercado": "totals",
+                        "casa": "Pinnacle",
+                        "stake": 0,
+                        "importe_sugerido": 0,
+                        "recomendacion": "No apostar",
+                        "motivo": "guard",
+                        "performance_guard_blocked": True,
+                        "performance_guard_reason": "Liga bloqueada",
+                    }
+                ],
+            },
+            build_prediction_payload=lambda **kwargs: {
+                "pronosticos": [
+                    {
+                        "event_id": "evt_ok",
+                        "sport_label": "Baloncesto",
+                        "league_label": "WNBA",
+                        "partido": "Aces vs Liberty",
+                        "equipo": "Under 166.5",
+                        "mercado": "totals",
+                        "casa": "Pinnacle",
+                        "stake": 1,
+                        "importe_sugerido": 3.0,
+                        "recomendacion": "Value",
+                        "motivo": "test",
+                    }
+                ]
+            },
+            ai_available=lambda: False,
+            select_picks_for_telegram=lambda *args, **kwargs: [],
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            format_pick_message=lambda pick: "pick",
+            format_summary_message=lambda **kwargs: "summary",
+            perfil="moderado",
+            modo="comparador",
+            mercados="todo",
+            partido="todos",
+            deporte="baloncesto",
+            bankroll=None,
+            solo_stakazos=False,
+            perfiles_stake={"moderado"},
+            modos_informe={"comparador"},
+            perfil_label=lambda value: value or "moderado",
+            modo_label=lambda value: value or "comparador",
+        )
+
+        self.assertEqual(result["publication_decision"]["runtime_mode"], "shadow")
+        self.assertFalse(result["publication_decision"]["would_publish_live"])
+        self.assertEqual(result["forecast_summary"]["total_publicables_preview"], 1)
+        self.assertEqual(result["forecast_summary"]["total_bloqueadas_en_descartadas"], 1)
+        self.assertEqual(result["publishable_preview"][0]["event_id"], "evt_ok")
+        self.assertEqual(result["blocked_picks"]["discarded"][0]["event_id"], "evt_blocked")
 
 
 if __name__ == "__main__":

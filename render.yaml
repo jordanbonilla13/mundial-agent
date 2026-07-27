@@ -8,6 +8,22 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: APP_ENV
+        value: production
+      - key: SHADOW_MODE
+        value: "false"
+      - key: PUBLICATION_MIN_CLOSED_PICKS
+        value: "80"
+      - key: PUBLICATION_MIN_CLV_SAMPLE
+        value: "50"
+      - key: PUBLICATION_MIN_ROI
+        value: "2.0"
+      - key: PUBLICATION_MIN_HIT_RATE
+        value: "52.0"
+      - key: PUBLICATION_MIN_CLV_POSITIVE_PCT
+        value: "52.0"
+      - key: PUBLICATION_MIN_MODEL_EVALS
+        value: "60"
       - key: ODDS_PROVIDER
         value: the_odds_api
       - key: REFERENCE_BOOKMAKER

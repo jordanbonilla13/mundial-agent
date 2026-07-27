@@ -217,10 +217,36 @@ Tambien puedes usar:
 Configuracion minima:
 
 ```env
+APP_ENV=development
+SHADOW_MODE=true
 ODDS_PROVIDER=the_odds_api
 ODDS_API_KEY=tu_api_key_de_the_odds_api
 REFERENCE_BOOKMAKER=Pinnacle
 ```
+
+Persistencia:
+
+```env
+BETTING_DB_PATH=betting_tracker.sqlite3
+DATABASE_URL=
+```
+
+- En desarrollo local, si `DATABASE_URL` esta vacia, el proyecto usa `SQLite`.
+- En despliegue cloud, si `DATABASE_URL` apunta a `PostgreSQL`, `tracking.py` cambia automaticamente a ese backend.
+- `SHADOW_MODE=true` deja preparado el flujo para registrar publicaciones y auditoria sin enviar picks como si fuera entorno productivo.
+
+Guard de publicacion en vivo:
+
+```env
+PUBLICATION_MIN_CLOSED_PICKS=80
+PUBLICATION_MIN_CLV_SAMPLE=50
+PUBLICATION_MIN_ROI=2.0
+PUBLICATION_MIN_HIT_RATE=52.0
+PUBLICATION_MIN_CLV_POSITIVE_PCT=52.0
+PUBLICATION_MIN_MODEL_EVALS=60
+```
+
+- Si el sistema no supera esos minimos historicos, la publicacion live queda bloqueada y el flujo cae a modo sombra.
 
 Configuracion opcional para Telegram:
 

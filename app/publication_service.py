@@ -1,0 +1,289 @@
+from typing import Any, Callable
+
+from app.runtime_settings import RuntimeSettings
+
+
+def fingerprint_pick(pick: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return tuple(
+        str(pick.get(field) or "").strip().lower()
+        for field in ("event_id", "mercado", "tipo_resultado", "equipo", "casa")
+    )
+
+
+def diversified_telegram_picks(
+    picks: list[dict[str, Any]],
+    *,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    by_sport: dict[str, list[dict[str, Any]]] = {}
+    sport_order: list[str] = []
+
+    for pick in picks:
+        sport = str(pick.get("sport_label") or "General").strip() or "General"
+        if sport not in by_sport:
+            by_sport[sport] = []
+            sport_order.append(sport)
+        by_sport[sport].append(pick)
+
+    per_sport_limit = 2 if len(by_sport) >= 3 else 3
+    selected: list[dict[str, Any]] = []
+    selected_keys: set[tuple[str, str, str, str, str]] = set()
+    used_per_sport: dict[str, int] = {sport: 0 for sport in by_sport}
+
+    for sport in sport_order:
+        if len(selected) >= max_items:
+            break
+        for pick in by_sport.get(sport, []):
+            key = fingerprint_pick(pick)
+            if key in selected_keys:
+                continue
+            selected.append(pick)
+            selected_keys.add(key)
+            used_per_sport[sport] += 1
+            break
+
+    for sport in sport_order:
+        if len(selected) >= max_items:
+            break
+        for pick in by_sport.get(sport, [])[1:]:
+            if len(selected) >= max_items or used_per_sport[sport] >= per_sport_limit:
+                break
+            key = fingerprint_pick(pick)
+            if key in selected_keys:
+                continue
+            selected.append(pick)
+            selected_keys.add(key)
+            used_per_sport[sport] += 1
+
+    if len(selected) < max_items:
+        for pick in picks:
+            if len(selected) >= max_items:
+                break
+            key = fingerprint_pick(pick)
+            if key in selected_keys:
+                continue
+            selected.append(pick)
+            selected_keys.add(key)
+
+    return selected[:max_items]
+
+
+def select_picks_for_telegram(
+    data: dict[str, Any],
+    *,
+    solo_stakazos: bool,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    if solo_stakazos:
+        return list(data.get("picks_elite", []))[:max_items]
+
+    base_picks = list(data.get("mejores_apuestas", []))
+    sport_labels = {
+        str(pick.get("sport_label") or "").strip().lower()
+        for pick in base_picks
+        if pick.get("sport_label")
+    }
+
+    if str(data.get("sport_label") or "").strip().lower() == "todo" or len(sport_labels) > 1:
+        return diversified_telegram_picks(base_picks, max_items=max_items)
+
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+
+    for pick in base_picks:
+        key = fingerprint_pick(pick)
+        if key in seen:
+            continue
+        selected.append(pick)
+        seen.add(key)
+        if len(selected) >= max_items:
+            break
+
+    return selected
+
+
+def publish_telegram_predictions(
+    *,
+    runtime_settings: RuntimeSettings,
+    publication_guard: Callable[[], dict[str, Any]],
+    pronosticos_fn: Callable[..., dict[str, Any]],
+    save_unique_recommendations: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
+    read_raw_pick: Callable[[dict[str, Any]], dict[str, Any]],
+    enrich_with_ai: Callable[[list[dict[str, Any]]], list[dict[str, Any]]],
+    build_ai_summary: Callable[..., str | None],
+    ai_available: Callable[[], bool],
+    format_summary: Callable[..., str],
+    format_pick_message: Callable[[dict[str, Any]], str],
+    telegram_keyboard_for_pick: Callable[[int], dict[str, Any]],
+    send_message: Callable[..., dict[str, Any]],
+    register_publication: Callable[..., dict[str, Any]],
+    perfil_label: Callable[[str | None], str],
+    modo_label: Callable[[str | None], str],
+    perfiles_stake: set[str],
+    modos_informe: set[str],
+    bankroll: float | None,
+    perfil: str,
+    modo: str,
+    mercados: str,
+    partido: str,
+    deporte: str,
+    solo_stakazos: bool,
+    token: str,
+    chat_id: str,
+    publication_type: str,
+) -> dict[str, Any]:
+    guard = publication_guard()
+    data = pronosticos_fn(
+        bankroll=bankroll,
+        perfil=perfil,
+        modo=modo,
+        mercados=mercados,
+        partido=partido,
+        deporte=deporte,
+        solo_stakazos=solo_stakazos,
+    )
+
+    fallback_a_elite = False
+    if solo_stakazos and not data.get("pronosticos") and int(data.get("total_elite") or 0) > 0:
+        data = pronosticos_fn(
+            bankroll=bankroll,
+            perfil=perfil,
+            modo=modo,
+            mercados=mercados,
+            partido=partido,
+            deporte=deporte,
+            solo_stakazos=False,
+        )
+        fallback_a_elite = True
+
+    picks_publicables = list(data.get("pronosticos", []))
+    picks_guardados = save_unique_recommendations(picks_publicables)
+    picks_por_fingerprint = {
+        fingerprint_pick(item): item
+        for item in picks_guardados
+    }
+
+    picks_publicables = []
+    for pick in data.get("pronosticos", []):
+        key = fingerprint_pick(pick)
+        pick_guardado = picks_por_fingerprint.get(key)
+        if pick_guardado is not None:
+            pick_publicable = {**pick, **read_raw_pick(pick_guardado), **pick_guardado}
+        else:
+            pick_publicable = pick
+        picks_publicables.append(pick_publicable)
+
+    picks_publicables = enrich_with_ai(picks_publicables)
+    ai_summary = build_ai_summary(
+        picks_publicables,
+        sport_label=data.get("deporte"),
+        league_label=data.get("liga"),
+        solo_stakazos=solo_stakazos,
+    ) if ai_available() else None
+
+    summary_text = format_summary(
+        sport_label=data.get("deporte"),
+        league_label=data.get("liga"),
+        perfil_label=perfil_label(perfil if perfil in perfiles_stake else "moderado"),
+        modo_label=modo_label(modo if modo in modos_informe else "comparador"),
+        total_elite=int(data.get("total_elite", 0) or 0),
+        total_stakazos=int(data.get("total_stakazos", 0) or 0),
+        total_messages=len(data.get("pronosticos", [])),
+        solo_stakazos=solo_stakazos,
+        fallback_a_elite=fallback_a_elite,
+        ai_summary=ai_summary,
+    )
+
+    messages = [summary_text] + [format_pick_message(pick) for pick in picks_publicables]
+    sent_messages = []
+    publication_items = []
+
+    if runtime_settings.shadow_mode or not guard.get("allow_live_publication", False):
+        for index, text in enumerate(messages):
+            item = {
+                "telegram_message_id": None,
+                "message_kind": "summary" if index == 0 else "pick",
+                "text": text,
+                "pick_id": None,
+            }
+            if index > 0:
+                pick = picks_publicables[index - 1]
+                key = fingerprint_pick(pick)
+                pick_guardado = picks_por_fingerprint.get(key)
+                if pick_guardado is not None:
+                    item["pick_id"] = pick_guardado.get("id")
+            publication_items.append(item)
+        publicacion = register_publication(
+            publication_type=f"{publication_type}_shadow",
+            payload={
+                **data,
+                "runtime_mode": runtime_settings.publication_mode,
+                "publication_guard": guard,
+            },
+            items=publication_items,
+        )
+        return {
+            "ok": True,
+            "chat_id": chat_id,
+            "mensajes_enviados": 0,
+            "total_stakazos": data.get("total_stakazos", 0),
+            "total_elite": data.get("total_elite", 0),
+            "solo_stakazos": solo_stakazos,
+            "fallback_a_elite": fallback_a_elite,
+            "picks_guardados": len(picks_guardados),
+            "publication_id": publicacion.get("id"),
+            "runtime_mode": runtime_settings.publication_mode if runtime_settings.shadow_mode else "blocked",
+            "publication_guard": guard,
+            "shadow_messages": messages,
+        }
+
+    for index, text in enumerate(messages):
+        reply_markup = None
+        if index > 0:
+            pick = picks_publicables[index - 1]
+            if pick.get("id"):
+                reply_markup = telegram_keyboard_for_pick(int(pick["id"]))
+
+        result = send_message(
+            text,
+            token=token,
+            chat_id=chat_id,
+            reply_markup=reply_markup,
+        )
+        sent_messages.append(result)
+
+        message_id = ((result.get("result") or {}).get("message_id"))
+        item = {
+            "telegram_message_id": message_id,
+            "message_kind": "summary" if index == 0 else "pick",
+            "text": text,
+            "pick_id": None,
+        }
+
+        if index > 0:
+            pick = picks_publicables[index - 1]
+            key = fingerprint_pick(pick)
+            pick_guardado = picks_por_fingerprint.get(key)
+            if pick_guardado is not None:
+                item["pick_id"] = pick_guardado.get("id")
+
+        publication_items.append(item)
+
+    publicacion = register_publication(
+        publication_type=publication_type,
+        payload={**data, "runtime_mode": runtime_settings.publication_mode, "publication_guard": guard},
+        items=publication_items,
+    )
+    return {
+        "ok": True,
+        "chat_id": chat_id,
+        "mensajes_enviados": len(sent_messages),
+        "total_stakazos": data.get("total_stakazos", 0),
+        "total_elite": data.get("total_elite", 0),
+        "solo_stakazos": solo_stakazos,
+        "fallback_a_elite": fallback_a_elite,
+        "picks_guardados": len(picks_guardados),
+        "publication_id": publicacion.get("id"),
+        "runtime_mode": runtime_settings.publication_mode,
+        "publication_guard": guard,
+    }

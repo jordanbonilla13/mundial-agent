@@ -53,6 +53,8 @@ class ForecastEngine:
         run_single_request: Callable[[ForecastRequest], dict[str, Any]] | None = None,
         build_risk_policy: Callable[[], dict[str, Any]] | None = None,
         apply_risk_policy_to_pick: Callable[[dict[str, Any], dict[str, Any], dict[str, Any] | None], dict[str, Any]] | None = None,
+        build_performance_guard: Callable[[], dict[str, Any]] | None = None,
+        apply_performance_guard_to_pick: Callable[[dict[str, Any], dict[str, Any] | None], dict[str, Any]] | None = None,
         single_sport_pick_limit: Callable[[str | None], int] | None = None,
         multi_sport_pick_limit: Callable[[], int] | None = None,
         apply_exposure_limits: Callable[[list[dict[str, Any]], int | None], list[dict[str, Any]]] | None = None,
@@ -90,6 +92,8 @@ class ForecastEngine:
         self.run_single_request = run_single_request
         self.build_risk_policy = build_risk_policy
         self.apply_risk_policy_to_pick = apply_risk_policy_to_pick
+        self.build_performance_guard = build_performance_guard
+        self.apply_performance_guard_to_pick = apply_performance_guard_to_pick
         self.single_sport_pick_limit = single_sport_pick_limit
         self.multi_sport_pick_limit = multi_sport_pick_limit
         self.apply_exposure_limits = apply_exposure_limits
@@ -416,6 +420,12 @@ class ForecastEngine:
                     risk_policy,
                     penalizaciones.get("ligas", {}),
                 )
+                for r in recomendaciones
+            ]
+        performance_guard = self.build_performance_guard() if self.build_performance_guard is not None else None
+        if performance_guard is not None and self.apply_performance_guard_to_pick is not None:
+            recomendaciones = [
+                self.apply_performance_guard_to_pick(r, performance_guard)
                 for r in recomendaciones
             ]
         recomendadas = sorted([r for r in recomendaciones if r["stake"] > 0], key=self.sort_key_pick, reverse=True)

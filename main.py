@@ -31,6 +31,7 @@ from app.calibration import (
     get_model_confidence_multiplier,
 )
 from app.engine import ForecastEngine, ForecastRequest
+from app.forecast_service import ForecastDependencies, run_forecast_request
 from app.forecasting import (
     attach_context_to_pick,
     enrich_pick_ranking,
@@ -46,8 +47,19 @@ from app.operating_mode import (
     single_sport_pick_limit,
     telegram_pick_limit,
 )
+from app.evaluation_service import build_telegram_audit_summary, scores_for_pending_bot_picks as scores_for_pending_bot_picks_service
 from app.exposure import apply_exposure_limits
+from app.lab_service import build_lab_run
+from app.prediction_service import build_prediction_payload
+from app.performance_guard_service import build_performance_guard, apply_performance_guard_to_pick
+from app.publication_service import (
+    fingerprint_pick as fingerprint_pick_service,
+    publish_telegram_predictions,
+    select_picks_for_telegram,
+)
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
+from app.safety_service import publication_guard_state
+from app.runtime_settings import load_runtime_settings
 from app.telegram_service import (
     TelegramBotConfig,
     TelegramClient,
@@ -65,7 +77,7 @@ from betting_model import (
     valor_esperado,
 )
 from elo import obtener_elos
-from tracking import _raw_pick, actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, actualizar_resultado, estadisticas, guardar_recomendaciones, listar_picks
+from tracking import _bool_pick_flag, _raw_pick, actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, actualizar_resultado, estadisticas, guardar_recomendaciones, listar_picks
 from tracking import guardar_apuesta_real, guardar_setting, marcar_apuesta_real_pick, obtener_setting
 from tracking import dashboard_data, guardar_snapshot_cuotas, aprendizaje, liquidar_picks_con_scores, listar_evaluaciones_picks, obtener_bankroll, penalizaciones_historicas
 from tracking import guardar_recomendaciones_unicas, inicializar_db, listar_publicaciones_telegram, registrar_publicacion_telegram
@@ -82,6 +94,7 @@ from translations import (
 
 
 load_dotenv()
+RUNTIME_SETTINGS = load_runtime_settings()
 
 app = FastAPI()
 telegram_scheduler_stop = threading.Event()
@@ -429,10 +442,7 @@ def resumir_penalizacion_historica(reasons: Any) -> str:
 
 
 def fingerprint_pick(pick: dict[str, Any]) -> tuple[str, str, str, str, str]:
-    return tuple(
-        str(pick.get(field) or "").strip().lower()
-        for field in ("event_id", "mercado", "tipo_resultado", "equipo", "casa")
-    )
+    return fingerprint_pick_service(pick)
 
 
 def _diversified_telegram_picks(
@@ -503,33 +513,11 @@ def seleccionar_picks_para_telegram(
 ) -> list[dict[str, Any]]:
     if max_items is None:
         max_items = telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos)
-
-    if solo_stakazos:
-        return list(data.get("picks_elite", []))[:max_items]
-
-    base_picks = list(data.get("mejores_apuestas", []))
-    sport_labels = {
-        str(pick.get("sport_label") or "").strip().lower()
-        for pick in base_picks
-        if pick.get("sport_label")
-    }
-
-    if str(data.get("sport_label") or "").strip().lower() == "todo" or len(sport_labels) > 1:
-        return _diversified_telegram_picks(base_picks, max_items=max_items)
-
-    seleccionados: list[dict[str, Any]] = []
-    vistos: set[tuple[str, str, str, str, str]] = set()
-
-    for pick in base_picks:
-        clave = fingerprint_pick(pick)
-        if clave in vistos:
-            continue
-        seleccionados.append(pick)
-        vistos.add(clave)
-        if len(seleccionados) >= max_items:
-            break
-
-    return seleccionados
+    return select_picks_for_telegram(
+        data,
+        solo_stakazos=solo_stakazos,
+        max_items=max_items,
+    )
 
 
 def formatear_mensaje_telegram_pick(pick: dict) -> str:
@@ -609,38 +597,6 @@ def procesar_callback_pick(pick_id: int, action: str) -> str:
     return "Accion no soportada."
 
 
-def construir_resumen_telegram(force_refresh_scores: bool = True) -> tuple[str, dict[str, Any]]:
-    liquidation_result: dict[str, Any] | None = None
-
-    if force_refresh_scores:
-        try:
-            recent_scores = scores_for_pending_bot_picks(days_from=3)
-            liquidation_result = liquidar_picks_con_scores(recent_scores)
-        except Exception as exc:
-            liquidation_result = {
-                "status": "error",
-                "error": str(exc),
-                "liquidados": 0,
-                "pendientes": 0,
-            }
-
-    report = generate_daily_audit_report()
-    report_text = format_audit_report_telegram(report)
-
-    if liquidation_result is not None:
-        if liquidation_result.get("status") == "error":
-            suffix = "\n\n♻️ Autoevaluacion: no pude refrescar marcadores ahora mismo."
-        else:
-            suffix = (
-                "\n\n♻️ Autoevaluacion:"
-                f" {int(liquidation_result.get('liquidados', 0) or 0)} pick(s) liquidadas,"
-                f" {int(liquidation_result.get('pendientes', 0) or 0)} pendientes."
-            )
-        report_text = f"{report_text}{suffix}"
-
-    return report_text, report
-
-
 def procesar_comando_telegram(command_text: str) -> str:
     command = str(command_text or "").strip().lower()
 
@@ -657,47 +613,26 @@ def procesar_comando_telegram(command_text: str) -> str:
     return "Comando no soportado. Usa /resumen."
 
 
-def _pending_bot_score_contexts() -> list[dict[str, Any]]:
-    picks = listar_picks(limit=500, estado="pendiente")
-    contexts: list[dict[str, Any]] = []
-    seen: set[str] = set()
-
-    for pick in picks:
-        if not _bool_pick_flag(pick, "recommended_by_bot", True):
-            continue
-        if not _bool_pick_flag(pick, "auto_eval_eligible", True):
-            continue
-
-        raw = _raw_pick(pick)
-        sport_key = str(raw.get("sport_key") or pick.get("sport_key") or "").strip().lower()
-        if not sport_key or sport_key in seen:
-            continue
-
-        seen.add(sport_key)
-        contexts.append(resolver_contexto_deporte(sport_key))
-
-    if contexts:
-        return contexts
-
-    return [resolver_contexto_deporte(DEFAULT_SPORT)]
+def construir_resumen_telegram(force_refresh_scores: bool = True) -> tuple[str, dict[str, Any]]:
+    return build_telegram_audit_summary(
+        force_refresh_scores=force_refresh_scores,
+        generate_report=generate_daily_audit_report,
+        format_report=format_audit_report_telegram,
+        refresh_scores=lambda days: scores_for_pending_bot_picks(days_from=days),
+        liquidate_picks=liquidar_picks_con_scores,
+    )
 
 
 def scores_for_pending_bot_picks(days_from: int = 3) -> list[dict[str, Any]]:
-    events_by_id: dict[str, dict[str, Any]] = {}
-
-    for contexto in _pending_bot_score_contexts():
-        deporte = str(contexto.get("catalog_key") or contexto.get("sport_key") or DEFAULT_SPORT)
-        try:
-            eventos = scores(days_from=days_from, deporte=deporte)
-        except Exception:
-            continue
-
-        for evento in eventos:
-            event_id = evento.get("id")
-            if event_id:
-                events_by_id[str(event_id)] = evento
-
-    return list(events_by_id.values())
+    return scores_for_pending_bot_picks_service(
+        days_from=days_from,
+        list_picks=listar_picks,
+        read_raw_pick=_raw_pick,
+        bool_pick_flag=_bool_pick_flag,
+        resolve_context=resolver_contexto_deporte,
+        fetch_scores=scores,
+        default_sport=DEFAULT_SPORT,
+    )
 
 
 def procesar_update_telegram(update: dict[str, Any], token: str) -> None:
@@ -749,7 +684,28 @@ def publicar_pronosticos_telegram(
     publication_type: str = "manual",
 ) -> dict:
     token, chat_id = telegram_config()
-    data = pronosticos(
+    return publish_telegram_predictions(
+        runtime_settings=RUNTIME_SETTINGS,
+        publication_guard=lambda: publication_guard_state(
+            runtime_settings=RUNTIME_SETTINGS,
+            load_stats=estadisticas,
+            load_learning=aprendizaje,
+        ),
+        pronosticos_fn=pronosticos,
+        save_unique_recommendations=guardar_recomendaciones_unicas,
+        read_raw_pick=_raw_pick,
+        enrich_with_ai=enrich_picks_with_ai_narratives,
+        build_ai_summary=generate_publication_ai_summary,
+        ai_available=openai_available,
+        format_summary=format_summary_message,
+        format_pick_message=formatear_mensaje_telegram_pick,
+        telegram_keyboard_for_pick=telegram_keyboard_for_pick,
+        send_message=enviar_mensaje_telegram,
+        register_publication=registrar_publicacion_telegram,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
         bankroll=bankroll,
         perfil=perfil,
         modo=modo,
@@ -757,115 +713,10 @@ def publicar_pronosticos_telegram(
         partido=partido,
         deporte=deporte,
         solo_stakazos=solo_stakazos,
-    )
-
-    fallback_a_elite = False
-    if solo_stakazos and not data.get("pronosticos") and int(data.get("total_elite") or 0) > 0:
-        data = pronosticos(
-            bankroll=bankroll,
-            perfil=perfil,
-            modo=modo,
-            mercados=mercados,
-            partido=partido,
-            deporte=deporte,
-            solo_stakazos=False,
-        )
-        fallback_a_elite = True
-
-    picks_publicables = list(data.get("pronosticos", []))
-    picks_guardados = guardar_recomendaciones_unicas(picks_publicables)
-    picks_por_fingerprint = {
-        fingerprint_pick(item): item
-        for item in picks_guardados
-    }
-
-    picks_publicables = []
-    for pick in data.get("pronosticos", []):
-        key = fingerprint_pick(pick)
-        pick_guardado = picks_por_fingerprint.get(key)
-        if pick_guardado is not None:
-            pick_publicable = {**pick, **_raw_pick(pick_guardado), **pick_guardado}
-        else:
-            pick_publicable = pick
-        picks_publicables.append(pick_publicable)
-
-    picks_publicables = enrich_picks_with_ai_narratives(picks_publicables)
-    ai_summary = generate_publication_ai_summary(
-        picks_publicables,
-        sport_label=data.get("deporte"),
-        league_label=data.get("liga"),
-        solo_stakazos=solo_stakazos,
-    ) if openai_available() else None
-
-    resumen = format_summary_message(
-        sport_label=data.get("deporte"),
-        league_label=data.get("liga"),
-        perfil_label=perfil_es(perfil if perfil in PERFILES_STAKE else "moderado"),
-        modo_label=modo_es(modo if modo in MODOS_INFORME else "comparador"),
-        total_elite=int(data.get("total_elite", 0) or 0),
-        total_stakazos=int(data.get("total_stakazos", 0) or 0),
-        total_messages=len(data.get("pronosticos", [])),
-        solo_stakazos=solo_stakazos,
-        fallback_a_elite=fallback_a_elite,
-        ai_summary=ai_summary,
-    )
-
-    mensajes = [resumen] + [formatear_mensaje_telegram_pick(pick) for pick in picks_publicables]
-    enviados = []
-    publication_items = []
-
-    for index, texto in enumerate(mensajes):
-        reply_markup = None
-        if index > 0:
-            pick = picks_publicables[index - 1]
-            if pick.get("id"):
-                reply_markup = telegram_keyboard_for_pick(int(pick["id"]))
-
-        resultado = enviar_mensaje_telegram(
-            texto,
-            token=token,
-            chat_id=chat_id,
-            reply_markup=reply_markup,
-        )
-        enviados.append(resultado)
-
-        message_id = ((resultado.get("result") or {}).get("message_id"))
-        item = {
-            "telegram_message_id": message_id,
-            "message_kind": "summary" if index == 0 else "pick",
-            "text": texto,
-            "pick_id": None,
-        }
-
-        if index > 0:
-            pick = picks_publicables[index - 1]
-            key = tuple(
-                str(pick.get(field) or "").strip().lower()
-                for field in ("event_id", "mercado", "tipo_resultado", "equipo", "casa")
-            )
-            pick_guardado = picks_por_fingerprint.get(key)
-            if pick_guardado is not None:
-                item["pick_id"] = pick_guardado.get("id")
-
-        publication_items.append(item)
-
-    publicacion = registrar_publicacion_telegram(
+        token=token,
+        chat_id=chat_id,
         publication_type=publication_type,
-        payload=data,
-        items=publication_items,
     )
-
-    return {
-        "ok": True,
-        "chat_id": chat_id,
-        "mensajes_enviados": len(enviados),
-        "total_stakazos": data.get("total_stakazos", 0),
-        "total_elite": data.get("total_elite", 0),
-        "solo_stakazos": solo_stakazos,
-        "fallback_a_elite": fallback_a_elite,
-        "picks_guardados": len(picks_guardados),
-        "publication_id": publicacion.get("id"),
-    }
 
 
 def auto_publicar_telegram_once() -> dict | None:
@@ -883,6 +734,22 @@ def auto_publicar_telegram_once() -> dict | None:
         deporte=TELEGRAM_AUTOPUBLISH_DEPORTE,
         solo_stakazos=TELEGRAM_AUTOPUBLISH_SOLO_STAKAZOS,
         publication_type="auto",
+    )
+
+
+@app.get("/system/publication-guard")
+def system_publication_guard():
+    return publication_guard_state(
+        runtime_settings=RUNTIME_SETTINGS,
+        load_stats=estadisticas,
+        load_learning=aprendizaje,
+    )
+
+
+@app.get("/system/performance-guard")
+def system_performance_guard():
+    return build_performance_guard(
+        load_dashboard=dashboard_data,
     )
 
 
@@ -2453,7 +2320,7 @@ def apuestas_hoy(
     solo_elite: bool = False,
     solo_stakazos: bool = False,
 ):
-    engine = ForecastEngine(
+    deps = ForecastDependencies(
         provider_name=ODDS_PROVIDER,
         reference_bookmaker=REFERENCE_BOOKMAKER,
         perfiles_stake=PERFILES_STAKE,
@@ -2494,6 +2361,10 @@ def apuestas_hoy(
             policy=policy,
             league_penalties=league_penalties,
         ),
+        build_performance_guard=lambda: build_performance_guard(
+            load_dashboard=dashboard_data,
+        ),
+        apply_performance_guard_to_pick=apply_performance_guard_to_pick,
         apply_exposure_limits=lambda picks, max_total=None: apply_exposure_limits(
             picks,
             operating_mode=RISK_OPERATING_MODE,
@@ -2513,7 +2384,7 @@ def apuestas_hoy(
             solo_stakazos=nested_request.solo_stakazos,
         ),
     )
-    return engine.run(
+    return run_forecast_request(
         ForecastRequest(
             bankroll=bankroll,
             perfil=perfil,
@@ -2524,7 +2395,8 @@ def apuestas_hoy(
             deporte=deporte,
             solo_elite=solo_elite,
             solo_stakazos=solo_stakazos,
-        )
+        ),
+        deps,
     )
 
 
@@ -2969,49 +2841,71 @@ def pronosticos(
         solo_elite=False,
         solo_stakazos=solo_stakazos,
     )
-    mensajes = []
-    stakazos = [
-        pick for pick in data.get("picks_elite", [])
-        if str(pick.get("elite_tier") or "").lower() == "stakazo"
-    ]
-    picks_telegram = seleccionar_picks_para_telegram(data, solo_stakazos=solo_stakazos)
-    picks_telegram = enrich_picks_with_ai_narratives(picks_telegram)
-    ai_summary = generate_publication_ai_summary(
-        picks_telegram,
-        sport_label=data.get("sport_label"),
-        league_label=data.get("league_label"),
+    return build_prediction_payload(
+        data=data,
         solo_stakazos=solo_stakazos,
-    ) if openai_available() else None
-
-    for pick in picks_telegram:
-        mensajes.append(formatear_mensaje_telegram_pick(pick))
-
-    resumen = format_summary_message(
-        sport_label=data.get("sport_label"),
-        league_label=data.get("league_label"),
-        perfil_label=perfil_es(perfil if perfil in PERFILES_STAKE else "moderado"),
-        modo_label=modo_es(modo if modo in MODOS_INFORME else "comparador"),
-        total_elite=int(data.get("total_elite", 0) or 0),
-        total_stakazos=len(stakazos),
-        total_messages=len(picks_telegram),
-        solo_stakazos=solo_stakazos,
-        ai_summary=ai_summary,
+        ai_available=openai_available,
+        select_picks_for_telegram=seleccionar_picks_para_telegram,
+        enrich_with_ai=enrich_picks_with_ai_narratives,
+        build_ai_summary=generate_publication_ai_summary,
+        format_pick_message=formatear_mensaje_telegram_pick,
+        format_summary_message=format_summary_message,
+        perfil=perfil,
+        modo=modo,
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
     )
 
-    return {
-        "canal": "premium",
-        "deporte": data.get("sport_label"),
-        "liga": data.get("league_label"),
-        "criterio": data.get("criterio"),
-        "ia_activa": openai_available(),
-        "ia_resumen": ai_summary,
-        "resumen_telegram": resumen,
-        "total_elite": data.get("total_elite", 0),
-        "total_stakazos": len(stakazos),
-        "solo_stakazos": solo_stakazos,
-        "pronosticos": picks_telegram,
-        "mensajes_telegram": mensajes,
-    }
+
+@app.get("/lab/run")
+def lab_run(
+    bankroll: float | None = None,
+    perfil: str = "moderado",
+    modo: str = "comparador",
+    mercados: str = "todo",
+    partido: str = "todos",
+    deporte: str = DEFAULT_SPORT,
+    solo_stakazos: bool = False,
+):
+    return build_lab_run(
+        runtime_settings=RUNTIME_SETTINGS,
+        publication_guard=lambda: publication_guard_state(
+            runtime_settings=RUNTIME_SETTINGS,
+            load_stats=estadisticas,
+            load_learning=aprendizaje,
+        ),
+        run_forecast=lambda request: apuestas_hoy(
+            bankroll=request.bankroll,
+            perfil=request.perfil,
+            modo=request.modo,
+            mercados=request.mercados,
+            partido=request.partido,
+            guardar=request.guardar,
+            deporte=request.deporte,
+            solo_elite=request.solo_elite,
+            solo_stakazos=request.solo_stakazos,
+        ),
+        build_prediction_payload=build_prediction_payload,
+        ai_available=openai_available,
+        select_picks_for_telegram=seleccionar_picks_para_telegram,
+        enrich_with_ai=enrich_picks_with_ai_narratives,
+        build_ai_summary=generate_publication_ai_summary,
+        format_pick_message=formatear_mensaje_telegram_pick,
+        format_summary_message=format_summary_message,
+        perfil=perfil,
+        modo=modo,
+        mercados=mercados,
+        partido=partido,
+        deporte=deporte,
+        bankroll=bankroll,
+        solo_stakazos=solo_stakazos,
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
+    )
 
 
 @app.get("/telegram/test")
