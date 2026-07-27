@@ -22,7 +22,7 @@ from app.calibration import (
 )
 import app.calibrated_scoring as calibrated_scoring
 from app.forecasting import apply_market_regime_guard
-from app.lab_service import build_lab_run
+from app.lab_service import build_lab_run, render_lab_run_html
 from app.performance_guard_service import apply_performance_guard_to_pick, build_performance_guard
 from app.publication_service import publish_telegram_predictions
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
@@ -3668,6 +3668,128 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(result["forecast_summary"]["total_bloqueadas_en_descartadas"], 1)
         self.assertEqual(result["publishable_preview"][0]["event_id"], "evt_ok")
         self.assertEqual(result["blocked_picks"]["discarded"][0]["event_id"], "evt_blocked")
+
+
+    def test_render_lab_run_html_muestra_resumen_visual(self):
+        html = render_lab_run_html(
+            {
+                "runtime_mode": "shadow",
+                "publication_decision": {
+                    "would_publish_live": False,
+                    "runtime_mode": "shadow",
+                    "guard_mode": "shadow",
+                    "guard_reasons": ["shadow_mode_activo"],
+                },
+                "forecast_summary": {
+                    "sport_label": "Baloncesto",
+                    "league_label": "WNBA",
+                    "total_analizadas": 8,
+                    "total_recomendadas": 2,
+                    "total_descartadas_preview": 3,
+                    "total_publicables_preview": 1,
+                    "total_bloqueadas_en_recomendadas": 0,
+                    "total_bloqueadas_en_descartadas": 1,
+                },
+                "publishable_preview": [
+                    {
+                        "event_id": "evt_1",
+                        "partido": "Aces vs Liberty",
+                        "equipo": "Under 166.5",
+                        "mercado": "totals",
+                        "casa": "Pinnacle",
+                        "league_label": "WNBA",
+                        "stake": 1,
+                        "importe_sugerido": 3.0,
+                        "recomendacion": "Value",
+                        "motivo": "test",
+                    }
+                ],
+                "blocked_picks": {
+                    "recommended": [],
+                    "discarded": [
+                        {
+                            "event_id": "evt_2",
+                            "partido": "Fever vs Storm",
+                            "equipo": "Over 177.5",
+                            "mercado": "totals",
+                            "casa": "Pinnacle",
+                            "league_label": "WNBA",
+                            "stake": 0,
+                            "importe_sugerido": 0,
+                            "recomendacion": "No apostar",
+                            "performance_guard_reason": "Liga bloqueada",
+                        }
+                    ],
+                },
+                "match_overview": [
+                    {
+                        "event_id": "evt_1",
+                        "partido": "Aces vs Liberty",
+                        "league_label": "WNBA",
+                        "time_label": "19:30",
+                        "status": "Publicable",
+                        "status_kind": "ok",
+                        "publishable": 1,
+                        "blocked": 0,
+                    },
+                    {
+                        "event_id": "evt_2",
+                        "partido": "Fever vs Storm",
+                        "league_label": "WNBA",
+                        "time_label": "22:00",
+                        "status": "Bloqueado",
+                        "status_kind": "danger",
+                        "publishable": 0,
+                        "blocked": 1,
+                    }
+                ],
+                "telegram_preview": {"resumen_telegram": "Resumen de prueba"},
+            },
+            query_params={
+                "perfil": "moderado",
+                "modo": "comparador",
+                "mercados": "todo",
+                "partido": "todos",
+                "deporte": "baloncesto",
+                "solo_stakazos": "false",
+            },
+            premium_css=lambda: ":root{}",
+            profile_options=[
+                {"value": "moderado", "label": "Moderado"},
+                {"value": "agresivo", "label": "Agresivo"},
+            ],
+            mode_options=[
+                {"value": "comparador", "label": "Comparador"},
+                {"value": "pinnacle", "label": "Pinnacle"},
+            ],
+            sport_options=[
+                {"value": "todo", "label": "Todo"},
+                {"value": "baloncesto", "label": "Baloncesto"},
+            ],
+            market_options=[
+                {"value": "todo", "label": "Todo"},
+                {"value": "total_goles", "label": "Totales"},
+            ],
+            match_options=[
+                {"value": "todos", "label": "Todos los partidos"},
+                {"value": "evt_1", "label": "Aces vs Liberty"},
+            ],
+        )
+
+        self.assertIn("Laboratorio del modelo", html)
+        self.assertIn("Picks que saldrian a Telegram", html)
+        self.assertIn("Aces vs Liberty", html)
+        self.assertIn("Liga bloqueada", html)
+        self.assertIn("Ver JSON", html)
+        self.assertIn("Configurar simulacion", html)
+        self.assertIn('<form method="get" action="/lab/run">', html)
+        self.assertIn('name="deporte"', html)
+        self.assertIn('name="partido"', html)
+        self.assertIn('Todos los partidos', html)
+        self.assertIn('Mapa rapido de partidos', html)
+        self.assertIn('19:30', html)
+        self.assertIn('Publicable', html)
+        self.assertIn('22:00', html)
 
 
 if __name__ == "__main__":

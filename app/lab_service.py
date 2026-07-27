@@ -1,7 +1,124 @@
+from html import escape
 from typing import Any, Callable
+from urllib.parse import urlencode
 
 from app.engine import ForecastRequest
 from app.runtime_settings import RuntimeSettings
+
+
+def _event_time_label(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "-"
+    time_part = text.split("T")[-1].replace("Z", "")
+    return time_part[:5] if len(time_part) >= 5 else text
+
+
+def _build_match_overview(
+    *,
+    available_matches: list[dict[str, Any]],
+    recommended: list[dict[str, Any]],
+    discarded: list[dict[str, Any]],
+    publishable: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    by_event: dict[str, dict[str, Any]] = {}
+
+    for pick in recommended + discarded:
+        event_id = str(pick.get("event_id") or "").strip()
+        if not event_id:
+            continue
+        bucket = by_event.setdefault(
+            event_id,
+            {
+                "event_id": event_id,
+                "partido": pick.get("partido") or pick.get("partido_es") or event_id,
+                "league_label": pick.get("league_label") or pick.get("sport_label") or "General",
+                "commence_time": pick.get("commence_time"),
+                "recommended": 0,
+                "blocked": 0,
+                "publishable": 0,
+            },
+        )
+        bucket["partido"] = bucket.get("partido") or pick.get("partido") or pick.get("partido_es") or event_id
+        bucket["league_label"] = bucket.get("league_label") or pick.get("league_label") or pick.get("sport_label") or "General"
+        bucket["commence_time"] = bucket.get("commence_time") or pick.get("commence_time")
+        if pick in recommended:
+            bucket["recommended"] += 1
+        if pick.get("performance_guard_blocked") or pick.get("risk_guard_blocked"):
+            bucket["blocked"] += 1
+
+    for pick in publishable:
+        event_id = str(pick.get("event_id") or "").strip()
+        if not event_id:
+            continue
+        bucket = by_event.setdefault(
+            event_id,
+            {
+                "event_id": event_id,
+                "partido": pick.get("partido") or pick.get("partido_es") or event_id,
+                "league_label": pick.get("league_label") or pick.get("sport_label") or "General",
+                "commence_time": pick.get("commence_time"),
+                "recommended": 0,
+                "blocked": 0,
+                "publishable": 0,
+            },
+        )
+        bucket["publishable"] += 1
+        bucket["partido"] = bucket.get("partido") or pick.get("partido") or pick.get("partido_es") or event_id
+        bucket["league_label"] = bucket.get("league_label") or pick.get("league_label") or pick.get("sport_label") or "General"
+        bucket["commence_time"] = bucket.get("commence_time") or pick.get("commence_time")
+
+    ordered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    for item in available_matches:
+        event_id = str(item.get("id") or "").strip()
+        if not event_id:
+            continue
+        bucket = by_event.get(event_id, {}).copy()
+        bucket.setdefault("event_id", event_id)
+        bucket.setdefault("partido", item.get("label") or item.get("raw") or event_id)
+        bucket.setdefault("league_label", "General")
+        bucket.setdefault("commence_time", item.get("commence_time"))
+        bucket.setdefault("recommended", 0)
+        bucket.setdefault("blocked", 0)
+        bucket.setdefault("publishable", 0)
+        bucket["time_label"] = _event_time_label(bucket.get("commence_time") or item.get("commence_time"))
+        if bucket["publishable"] > 0:
+            bucket["status"] = "Publicable"
+            bucket["status_kind"] = "ok"
+        elif bucket["blocked"] > 0:
+            bucket["status"] = "Bloqueado"
+            bucket["status_kind"] = "danger"
+        elif bucket["recommended"] > 0:
+            bucket["status"] = "En revision"
+            bucket["status_kind"] = "warn"
+        else:
+            bucket["status"] = "Sin picks"
+            bucket["status_kind"] = "warn"
+        ordered.append(bucket)
+        seen.add(event_id)
+
+    for event_id, bucket in by_event.items():
+        if event_id in seen:
+            continue
+        bucket = bucket.copy()
+        bucket["time_label"] = _event_time_label(bucket.get("commence_time"))
+        if bucket["publishable"] > 0:
+            bucket["status"] = "Publicable"
+            bucket["status_kind"] = "ok"
+        elif bucket["blocked"] > 0:
+            bucket["status"] = "Bloqueado"
+            bucket["status_kind"] = "danger"
+        elif bucket["recommended"] > 0:
+            bucket["status"] = "En revision"
+            bucket["status_kind"] = "warn"
+        else:
+            bucket["status"] = "Sin picks"
+            bucket["status_kind"] = "warn"
+        ordered.append(bucket)
+
+    return ordered
 
 
 def _lab_pick_snapshot(pick: dict[str, Any]) -> dict[str, Any]:
@@ -101,10 +218,17 @@ def build_lab_run(
         "guard_mode": guard.get("mode"),
         "guard_reasons": list(guard.get("reasons") or []),
     }
+    match_overview = _build_match_overview(
+        available_matches=list(forecast.get("partidos_disponibles", [])),
+        recommended=forecast_recommended,
+        discarded=forecast_discarded,
+        publishable=publishable_preview,
+    )
     return {
         "runtime_mode": runtime_settings.publication_mode,
         "publication_guard": guard,
         "publication_decision": publication_decision,
+        "match_overview": match_overview,
         "forecast_summary": {
             "sport_label": forecast.get("sport_label"),
             "league_label": forecast.get("league_label"),
@@ -123,3 +247,315 @@ def build_lab_run(
         "forecast": forecast,
         "telegram_preview": prediction_payload,
     }
+
+
+def _badge_class(kind: str) -> str:
+    return {
+        "ok": "badge-green",
+        "warn": "badge-yellow",
+        "danger": "badge-red",
+    }.get(kind, "badge-yellow")
+
+
+def _pick_card_html(pick: dict[str, Any], *, blocked: bool) -> str:
+    title = escape(str(pick.get("partido") or "Partido sin nombre"))
+    team = escape(str(pick.get("equipo") or "Seleccion sin nombre"))
+    market = escape(str(pick.get("mercado") or "mercado"))
+    league = escape(str(pick.get("league_label") or pick.get("sport_label") or "General"))
+    house = escape(str(pick.get("casa") or "Casa"))
+    reason = escape(str(pick.get("performance_guard_reason") or pick.get("motivo") or "Sin detalle"))
+    recommendation = escape(str(pick.get("recomendacion") or "Sin recomendacion"))
+    stake = pick.get("stake")
+    stake_text = f"{float(stake):.2f}" if isinstance(stake, (int, float)) else escape(str(stake or "-"))
+    amount = pick.get("importe_sugerido")
+    amount_text = f"EUR {float(amount):.2f}" if isinstance(amount, (int, float)) else escape(str(amount or "-"))
+    quality = pick.get("quality_score")
+    confidence = pick.get("confidence_score")
+    quality_text = escape(str(quality if quality is not None else "-"))
+    confidence_text = f"{float(confidence):.3f}" if isinstance(confidence, (int, float)) else escape(str(confidence or "-"))
+    badge_kind = "danger" if blocked else "ok"
+    badge_text = "Bloqueada" if blocked else "Publicable"
+    card_class = "bet-red" if blocked else "bet-green"
+    return f"""
+        <article class="card bet-card {card_class}">
+            <div class="badge {_badge_class(badge_kind)}">{badge_text}</div>
+            <h3>{title}</h3>
+            <p><strong>{team}</strong> | {market} | {house}</p>
+            <p class="muted">{league}</p>
+            <div class="summary">
+                <span>Stake: {stake_text}</span>
+                <span>Importe: {amount_text}</span>
+                <span>Quality: {quality_text}</span>
+                <span>Confidence: {confidence_text}</span>
+            </div>
+            <p><strong>{recommendation}</strong></p>
+            <p class="muted">{reason}</p>
+        </article>
+    """
+
+
+def _option_tags(options: list[dict[str, str]], selected_value: str) -> str:
+    html = []
+    for option in options:
+        value = str(option.get("value") or "")
+        label = str(option.get("label") or value)
+        selected = " selected" if value == selected_value else ""
+        html.append(f'<option value="{escape(value, quote=True)}"{selected}>{escape(label)}</option>')
+    return "".join(html)
+
+
+def render_lab_run_html(
+    lab: dict[str, Any],
+    *,
+    query_params: dict[str, Any],
+    premium_css: Callable[[], str],
+    profile_options: list[dict[str, str]],
+    mode_options: list[dict[str, str]],
+    sport_options: list[dict[str, str]],
+    market_options: list[dict[str, str]],
+    match_options: list[dict[str, str]],
+) -> str:
+    forecast_summary = lab.get("forecast_summary") or {}
+    publication_decision = lab.get("publication_decision") or {}
+    publishable_preview = lab.get("publishable_preview") or []
+    blocked_picks = lab.get("blocked_picks") or {}
+    blocked_recommended = blocked_picks.get("recommended") or []
+    blocked_discarded = blocked_picks.get("discarded") or []
+    match_overview = lab.get("match_overview") or []
+    reasons = publication_decision.get("guard_reasons") or []
+    runtime_mode = escape(str(lab.get("runtime_mode") or "shadow"))
+    sport_label = escape(str(forecast_summary.get("sport_label") or "Todo"))
+    league_label = escape(str(forecast_summary.get("league_label") or "Todas las ligas"))
+    would_publish_live = bool(publication_decision.get("would_publish_live"))
+    status_badge = "ok" if would_publish_live else ("warn" if runtime_mode == "shadow" else "danger")
+    status_label = "Publicaria en vivo" if would_publish_live else ("Modo sombra" if runtime_mode == "shadow" else "Bloqueado")
+    reasons_html = "".join(f"<li>{escape(str(reason))}</li>" for reason in reasons) or "<li>Sin bloqueos activos.</li>"
+    query_json = dict(query_params)
+    query_json["format"] = "json"
+    json_href = "/lab/run?" + urlencode(query_json)
+    query_refresh = dict(query_params)
+    query_refresh.pop("format", None)
+    refresh_href = "/lab/run?" + urlencode(query_refresh)
+    current_filters = "".join(
+        f"<span>{escape(str(key))}: {escape(str(value))}</span>"
+        for key, value in query_refresh.items()
+        if value not in (None, "")
+    )
+    publishable_cards = "".join(_pick_card_html(pick, blocked=False) for pick in publishable_preview) or '<div class="card"><p class="muted">No hay picks publicables con estos filtros.</p></div>'
+    blocked_cards = "".join(_pick_card_html(pick, blocked=True) for pick in (blocked_recommended + blocked_discarded)) or '<div class="card"><p class="muted">No hay picks bloqueadas en esta simulacion.</p></div>'
+    telegram_preview = lab.get("telegram_preview") or {}
+    summary_message = escape(str(telegram_preview.get("resumen_telegram") or "Sin resumen"))
+    blocked_total = int(forecast_summary.get("total_bloqueadas_en_recomendadas", 0) or 0) + int(forecast_summary.get("total_bloqueadas_en_descartadas", 0) or 0)
+    bankroll_value = "" if query_params.get("bankroll") in (None, "") else escape(str(query_params.get("bankroll")), quote=True)
+    solo_stakazos_checked = "checked" if str(query_params.get("solo_stakazos") or "false").lower() == "true" else ""
+    profile_tags = _option_tags(profile_options, str(query_params.get("perfil") or "moderado"))
+    mode_tags = _option_tags(mode_options, str(query_params.get("modo") or "comparador"))
+    sport_tags = _option_tags(sport_options, str(query_params.get("deporte") or "todo"))
+    market_tags = _option_tags(market_options, str(query_params.get("mercados") or "todo"))
+    match_tags = _option_tags(match_options, str(query_params.get("partido") or "todos"))
+    match_rows = "".join(
+        f'<tr><td>{escape(str(row.get("time_label") or "-"))}</td><td>{escape(str(row.get("partido") or row.get("event_id") or "Partido"))}</td><td>{escape(str(row.get("league_label") or "General"))}</td><td><span class="badge {_badge_class(str(row.get("status_kind") or "warn"))}">{escape(str(row.get("status") or "Sin picks"))}</span></td><td>{int(row.get("publishable") or 0)} / {int(row.get("blocked") or 0)}</td></tr>'
+        for row in match_overview[:12]
+    ) or '<tr><td colspan="5" class="muted">No hay partidos disponibles para este filtro.</td></tr>'
+
+    return f"""
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Lab Run</title>
+        <style>
+            {premium_css()}
+            .lab-shell {{
+                max-width: 1180px;
+                margin: 0 auto;
+            }}
+            .lab-grid {{
+                display: grid;
+                grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.85fr);
+                gap: 18px;
+                align-items: start;
+            }}
+            .stack {{
+                display: grid;
+                gap: 16px;
+            }}
+            .code-box {{
+                background: rgba(16, 35, 60, 0.06);
+                border: 1px solid var(--line);
+                padding: 14px;
+                border-radius: 14px;
+                color: var(--ink);
+                white-space: pre-wrap;
+                word-break: break-word;
+                font-size: 13px;
+            }}
+            .reasons-list {{
+                margin: 0;
+                padding-left: 18px;
+                color: var(--muted);
+            }}
+            .cta-row {{
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+                margin-top: 18px;
+            }}
+            .section-grid {{
+                display: grid;
+                gap: 16px;
+            }}
+            @media (max-width: 900px) {{
+                .lab-grid {{
+                    grid-template-columns: 1fr;
+                }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container lab-shell">
+            <div class="top-menu">
+                <a href="/dashboard">Dashboard</a>
+                <a href="/informe-hoy">Informe hoy</a>
+                <a href="/mis-apuestas">Mis apuestas</a>
+                <a class="active" href="{refresh_href}">Lab run</a>
+                <a href="{json_href}">Ver JSON</a>
+            </div>
+            <section class="hero">
+                <div class="eyebrow">Laboratorio del modelo</div>
+                <h1>{sport_label} | {league_label}</h1>
+                <p>Esta vista resume lo que el bot habria preparado para Telegram, por que estaria en modo sombra o bloqueado y que picks hemos frenado antes de publicarlas.</p>
+                <div class="hero-metrics">
+                    <div class="hero-metric">
+                        <span>Estado</span>
+                        <strong>{escape(status_label)}</strong>
+                    </div>
+                    <div class="hero-metric">
+                        <span>Analizadas</span>
+                        <strong>{int(forecast_summary.get("total_analizadas", 0) or 0)}</strong>
+                    </div>
+                    <div class="hero-metric">
+                        <span>Publicables</span>
+                        <strong>{int(forecast_summary.get("total_publicables_preview", 0) or 0)}</strong>
+                    </div>
+                    <div class="hero-metric">
+                        <span>Bloqueadas</span>
+                        <strong>{blocked_total}</strong>
+                    </div>
+                </div>
+                <div class="summary">
+                    <span>Runtime: {runtime_mode}</span>
+                    <span>Perfil: {escape(str(query_params.get("perfil") or "moderado"))}</span>
+                    <span>Modo: {escape(str(query_params.get("modo") or "comparador"))}</span>
+                    <span>Mercados: {escape(str(query_params.get("mercados") or "todo"))}</span>
+                    <span>Partido: {escape(str(query_params.get("partido") or "todos"))}</span>
+                </div>
+                <div class="cta-row">
+                    <a class="button-link" href="{refresh_href}">Refrescar simulacion</a>
+                    <a class="button-link secondary" href="{json_href}">Abrir JSON tecnico</a>
+                </div>
+            </section>
+            <section class="filters">
+                <div class="eyebrow" style="color: var(--brand); margin-bottom: 12px;">Configurar simulacion</div>
+                <form method="get" action="/lab/run">
+                    <div class="field">
+                        <label>Bankroll</label>
+                        <input type="number" step="0.01" name="bankroll" value="{bankroll_value}" placeholder="Opcional">
+                    </div>
+                    <div class="field">
+                        <label>Perfil</label>
+                        <select name="perfil">{profile_tags}</select>
+                    </div>
+                    <div class="field">
+                        <label>Modo</label>
+                        <select name="modo">{mode_tags}</select>
+                    </div>
+                    <div class="field">
+                        <label>Deporte</label>
+                        <select name="deporte">{sport_tags}</select>
+                    </div>
+                    <div class="field">
+                        <label>Mercados</label>
+                        <select name="mercados">{market_tags}</select>
+                    </div>
+                    <div class="field">
+                        <label>Partido disponible</label>
+                        <select name="partido">{match_tags}</select>
+                    </div>
+                    <div class="checkbox-row">
+                        <input type="checkbox" id="solo_stakazos" name="solo_stakazos" value="true" {solo_stakazos_checked}>
+                        <label for="solo_stakazos" style="margin: 0; text-transform: none; letter-spacing: 0;">Solo stakazos</label>
+                    </div>
+                    <div class="cta-row">
+                        <button type="submit">Ejecutar lab</button>
+                        <a class="button-link secondary" href="/lab/run">Resetear</a>
+                    </div>
+                </form>
+                <div class="summary">{current_filters}</div>
+            </section>
+            <section class="panel" style="padding: 18px; margin-top: 18px;">
+                <div class="eyebrow" style="color: var(--brand); margin-bottom: 12px;">Mapa rapido de partidos</div>
+                <p class="lede">Usa esta tabla para ver antes de lanzar la simulacion que eventos hay, a que hora van y si ya apuntan a publicable, bloqueado o sin picks.</p>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Hora</th>
+                            <th>Partido</th>
+                            <th>Liga</th>
+                            <th>Estado</th>
+                            <th>Preview</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {match_rows}
+                    </tbody>
+                </table>
+            </section>
+            <div class="lab-grid">
+                <div class="section-grid">
+                    <h2 class="section-title">Picks que saldrian a Telegram</h2>
+                    <p class="lede">Esta es la previsualizacion operativa. Si el guard lo permite y sales de shadow mode, esto es lo mas cercano a lo que se publicaria.</p>
+                    {publishable_cards}
+                    <h2 class="section-title">Picks frenadas por guards</h2>
+                    <p class="lede">Aqui se ven las picks que el sistema ha parado por riesgo o por rendimiento historico insuficiente.</p>
+                    {blocked_cards}
+                </div>
+                <div class="stack">
+                    <section class="card">
+                        <div class="badge {_badge_class(status_badge)}">{escape(status_label)}</div>
+                        <h3>Decision de publicacion</h3>
+                        <p class="muted">El motor combina el runtime actual con el publication guard.</p>
+                        <ul class="reasons-list">{reasons_html}</ul>
+                    </section>
+                    <section class="grid-2">
+                        <div class="metric">
+                            <span>Recomendadas</span>
+                            <strong>{int(forecast_summary.get("total_recomendadas", 0) or 0)}</strong>
+                            <small>Picks finales del forecast</small>
+                        </div>
+                        <div class="metric">
+                            <span>Descartadas</span>
+                            <strong>{int(forecast_summary.get("total_descartadas_preview", 0) or 0)}</strong>
+                            <small>Vista previa del descarte</small>
+                        </div>
+                        <div class="metric">
+                            <span>Bloqueadas recomendadas</span>
+                            <strong>{int(forecast_summary.get("total_bloqueadas_en_recomendadas", 0) or 0)}</strong>
+                            <small>Guard sobre picks recomendadas</small>
+                        </div>
+                        <div class="metric">
+                            <span>Bloqueadas descartadas</span>
+                            <strong>{int(forecast_summary.get("total_bloqueadas_en_descartadas", 0) or 0)}</strong>
+                            <small>Guard en la cola de descarte</small>
+                        </div>
+                    </section>
+                    <section class="card">
+                        <h3>Resumen Telegram</h3>
+                        <div class="code-box">{summary_message}</div>
+                    </section>
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """

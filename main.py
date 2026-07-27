@@ -49,7 +49,7 @@ from app.operating_mode import (
 )
 from app.evaluation_service import build_telegram_audit_summary, scores_for_pending_bot_picks as scores_for_pending_bot_picks_service
 from app.exposure import apply_exposure_limits
-from app.lab_service import build_lab_run
+from app.lab_service import build_lab_run, render_lab_run_html
 from app.prediction_service import build_prediction_payload
 from app.performance_guard_service import build_performance_guard, apply_performance_guard_to_pick
 from app.publication_service import (
@@ -2859,7 +2859,7 @@ def pronosticos(
     )
 
 
-@app.get("/lab/run")
+@app.get("/lab/run", response_class=HTMLResponse)
 def lab_run(
     bankroll: float | None = None,
     perfil: str = "moderado",
@@ -2868,8 +2868,9 @@ def lab_run(
     partido: str = "todos",
     deporte: str = DEFAULT_SPORT,
     solo_stakazos: bool = False,
+    format: str = "html",
 ):
-    return build_lab_run(
+    lab_data = build_lab_run(
         runtime_settings=RUNTIME_SETTINGS,
         publication_guard=lambda: publication_guard_state(
             runtime_settings=RUNTIME_SETTINGS,
@@ -2906,6 +2907,53 @@ def lab_run(
         perfil_label=perfil_es,
         modo_label=modo_es,
     )
+    if str(format or "html").strip().lower() == "json":
+        return lab_data
+
+    market_config = config_mercados_deporte("futbol" if deporte == "todo" else deporte)
+    html = render_lab_run_html(
+        lab_data,
+        query_params={
+            "bankroll": bankroll if bankroll is not None else "",
+            "perfil": perfil,
+            "modo": modo,
+            "mercados": mercados,
+            "partido": partido,
+            "deporte": deporte,
+            "solo_stakazos": "true" if solo_stakazos else "false",
+        },
+        premium_css=premium_ui_css,
+        profile_options=[
+            {"value": "conservador", "label": perfil_es("conservador")},
+            {"value": "moderado", "label": perfil_es("moderado")},
+            {"value": "agresivo", "label": perfil_es("agresivo")},
+            {"value": "alto_riesgo", "label": perfil_es("alto_riesgo")},
+        ],
+        mode_options=[
+            {"value": "comparador", "label": modo_es("comparador")},
+            {"value": "pinnacle", "label": modo_es("pinnacle")},
+        ],
+        sport_options=[
+            {"value": str(item.get("value") or ""), "label": str(item.get("label") or item.get("value") or "")}
+            for item in opciones_deporte_disponibles(selected=deporte)
+        ],
+        market_options=[
+            {"value": value, "label": SPORT_FILTER_LABELS.get(value, value)}
+            for value in market_config["allowed_filters"]
+        ],
+        match_options=[
+            {"value": "todos", "label": "Todos los partidos"},
+            *[
+                {
+                    "value": str(item.get("id") or ""),
+                    "label": str(item.get("label") or item.get("id") or "Partido"),
+                }
+                for item in (lab_data.get("forecast") or {}).get("partidos_disponibles", [])
+                if str(item.get("id") or "").strip()
+            ],
+        ],
+    )
+    return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
 
 
 @app.get("/telegram/test")
