@@ -360,7 +360,52 @@ def build_dynamic_context_from_sport_key(sport_key: str) -> dict:
     return sports_layer.build_dynamic_context_from_sport_key(sport_key)
 
 
+def _is_generic_sport_alias(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"futbol", "tenis", "baloncesto"}
+
+
+def _prefer_active_context_for_generic_alias(
+    deporte: str | None,
+    *,
+    provider: str | None = None,
+) -> dict | None:
+    alias = str(deporte or "").strip().lower()
+    if not _is_generic_sport_alias(alias):
+        return None
+
+    fallback = sports_layer.resolver_contexto_deporte(alias)
+    target_family = family_from_sport_key(fallback.get("sport_key", ""))
+
+    try:
+        catalogo = discover_available_catalog(provider=provider)
+    except Exception:
+        return None
+
+    candidates: list[dict[str, Any]] = []
+    for item in catalogo.get("sports", []):
+        sport_key = str(item.get("sport_key") or "").strip().lower()
+        if family_from_sport_key(sport_key) != target_family:
+            continue
+        if item.get("active", True) is False:
+            continue
+        if "winner" in sport_key:
+            continue
+
+        context = build_dynamic_context_from_sport_key(sport_key)
+        context["catalog_key"] = alias
+        candidates.append(context)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=prioridad_contexto_todo)
+    return candidates[0]
+
+
 def resolver_contexto_deporte(deporte: str | None) -> dict:
+    preferred = _prefer_active_context_for_generic_alias(deporte)
+    if preferred is not None:
+        return preferred
     return sports_layer.resolver_contexto_deporte(deporte)
 
 

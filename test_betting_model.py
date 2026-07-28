@@ -3622,6 +3622,45 @@ class BettingModelTests(unittest.TestCase):
         self.assertFalse(adjusted["performance_guard_blocked"])
         self.assertEqual(adjusted["stake"], 2)
 
+    def test_resolver_contexto_deporte_generico_prefiere_liga_activa(self):
+        import main
+
+        fake_catalog = {
+            "sports": [
+                {
+                    "sport_key": "basketball_wnba",
+                    "sport_label": "Baloncesto",
+                    "league_key": "wnba",
+                    "league_label": "Wnba",
+                    "active": True,
+                },
+                {
+                    "sport_key": "basketball_nba_championship_winner",
+                    "sport_label": "Baloncesto",
+                    "league_key": "nba_championship_winner",
+                    "league_label": "Nba Championship Winner",
+                    "active": True,
+                },
+                {
+                    "sport_key": "soccer_argentina_primera_division",
+                    "sport_label": "Futbol",
+                    "league_key": "argentina_primera_division",
+                    "league_label": "Argentina Primera Division",
+                    "active": True,
+                },
+            ]
+        }
+
+        with patch.object(main, "discover_available_catalog", return_value=fake_catalog):
+            basketball = resolver_contexto_deporte("baloncesto")
+            football = resolver_contexto_deporte("futbol")
+
+        self.assertEqual(basketball["catalog_key"], "baloncesto")
+        self.assertEqual(basketball["sport_key"], "basketball_wnba")
+        self.assertEqual(basketball["league_label"], "Wnba")
+        self.assertEqual(football["catalog_key"], "futbol")
+        self.assertEqual(football["sport_key"], "soccer_argentina_primera_division")
+
     def test_build_lab_run_resume_decision_y_bloqueos(self):
         result = build_lab_run(
             runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
