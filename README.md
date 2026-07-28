@@ -378,3 +378,70 @@ uvicorn main:app --host 0.0.0.0 --port $PORT
 ## Siguiente paso recomendado
 
 La mejora tecnica mas rentable ahora mismo es dividir [`main.py`](./main.py) por dominios y mover la UI HTML a una capa mas separada del flujo de negocio.
+
+## Punto de continuidad
+
+### Estado al cerrar esta sesion
+
+- El flujo de publicacion ya distingue entre `shadow mode`, bloqueo por guard y publicacion real.
+- El laboratorio de simulacion ya tiene vista HTML propia en [`/lab/run`](./main.py).
+- `GET /lab/run` renderiza una vista visual con:
+  - formulario de filtros (`bankroll`, `perfil`, `modo`, `deporte`, `mercados`, `partido`, `solo_stakazos`)
+  - selector real de partidos disponibles
+  - mapa rapido de partidos con `hora`, `liga`, `estado` y preview `publicables / bloqueadas`
+  - seccion de `Picks que saldrian a Telegram`
+  - seccion de `Picks frenadas por guards`
+  - bloque `Decision de publicacion`
+  - bloque `Resumen Telegram`
+- `GET /lab/run?format=json` mantiene la salida tecnica en JSON.
+
+### Guards y overrides activos
+
+- Existe guard de publicacion live en [`app/safety_service.py`](./app/safety_service.py).
+- Existe guard de rendimiento historico en [`app/performance_guard_service.py`](./app/performance_guard_service.py).
+- Se ha anadido override por entorno para reabrir deportes o ligas aunque el guard los bloqueara:
+
+```env
+PERF_GUARD_ALLOW_SPORTS=Baloncesto
+PERF_GUARD_ALLOW_LEAGUES=
+```
+
+- En el entorno local del usuario se dejo activado `PERF_GUARD_ALLOW_SPORTS=Baloncesto` para dar una nueva oportunidad al modelo de baloncesto con la version actual.
+- Esto no elimina el guard del resto del sistema; solo evita que `Baloncesto` quede bloqueado por historico malo en esta etapa.
+
+### Lectura del laboratorio
+
+- `Publicable`: hay picks que podrian salir a Telegram si el guard de publicacion lo permite y no se esta en `shadow mode`.
+- `Bloqueado`: el sistema encontro picks pero fueron paradas por guards.
+- `Sin picks`: no salio ninguna apuesta suficientemente valida para ese evento.
+- En la tabla de partidos, `0 / 2` significa `0` picks publicables y `2` picks bloqueadas para ese partido.
+- En algunos eventos WNBA puede aparecer `General` en el mapa rapido aunque por equipos sea baloncesto; eso viene del listado base del evento. A nivel pick el sistema si reconoce `Wnba` / `Baloncesto`.
+
+### Verificacion hecha
+
+- `python -m py_compile main.py app\lab_service.py test_betting_model.py`
+- `python -m py_compile app\performance_guard_service.py test_betting_model.py main.py app\lab_service.py`
+- `venv\Scripts\python.exe -m unittest test_betting_model.py`
+- Ultimo estado validado: `99 tests OK`
+
+### Commits recientes relevantes
+
+- `e43367d` `Refactor publication flow and improve lab preview`
+- `20468f0` `Improve lab run visual workflow`
+- `355fdbc` `Allow basketball override in performance guard`
+
+### Siguiente paso recomendado para retomar
+
+1. Reiniciar la app local para asegurar que relee el `.env`.
+2. Abrir `/lab/run`.
+3. Probar con `deporte=baloncesto`.
+4. Ver si los partidos de baloncesto pasan de `Bloqueado` a `Publicable` o al menos a `Sin picks`.
+5. Si ya no quedan bloqueados por historico, revisar partido a partido por que el modelo sigue descartando picks o por que las considera malas.
+
+### Objetivo funcional abierto
+
+El objetivo inmediato no es publicar mas picks, sino comprobar si al quitar el bloqueo historico de `Baloncesto` el modelo actual:
+
+- produce picks razonables,
+- deja de sobreseleccionar picks malas,
+- y merece seguir afinandose antes de abrir otra vez Telegram en serio para ese deporte.
