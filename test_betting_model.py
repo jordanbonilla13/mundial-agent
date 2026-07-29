@@ -22,7 +22,7 @@ from app.calibration import (
 )
 import app.calibrated_scoring as calibrated_scoring
 from app.forecasting import apply_market_regime_guard
-from app.lab_service import build_lab_run, render_lab_run_html
+from app.lab_service import _event_time_label, build_lab_run, render_lab_run_html
 from app.performance_guard_service import apply_performance_guard_to_pick, build_performance_guard
 from app.publication_service import publish_telegram_predictions
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
@@ -82,6 +82,9 @@ PARTIDOS_FAKE = [
 
 
 class BettingModelTests(unittest.TestCase):
+    def test_event_time_label_convierte_utc_a_hora_madrid(self):
+        self.assertEqual(_event_time_label("2026-07-29T17:00:00Z"), "19:00")
+
     def test_normalizar_probabilidades_suma_uno(self):
         outcomes = PARTIDOS_FAKE[0]["bookmakers"][0]["markets"][0]["outcomes"]
         normalizadas = normalizar_probabilidades(outcomes)
@@ -3917,7 +3920,9 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Liga bloqueada", html)
         self.assertIn("Ver JSON", html)
         self.assertIn("Configurar simulacion", html)
-        self.assertIn('<form method="get" action="/lab/run">', html)
+        self.assertIn('id="labRunForm"', html)
+        self.assertIn('labLoadingOverlay', html)
+        self.assertIn('Comparando precios entre casas', html)
         self.assertIn('name="deporte"', html)
         self.assertIn('name="partido"', html)
         self.assertIn('Todos los partidos', html)

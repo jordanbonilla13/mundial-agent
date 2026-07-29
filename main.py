@@ -2010,6 +2010,7 @@ def partidos_disponibles(partidos: list[dict]) -> list[dict[str, str]]:
             "id": str(event_id),
             "label": partido_es(raw),
             "raw": raw,
+            "commence_time": partido.get("commence_time"),
         })
 
     return disponibles

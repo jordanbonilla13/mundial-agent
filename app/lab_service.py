@@ -1,17 +1,32 @@
+from datetime import datetime
 from html import escape
 from typing import Any, Callable
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 from app.engine import ForecastRequest
 from app.runtime_settings import RuntimeSettings
+
+
+DISPLAY_TIMEZONE = ZoneInfo("Europe/Madrid")
 
 
 def _event_time_label(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
         return "-"
-    time_part = text.split("T")[-1].replace("Z", "")
-    return time_part[:5] if len(time_part) >= 5 else text
+
+    try:
+        normalized = f"{text[:-1]}+00:00" if text.endswith("Z") else text
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        time_part = text.split("T")[-1].replace("Z", "")
+        return time_part[:5] if len(time_part) >= 5 else text
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+
+    return dt.astimezone(DISPLAY_TIMEZONE).strftime("%H:%M")
 
 
 def _build_match_overview(
@@ -417,6 +432,74 @@ def render_lab_run_html(
                 display: grid;
                 gap: 16px;
             }}
+            .loading-overlay {{
+                position: fixed;
+                inset: 0;
+                background: rgba(8, 18, 34, 0.78);
+                backdrop-filter: blur(8px);
+                display: none;
+                align-items: center;
+                justify-content: center;
+                padding: 24px;
+                z-index: 9999;
+            }}
+            .loading-overlay.visible {{
+                display: flex;
+            }}
+            .loading-card {{
+                width: min(560px, 100%);
+                background: linear-gradient(145deg, rgba(12, 28, 51, 0.96), rgba(28, 51, 87, 0.94));
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 28px;
+                box-shadow: 0 28px 80px rgba(0, 0, 0, 0.28);
+                padding: 34px 28px;
+                color: #f8f4ea;
+                text-align: center;
+            }}
+            .loading-spinner {{
+                width: 62px;
+                height: 62px;
+                margin: 0 auto 18px;
+                border-radius: 999px;
+                border: 4px solid rgba(255, 255, 255, 0.16);
+                border-top-color: #f2dfb4;
+                animation: lab-spin 0.9s linear infinite;
+            }}
+            .loading-card h2 {{
+                margin: 0 0 10px;
+                color: #fffaf0;
+                font-size: 30px;
+            }}
+            .loading-card p {{
+                margin: 0;
+                color: rgba(248, 244, 234, 0.82);
+                font-size: 16px;
+                line-height: 1.6;
+            }}
+            .loading-steps {{
+                margin: 22px 0 0;
+                padding: 0;
+                list-style: none;
+                display: grid;
+                gap: 10px;
+                text-align: left;
+            }}
+            .loading-steps li {{
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 999px;
+                padding: 10px 14px;
+                color: rgba(248, 244, 234, 0.78);
+            }}
+            .loading-steps li.active {{
+                background: rgba(242, 223, 180, 0.16);
+                border-color: rgba(242, 223, 180, 0.35);
+                color: #fff8e7;
+            }}
+            @keyframes lab-spin {{
+                from {{ transform: rotate(0deg); }}
+                to {{ transform: rotate(360deg); }}
+            }}
             @media (max-width: 900px) {{
                 .lab-grid {{
                     grid-template-columns: 1fr;
@@ -425,6 +508,19 @@ def render_lab_run_html(
         </style>
     </head>
     <body>
+        <div class="loading-overlay" id="labLoadingOverlay" aria-hidden="true">
+            <div class="loading-card">
+                <div class="loading-spinner"></div>
+                <h2>Ejecutando simulacion</h2>
+                <p id="labLoadingMessage">Obteniendo cuotas y horarios actualizados...</p>
+                <ul class="loading-steps" id="labLoadingSteps">
+                    <li class="active">Obteniendo cuotas y horarios actualizados</li>
+                    <li>Comparando precios entre casas</li>
+                    <li>Priorizando mejores ligas y partidos activos</li>
+                    <li>Filtrando value, riesgo y picks publicables</li>
+                </ul>
+            </div>
+        </div>
         <div class="container lab-shell">
             <div class="top-menu">
                 <a href="/dashboard">Dashboard</a>
@@ -469,7 +565,7 @@ def render_lab_run_html(
             </section>
             <section class="filters">
                 <div class="eyebrow" style="color: var(--brand); margin-bottom: 12px;">Configurar simulacion</div>
-                <form method="get" action="/lab/run">
+                <form method="get" action="/lab/run" id="labRunForm">
                     <div class="field">
                         <label>Bankroll</label>
                         <input type="number" step="0.01" name="bankroll" value="{bankroll_value}" placeholder="Opcional">
@@ -568,6 +664,51 @@ def render_lab_run_html(
                 </div>
             </div>
         </div>
+        <script>
+            (() => {{
+                const form = document.getElementById("labRunForm");
+                const overlay = document.getElementById("labLoadingOverlay");
+                const message = document.getElementById("labLoadingMessage");
+                const steps = Array.from(document.querySelectorAll("#labLoadingSteps li"));
+                if (!form || !overlay || !message || steps.length === 0) {{
+                    return;
+                }}
+
+                const messages = [
+                    "Obteniendo cuotas y horarios actualizados...",
+                    "Comparando precios entre casas...",
+                    "Priorizando mejores ligas y partidos activos...",
+                    "Filtrando value, riesgo y picks publicables..."
+                ];
+
+                let intervalId = null;
+
+                const startOverlay = () => {{
+                    overlay.classList.add("visible");
+                    overlay.setAttribute("aria-hidden", "false");
+                    let index = 0;
+                    message.textContent = messages[index];
+                    steps.forEach((item, stepIndex) => item.classList.toggle("active", stepIndex === index));
+                    intervalId = window.setInterval(() => {{
+                        index = (index + 1) % messages.length;
+                        message.textContent = messages[index];
+                        steps.forEach((item, stepIndex) => item.classList.toggle("active", stepIndex === index));
+                    }}, 1400);
+                }};
+
+                form.addEventListener("submit", () => {{
+                    startOverlay();
+                }});
+
+                window.addEventListener("pageshow", () => {{
+                    if (intervalId) {{
+                        window.clearInterval(intervalId);
+                    }}
+                    overlay.classList.remove("visible");
+                    overlay.setAttribute("aria-hidden", "true");
+                }});
+            }})();
+        </script>
     </body>
     </html>
     """
