@@ -517,8 +517,8 @@ class BettingModelTests(unittest.TestCase):
     def test_operating_mode_agresivo_amplia_limites_de_salida(self):
         self.assertEqual(single_sport_pick_limit("agresivo", "todos"), 7)
         self.assertEqual(single_sport_pick_limit("agresivo", "evt_1"), 4)
-        self.assertEqual(multi_sport_pick_limit("agresivo"), 8)
-        self.assertEqual(telegram_pick_limit("agresivo", solo_stakazos=False), 7)
+        self.assertEqual(multi_sport_pick_limit("agresivo"), 10)
+        self.assertEqual(telegram_pick_limit("agresivo", solo_stakazos=False), 9)
 
     def test_apply_exposure_limits_controla_concentracion_por_evento(self):
         picks = [
@@ -532,6 +532,64 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(len([p for p in selected if p["event_id"] == "evt_1"]), 2)
         self.assertNotIn("btts", [p["mercado"] for p in selected if p["event_id"] == "evt_1"])
+
+    def test_comparador_bloquea_h2h_ambiguo_si_los_dos_lados_salen_parejos(self):
+        partidos = [
+            {
+                "id": "evt_ambiguous_h2h",
+                "commence_time": "2026-07-29T20:00:00Z",
+                "sport_key": "tennis_atp_washington_open",
+                "home_team": "Alex de Minaur",
+                "away_team": "Stefanos Tsitsipas",
+                "bookmakers": [
+                    {
+                        "title": "Pinnacle",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Alex de Minaur", "price": 1.98},
+                                    {"name": "Stefanos Tsitsipas", "price": 1.98},
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "title": "Betfair",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Alex de Minaur", "price": 2.04},
+                                    {"name": "Stefanos Tsitsipas", "price": 2.04},
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            }
+        ]
+
+        recomendaciones = analizar_comparador_casas(
+            partidos,
+            {},
+            bankroll=100,
+            perfil="agresivo",
+            casa_referencia="Pinnacle",
+            mercados=["h2h"],
+            source_strength="tennis_model",
+        )
+
+        picks_activas = [r for r in recomendaciones if r["stake"] > 0]
+        bloqueadas = [
+            r for r in recomendaciones
+            if r["partido"] == "Alex de Minaur vs Stefanos Tsitsipas"
+            and r["recomendacion"] == "No apostar"
+            and "ambiguo" in str(r["motivo"]).lower()
+        ]
+
+        self.assertEqual(picks_activas, [])
+        self.assertGreaterEqual(len(bloqueadas), 2)
 
     def test_comparador_recomienda_casa_con_mejor_cuota_que_pinnacle(self):
         partidos = [
@@ -3772,7 +3830,7 @@ class BettingModelTests(unittest.TestCase):
                         "event_id": "evt_1",
                         "partido": "Aces vs Liberty",
                         "equipo": "Under 166.5",
-                        "mercado": "totals",
+                        "mercado": "h2h",
                         "casa": "Pinnacle",
                         "league_label": "WNBA",
                         "stake": 1,
@@ -3867,6 +3925,8 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn('19:30', html)
         self.assertIn('Publicable', html)
         self.assertIn('22:00', html)
+        self.assertIn('Ganador', html)
+        self.assertNotIn('| h2h |', html)
 
 
 if __name__ == "__main__":

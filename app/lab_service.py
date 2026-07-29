@@ -257,10 +257,22 @@ def _badge_class(kind: str) -> str:
     }.get(kind, "badge-yellow")
 
 
+def _market_label(value: Any) -> str:
+    market = str(value or "").strip().lower()
+    return {
+        "h2h": "Ganador",
+        "totals": "Totales",
+        "alternate_totals": "Totales alternativos",
+        "btts": "Ambos anotan",
+        "double_chance": "Doble oportunidad",
+        "team_totals": "Totales por equipo",
+    }.get(market, str(value or "mercado"))
+
+
 def _pick_card_html(pick: dict[str, Any], *, blocked: bool) -> str:
     title = escape(str(pick.get("partido") or "Partido sin nombre"))
     team = escape(str(pick.get("equipo") or "Seleccion sin nombre"))
-    market = escape(str(pick.get("mercado") or "mercado"))
+    market = escape(_market_label(pick.get("mercado")))
     league = escape(str(pick.get("league_label") or pick.get("sport_label") or "General"))
     house = escape(str(pick.get("casa") or "Casa"))
     reason = escape(str(pick.get("performance_guard_reason") or pick.get("motivo") or "Sin detalle"))

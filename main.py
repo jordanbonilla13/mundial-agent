@@ -455,6 +455,10 @@ def etiqueta_filtro_mercado(filtro: str) -> str:
     return sports_layer.etiqueta_filtro_mercado(filtro)
 
 
+def etiqueta_mercado_visible(mercado: str | None) -> str:
+    return etiqueta_filtro_mercado(str(mercado or "").strip().lower())
+
+
 def telegram_text(value: Any) -> str:
     return telegram_text_service(value)
 
@@ -3532,7 +3536,7 @@ def mis_apuestas(
             <td>{escape(str(pick['partido']))}</td>
             <td>{escape(str(pick['equipo']))}</td>
             <td>{tier_badge(tier)}</td>
-            <td>{escape(str(pick['mercado']))}</td>
+            <td>{escape(etiqueta_mercado_visible(pick.get('mercado')))}</td>
             <td>{escape(str(pick['casa']))}</td>
             <td>{quality:.0f}</td>
             <td>{reliability:.0f}</td>
@@ -3569,7 +3573,7 @@ def mis_apuestas(
             <td>{escape(str(pick['partido']))}</td>
             <td>{escape(str(pick['equipo']))}</td>
             <td>{tier_badge(tier)}</td>
-            <td>{escape(str(pick['mercado']))}</td>
+            <td>{escape(etiqueta_mercado_visible(pick.get('mercado')))}</td>
             <td>{quality:.0f}</td>
             <td>{reliability:.0f}</td>
             <td>{float(pick['importe_sugerido'] or 0):.2f}</td>
@@ -3974,7 +3978,7 @@ def dashboard():
             <td>{pick['id']}</td>
             <td>{escape(str(pick['partido']))}</td>
             <td>{escape(str(pick['equipo']))}</td>
-            <td>{escape(str(pick['mercado']))}</td>
+            <td>{escape(etiqueta_mercado_visible(pick.get('mercado')))}</td>
             <td>{escape(str(pick['casa']))}</td>
             <td>{float(pick['importe_sugerido'] or 0):.2f}</td>
         </tr>

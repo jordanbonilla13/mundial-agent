@@ -66,6 +66,9 @@ MIN_EDGE_ELO_ESPECULATIVO = 0.06
 MIN_MARGEN_ESPECULATIVO = 0.96
 MIN_VALOR_ESPECULATIVO = -0.03
 STAKE_PCT_ESPECULATIVO = 0.0025
+H2H_AMBIGUITY_MAX_SCORE_GAP = 4
+H2H_AMBIGUITY_MAX_VALUE_GAP = 0.012
+H2H_AMBIGUITY_MAX_PROB_GAP = 0.025
 
 STAKE_PROFILES = {
     "conservador": {
@@ -554,6 +557,83 @@ def obtener_perfil_stake(perfil: str) -> dict[str, float]:
     return STAKE_PROFILES.get(perfil, STAKE_PROFILES["moderado"])
 
 
+def _aggressive_profile(perfil: str) -> bool:
+    return str(perfil or "").strip().lower() == "agresivo"
+
+
+def _pick_sort_strength(pick: dict[str, Any]) -> tuple[float, ...]:
+    return (
+        float(pick.get("stake") or 0),
+        float(pick.get("quality_score") or 0),
+        float(pick.get("puntuacion_confianza") or 0),
+        float(pick.get("valor_esperado") or 0),
+        float(pick.get("probabilidad_modelo") or 0),
+    )
+
+
+def _apply_h2h_ambiguity_guard(recomendaciones: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[int]] = {}
+
+    for index, pick in enumerate(recomendaciones):
+        if str(pick.get("mercado") or "").strip().lower() != "h2h":
+            continue
+        if float(pick.get("stake") or 0) <= 0:
+            continue
+
+        event_id = str(pick.get("event_id") or "").strip()
+        if not event_id:
+            continue
+
+        key = (event_id, "h2h")
+        grouped.setdefault(key, []).append(index)
+
+    for indexes in grouped.values():
+        active = [
+            recomendaciones[idx]
+            for idx in indexes
+            if str(recomendaciones[idx].get("tipo_resultado") or "").strip().lower() != "draw"
+        ]
+        if len(active) < 2:
+            continue
+
+        ordered = sorted(active, key=_pick_sort_strength, reverse=True)
+        top = ordered[0]
+        runner_up = ordered[1]
+        top_side = str(top.get("tipo_resultado") or "").strip().lower()
+        runner_up_side = str(runner_up.get("tipo_resultado") or "").strip().lower()
+
+        if not top_side or not runner_up_side or top_side == runner_up_side:
+            continue
+
+        score_gap = abs(float(top.get("quality_score") or 0) - float(runner_up.get("quality_score") or 0))
+        value_gap = abs(float(top.get("valor_esperado") or 0) - float(runner_up.get("valor_esperado") or 0))
+        prob_gap = abs(float(top.get("probabilidad_modelo") or 0) - float(runner_up.get("probabilidad_modelo") or 0))
+
+        if (
+            score_gap > H2H_AMBIGUITY_MAX_SCORE_GAP
+            or value_gap > H2H_AMBIGUITY_MAX_VALUE_GAP
+            or prob_gap > H2H_AMBIGUITY_MAX_PROB_GAP
+        ):
+            continue
+
+        for idx in indexes:
+            pick = recomendaciones[idx].copy()
+            if float(pick.get("stake") or 0) <= 0:
+                continue
+            pick["stake"] = 0
+            pick["importe_sugerido"] = 0
+            pick["stake_pct_bankroll"] = 0
+            pick["kelly_fraccional"] = 0
+            pick["recomendacion"] = "No apostar"
+            pick["motivo"] = (
+                "Mercado h2h ambiguo: los dos lados salen demasiado parejos "
+                "y el sistema evita publicar una senal inestable."
+            )
+            recomendaciones[idx] = pick
+
+    return recomendaciones
+
+
 def aplicar_importe_minimo(
     stake_pct: float,
     bankroll: float,
@@ -883,25 +963,31 @@ def decidir_stake(
         return 0, 0, 0, "No apostar", "Sin ELO fiable para contrastar el mercado"
 
     if source_strength == "market_only":
+        min_margin = max(perfil_stake["min_margen_cuota"], 1.025 if _aggressive_profile(perfil) else 1.03)
+        min_value = max(perfil_stake["min_valor_esperado"], 0.02 if _aggressive_profile(perfil) else 0.03)
         if cuota > 3.50:
             return 0, 0, 0, "No apostar", "Cuota demasiado alta sin una senal estadistica propia fuerte"
-        if margen_cuota < max(perfil_stake["min_margen_cuota"], 1.03):
+        if margen_cuota < min_margin:
             return 0, 0, 0, "No apostar", "Sin ELO solo aceptamos margen claro frente a mercado"
-        if valor < max(perfil_stake["min_valor_esperado"], 0.03):
+        if valor < min_value:
             return 0, 0, 0, "No apostar", "Sin ELO solo aceptamos value claramente positivo"
     elif source_strength == "tennis_model":
+        min_margin = max(perfil_stake["min_margen_cuota"], 1.012 if _aggressive_profile(perfil) else 1.018)
+        min_value = max(perfil_stake["min_valor_esperado"], 0.01 if _aggressive_profile(perfil) else 0.015)
         if cuota > 2.85:
             return 0, 0, 0, "No apostar", "En tenis solo buscamos favoritos o cuotas medias muy justificadas"
-        if margen_cuota < max(perfil_stake["min_margen_cuota"], 1.018):
+        if margen_cuota < min_margin:
             return 0, 0, 0, "No apostar", "En tenis exigimos margen claro frente al precio de mercado"
-        if valor < max(perfil_stake["min_valor_esperado"], 0.015):
+        if valor < min_value:
             return 0, 0, 0, "No apostar", "En tenis exigimos value positivo y estable"
     elif source_strength == "basketball_model":
+        min_margin = max(perfil_stake["min_margen_cuota"], 1.015 if _aggressive_profile(perfil) else 1.02)
+        min_value = max(perfil_stake["min_valor_esperado"], 0.015 if _aggressive_profile(perfil) else 0.02)
         if cuota > 2.80:
             return 0, 0, 0, "No apostar", "En baloncesto evitamos cuotas largas en esta fase"
-        if margen_cuota < max(perfil_stake["min_margen_cuota"], 1.02):
+        if margen_cuota < min_margin:
             return 0, 0, 0, "No apostar", "En baloncesto exigimos margen suficiente frente al mercado"
-        if valor < max(perfil_stake["min_valor_esperado"], 0.02):
+        if valor < min_value:
             return 0, 0, 0, "No apostar", "En baloncesto exigimos value claramente positivo"
 
     edge_elo = (probabilidad_elo - probabilidad_mercado) if probabilidad_elo is not None else 0
@@ -1641,6 +1727,7 @@ def analizar_comparador_casas(
                         market_edge_vs_consensus=consensus["edge_vs_consensus"],
                     ).to_dict())
 
+    recomendaciones = _apply_h2h_ambiguity_guard(recomendaciones)
     return sorted(recomendaciones, key=lambda x: x["valor_esperado"], reverse=True)
 
 

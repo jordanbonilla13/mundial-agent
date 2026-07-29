@@ -12,21 +12,21 @@ def single_sport_pick_limit(operating_mode: str | None, partido: str | None) -> 
 
 
 def multi_sport_pick_limit(operating_mode: str | None) -> int:
-    return 8 if aggressive_mode_enabled(operating_mode) else 6
+    return 10 if aggressive_mode_enabled(operating_mode) else 6
 
 
 def telegram_pick_limit(operating_mode: str | None, solo_stakazos: bool) -> int:
     if solo_stakazos:
         return 8 if aggressive_mode_enabled(operating_mode) else 5
-    return 7 if aggressive_mode_enabled(operating_mode) else 5
+    return 9 if aggressive_mode_enabled(operating_mode) else 5
 
 
 def diversify_limits_for_todo(operating_mode: str | None) -> dict[str, int]:
     if aggressive_mode_enabled(operating_mode):
         return {
-            "max_total": 8,
-            "max_per_league": 3,
-            "max_per_sport": 4,
+            "max_total": 10,
+            "max_per_league": 4,
+            "max_per_sport": 5,
         }
     return {
         "max_total": 6,
@@ -41,6 +41,6 @@ def operating_mode_summary(operating_mode: str | None) -> dict[str, Any]:
     return {
         "operating_mode": mode,
         "single_sport_limit": 7 if aggressive else 5,
-        "multi_sport_limit": 8 if aggressive else 6,
-        "telegram_limit": 7 if aggressive else 5,
+        "multi_sport_limit": 10 if aggressive else 6,
+        "telegram_limit": 9 if aggressive else 5,
     }
