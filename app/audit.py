@@ -94,6 +94,8 @@ def _latest_publications(limit: int = 5) -> list[dict[str, Any]]:
     for publication in publications:
         summary = publication.get("resultado_resumen") or {}
         pick_items = [item for item in publication.get("items", []) if item.get("message_kind") == "pick"]
+        if not pick_items:
+            continue
         picks_preview = []
 
         for item in pick_items[:3]:
@@ -129,6 +131,50 @@ def _latest_publications(limit: int = 5) -> list[dict[str, Any]]:
         )
 
     return latest
+
+
+def _parse_report_datetime(value: str | None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _metric_is_recent(metrics: Any, *, target_date: datetime, max_age_days: int = 60) -> bool:
+    last_pick_date = _parse_report_datetime(getattr(metrics, "last_pick_date", None))
+    if last_pick_date is None:
+        return False
+    age_days = (target_date.astimezone(timezone.utc) - last_pick_date).total_seconds() / 86400
+    return age_days <= max_age_days
+
+
+def _calibration_alerts_for_report(calibration: Any, *, target_date: datetime) -> list[str]:
+    alerts: list[str] = []
+    segments_by_type = getattr(calibration, "segments_by_type", {}) or {}
+
+    for league, metrics in (segments_by_type.get("ligas", {}) or {}).items():
+        if not _metric_is_recent(metrics, target_date=target_date):
+            continue
+        if not metrics.min_sample_warning and metrics.roi < -5:
+            alerts.append(f"⚠️ {league}: ROI {metrics.roi:.2f}% | hit {metrics.hit_rate:.0f}%")
+        elif metrics.recommendation == "penalizar":
+            alerts.append(
+                f"⚠️ {league}: confianza {metrics.confidence_score:.2f} | {metrics.picks_closed} cerradas"
+            )
+
+    for combo, metrics in (segments_by_type.get("ligas_mercados", {}) or {}).items():
+        if not _metric_is_recent(metrics, target_date=target_date):
+            continue
+        if not metrics.min_sample_warning and (metrics.roi < -8 or metrics.hit_rate < 42):
+            alerts.append(f"⚠️ {combo}: ROI {metrics.roi:.2f}% | hit {metrics.hit_rate:.0f}%")
+
+    return alerts[:2]
 
 
 def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[str, Any]:
@@ -255,7 +301,7 @@ def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_
         alerts.append(f"🔴 Hit rate bajo: {day_data['hitrate']}%.")
     
     # Incluir alertas de calibración
-    calibration_alerts = calibration.alerts[:3]  # Top 3
+    calibration_alerts = _calibration_alerts_for_report(calibration, target_date=target_date)
     alerts.extend(calibration_alerts)
     
     # Status general
@@ -410,6 +456,95 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
     
     lines.append("\n" + "=" * 50)
     
+    return "\n".join(lines)
+
+
+def format_audit_report_telegram(report: dict[str, Any]) -> str:
+    """Formatea el reporte de auditoria para Telegram en version compacta."""
+
+    lines: list[str] = []
+    portfolio = report.get("model_portfolio") or {}
+    today_portfolio = portfolio.get("today") or {}
+    all_time_portfolio = portfolio.get("all_time") or {}
+    latest_publications = report.get("latest_publications") or []
+    top_publication = latest_publications[0] if latest_publications else None
+
+    lines.append(f"📊 AUDITORÍA {report['date']} | {report['status']}")
+    lines.append(report["status_detail"])
+    lines.append("")
+    lines.append("🤖 Portfolio modelo")
+    lines.append(
+        f"Hoy: {today_portfolio.get('published', 0)} pub | "
+        f"{today_portfolio.get('closed', 0)} cerr | "
+        f"{today_portfolio.get('pending', 0)} pend | "
+        f"{today_portfolio.get('won', 0)}W-{today_portfolio.get('lost', 0)}L-{today_portfolio.get('push', 0)}N"
+    )
+    lines.append(
+        f"ROI/Hit hoy: {today_portfolio.get('roi', 0):+.2f}% | "
+        f"{today_portfolio.get('hit_rate', 0):.0f}%"
+    )
+    lines.append(
+        f"Global: {all_time_portfolio.get('published', 0)} pub | "
+        f"{all_time_portfolio.get('closed', 0)} cerr | "
+        f"{all_time_portfolio.get('pending', 0)} pend | "
+        f"{all_time_portfolio.get('won', 0)}W-{all_time_portfolio.get('lost', 0)}L-{all_time_portfolio.get('push', 0)}N"
+    )
+
+    lines.append("")
+    lines.append("📈 Día real")
+    lines.append(
+        f"Rec {report['picks']['recommended']} | "
+        f"Ejec {report['picks']['executed']} | "
+        f"Cerr {report['picks']['closed']} | "
+        f"{report['picks']['won']}W-{report['picks']['lost']}L"
+    )
+    if report["picks"]["closed"] > 0:
+        lines.append(
+            f"€{report['metrics']['profit']:+.2f} | ROI {report['metrics']['roi']:+.2f}% | "
+            f"Hit {report['metrics']['hitrate']:.0f}%"
+        )
+    else:
+        lines.append("Sin cerradas reales hoy.")
+
+    lines.append("")
+    lines.append(
+        f"📊 vs hist | ROI {report['vs_historical']['roi_delta']:+.2f}pp | "
+        f"Hit {report['vs_historical']['hitrate_delta']:+.2f}pp"
+    )
+    lines.append(
+        f"⚙️ Modelo | {report['calibration']['total_picks_evaluated']} eval | "
+        f"conf {report['calibration']['model_confidence']:.0%}"
+    )
+
+    if top_publication:
+        lines.append("")
+        lines.append(
+            f"🧾 Última pub #{top_publication.get('id')} | "
+            f"{top_publication.get('total_picks', 0)} picks | "
+            f"{top_publication.get('won', 0)}W-{top_publication.get('lost', 0)}L-{top_publication.get('push', 0)}N | "
+            f"{top_publication.get('pending', 0)} pend"
+        )
+        for preview in top_publication.get("picks_preview", [])[:3]:
+            outcome = preview.rsplit("|", 1)[-1].strip().lower()
+            icon = "✅" if outcome == "ganada" else "❌" if outcome == "perdida" else "➖" if outcome == "nula" else "⏳"
+            compact_preview = (
+                preview.replace(" | ganada", "")
+                .replace(" | perdida", "")
+                .replace(" | nula", "")
+                .replace(" | pendiente", "")
+            )
+            lines.append(f"{icon} {compact_preview}")
+
+    if report["alerts"]:
+        lines.append("")
+        lines.append("🚨 Alertas")
+        for alert in report["alerts"][:2]:
+            lines.append(alert)
+
+    if report.get("ai_insights"):
+        lines.append("")
+        lines.append(f"🧠 {report['ai_insights']}")
+
     return "\n".join(lines)
 
 
