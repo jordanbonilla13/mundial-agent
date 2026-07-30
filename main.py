@@ -3092,7 +3092,7 @@ def lab_run(
     modo: str = "comparador",
     mercados: str = "todo",
     partido: str = "todos",
-    deporte: str = DEFAULT_SPORT,
+    deporte: str = "todo",
     solo_stakazos: bool = False,
     format: str = "html",
 ):
@@ -3197,7 +3197,7 @@ async def lab_run_publicar(request: Request):
     modo = str(form.get("modo") or "comparador").strip() or "comparador"
     mercados = str(form.get("mercados") or "todo").strip() or "todo"
     partido = str(form.get("partido") or "todos").strip() or "todos"
-    deporte = str(form.get("deporte") or DEFAULT_SPORT).strip() or DEFAULT_SPORT
+    deporte = str(form.get("deporte") or "todo").strip() or "todo"
     solo_stakazos = str(form.get("solo_stakazos") or "false").strip().lower() == "true"
 
     payload_raw = str(form.get("lab_payload") or "").strip()

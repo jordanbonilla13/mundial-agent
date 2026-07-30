@@ -3914,7 +3914,7 @@ class BettingModelTests(unittest.TestCase):
                 "modo": "comparador",
                 "mercados": "todo",
                 "partido": "todos",
-                "deporte": "baloncesto",
+                "deporte": "todo",
                 "solo_stakazos": "false",
             },
             premium_css=lambda: ":root{}",
@@ -3927,7 +3927,7 @@ class BettingModelTests(unittest.TestCase):
                 {"value": "pinnacle", "label": "Pinnacle"},
             ],
             sport_options=[
-                {"value": "todo", "label": "Todo"},
+                {"value": "todo", "label": "Todo - deportes base"},
                 {"value": "baloncesto", "label": "Baloncesto"},
             ],
             market_options=[
@@ -3951,6 +3951,7 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn('Comparando precios entre casas', html)
         self.assertIn('/lab/run/publicar', html)
         self.assertIn('Publicar en Telegram y registrar cartera', html)
+        self.assertIn('<option value="todo" selected>Todo - deportes base</option>', html)
         self.assertIn('name="deporte"', html)
         self.assertIn('name="partido"', html)
         self.assertIn('Todos los partidos', html)
