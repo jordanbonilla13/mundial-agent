@@ -3005,6 +3005,101 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Resumen enviado", response)
         self.assertIn("12 picks", response)
 
+    def test_procesar_comando_apuestas_lanza_job_y_notifica(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_lanzar_apuestas = main.lanzar_apuestas_telegram_async
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main.lanzar_apuestas_telegram_async = lambda: "job123abc"
+
+            response = procesar_comando_telegram("/apuestas")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main.lanzar_apuestas_telegram_async = original_lanzar_apuestas
+
+        self.assertEqual(len(sent_messages), 1)
+        self.assertIn("/apuestas en marcha", sent_messages[0])
+        self.assertIn("job123abc", sent_messages[0])
+        self.assertIn("/apuestas lanzado", response)
+
+    def test_lanzar_apuestas_async_usa_preset_lab_y_envia_resumen_final(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_publicar_pronosticos_lab = main.publicar_pronosticos_lab
+        original_thread = main.threading.Thread
+
+        sent_messages: list[str] = []
+        published_calls: list[dict[str, object]] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        class ImmediateThread:
+            def __init__(self, target=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                if self._target is not None:
+                    self._target()
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+
+            def fake_publicar_pronosticos_lab(**kwargs):
+                published_calls.append(kwargs)
+                return {
+                    "ok": True,
+                    "picks_guardados": 3,
+                    "mensajes_enviados": 4,
+                    "publication_id": 77,
+                }
+
+            main.publicar_pronosticos_lab = fake_publicar_pronosticos_lab
+            main.threading.Thread = ImmediateThread
+
+            job_id = main.lanzar_apuestas_telegram_async()
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main.publicar_pronosticos_lab = original_publicar_pronosticos_lab
+            main.threading.Thread = original_thread
+
+        self.assertTrue(job_id)
+        self.assertEqual(len(published_calls), 1)
+        self.assertEqual(
+            published_calls[0],
+            {
+                "bankroll": 200.0,
+                "perfil": "agresivo",
+                "modo": "comparador",
+                "mercados": "todo",
+                "partido": "todos",
+                "deporte": "todo",
+                "solo_stakazos": False,
+            },
+        )
+        self.assertEqual(len(sent_messages), 1)
+        self.assertIn("/apuestas completado", sent_messages[0])
+        self.assertIn("Picks publicadas: <b>3</b>", sent_messages[0])
+
     def test_opciones_deporte_disponibles_incluye_todo(self):
         opciones = opciones_deporte_disponibles(selected="futbol")
 

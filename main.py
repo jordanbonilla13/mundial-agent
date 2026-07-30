@@ -104,6 +104,7 @@ telegram_updates_thread: threading.Thread | None = None
 audit_scheduler_stop = threading.Event()
 audit_scheduler_thread: threading.Thread | None = None
 lab_publication_jobs: dict[str, dict[str, Any]] = {}
+telegram_command_jobs: dict[str, dict[str, Any]] = {}
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
@@ -192,6 +193,16 @@ FILTROS_NO_SOPORTADOS = {
     "jugador_entradas": "The Odds API no ofrece entradas por jugador para fútbol.",
     "jugador_remates_cabeza": "The Odds API no ofrece remates de cabeza a puerta por jugador.",
     "jugador_remates_fuera_area": "The Odds API no ofrece remates a puerta fuera del área por jugador.",
+}
+
+TELEGRAM_APUESTAS_DEFAULTS = {
+    "bankroll": 200.0,
+    "perfil": "agresivo",
+    "modo": "comparador",
+    "mercados": "todo",
+    "partido": "todos",
+    "deporte": "todo",
+    "solo_stakazos": False,
 }
 
 
@@ -661,7 +672,18 @@ def procesar_comando_telegram(command_text: str) -> str:
             f"Portfolio publicado: {report['model_portfolio']['all_time']['published']} picks."
         )
 
-    return "Comando no soportado. Usa /resumen."
+    if command.startswith("/apuestas"):
+        token, chat_id = telegram_config()
+        client = telegram_client(token=token, chat_id=chat_id)
+        job_id = lanzar_apuestas_telegram_async()
+        client.send_message(
+            "⏳ <b>/apuestas en marcha</b>\n"
+            "Estoy buscando picks con el preset del lab y, si salen publicables, las envio al canal automaticamente.\n"
+            f"Job: <code>{telegram_text_service(job_id)}</code>"
+        )
+        return f"/apuestas lanzado. Job {job_id}."
+
+    return "Comando no soportado. Usa /resumen o /apuestas."
 
 
 def construir_resumen_telegram(force_refresh_scores: bool = True) -> tuple[str, dict[str, Any]]:
@@ -939,6 +961,64 @@ def iniciar_publicacion_lab_async(
                 "error": str(exc),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return job_id
+
+
+def lanzar_apuestas_telegram_async() -> str:
+    token, chat_id = telegram_config()
+    job_id = uuid.uuid4().hex[:12]
+    telegram_command_jobs[job_id] = {
+        "state": "queued",
+        "command": "/apuestas",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        **TELEGRAM_APUESTAS_DEFAULTS,
+    }
+
+    def _worker() -> None:
+        try:
+            telegram_command_jobs[job_id]["state"] = "running"
+            result = publicar_pronosticos_lab(**TELEGRAM_APUESTAS_DEFAULTS)
+            telegram_command_jobs[job_id] = {
+                **telegram_command_jobs[job_id],
+                "state": "completed",
+                "result": result,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            client = telegram_client(token=token, chat_id=chat_id)
+            total_publicadas = int(result.get("picks_guardados") or 0)
+            total_mensajes = int(result.get("mensajes_enviados") or 0)
+            publication_id = result.get("publication_id")
+
+            if total_publicadas > 0:
+                client.send_message(
+                    "✅ <b>/apuestas completado</b>\n"
+                    f"Picks publicadas: <b>{total_publicadas}</b>\n"
+                    f"Mensajes enviados: <b>{total_mensajes}</b>\n"
+                    f"Publication ID: <code>{telegram_text_service(publication_id or '-')}</code>"
+                )
+            else:
+                client.send_message(
+                    "ℹ️ <b>/apuestas sin picks publicables</b>\n"
+                    "He ejecutado el preset del lab, pero en esta pasada no salio ninguna pick valida para publicar."
+                )
+        except Exception as exc:
+            telegram_command_jobs[job_id] = {
+                **telegram_command_jobs.get(job_id, {}),
+                "state": "error",
+                "error": str(exc),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            try:
+                client = telegram_client(token=token, chat_id=chat_id)
+                client.send_message(
+                    "❌ <b>/apuestas falló</b>\n"
+                    f"No pude completar la publicacion automatica.\nDetalle: <code>{telegram_text_service(str(exc))}</code>"
+                )
+            except Exception:
+                pass
 
     threading.Thread(target=_worker, daemon=True).start()
     return job_id
