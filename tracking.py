@@ -1056,7 +1056,7 @@ def listar_publicaciones_telegram(limit: int = 20, db_path: str = DB_PATH) -> li
                 dict(item)
                 for item in conn.execute(
                     """
-                    SELECT i.*, p.estado, p.resultado, p.partido, p.equipo
+                    SELECT i.*, p.estado, p.resultado, p.partido, p.equipo, p.raw_json
                     FROM telegram_publication_items i
                     LEFT JOIN picks p ON p.id = i.pick_id
                     WHERE i.publication_id = ?

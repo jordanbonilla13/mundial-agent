@@ -30,6 +30,7 @@ from app.runtime_settings import RuntimeSettings
 from app.safety_service import publication_guard_state
 from app.operating_mode import multi_sport_pick_limit, single_sport_pick_limit, telegram_pick_limit
 from app.exposure import apply_exposure_limits
+from app.audit import format_audit_report_telegram
 from tracking import actualizar_resultado, estadisticas, guardar_recomendaciones
 from tracking import aprendizaje, dashboard_data, guardar_snapshot_cuotas, liquidar_picks_con_scores, listar_evaluaciones_picks, listar_picks, obtener_closing_odds_pick, penalizaciones_historicas
 from tracking import actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, guardar_apuesta_real, marcar_apuesta_real_pick, obtener_bankroll
@@ -3099,6 +3100,65 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(len(sent_messages), 1)
         self.assertIn("/apuestas completado", sent_messages[0])
         self.assertIn("Picks publicadas: <b>3</b>", sent_messages[0])
+
+    def test_resumen_telegram_muestra_publicado_hoy_con_picks_del_dia(self):
+        report = {
+            "date": "2026-07-30",
+            "status": "✅ VERDE",
+            "status_detail": "Dia positivo. Modelo funcionando bien.",
+            "model_portfolio": {
+                "today": {"published": 4, "closed": 2, "pending": 2, "won": 2, "lost": 0, "push": 0, "roi": 37.98, "hit_rate": 100.0},
+                "all_time": {"published": 89, "closed": 32, "pending": 57, "won": 5, "lost": 8, "push": 19, "roi": 0.0, "hit_rate": 0.0},
+            },
+            "picks": {"recommended": 4, "executed": 2, "closed": 1, "won": 1, "lost": 0},
+            "metrics": {"profit": 8.7, "roi": 63.97, "hitrate": 100.0},
+            "vs_historical": {"roi_delta": 57.08, "hitrate_delta": 66.0},
+            "calibration": {"total_picks_evaluated": 13, "model_confidence": 1.1},
+            "latest_publications": [
+                {
+                    "id": 68,
+                    "created_at": "2026-07-30T17:30:00+00:00",
+                    "total_picks": 1,
+                    "won": 0,
+                    "lost": 0,
+                    "push": 0,
+                    "pending": 1,
+                    "picks_preview": ["Ugo Humbert vs Ben Shelton | Ben Shelton | pendiente"],
+                    "picks_preview_items": [
+                        {"match_label": "Ugo Humbert vs Ben Shelton", "team_label": "Ben Shelton", "outcome": "pendiente"},
+                    ],
+                }
+            ],
+            "daily_publications": [
+                {
+                    "id": 65,
+                    "created_at": "2026-07-30T10:00:00+00:00",
+                    "picks_preview_items": [
+                        {"match_label": "Brandon Nakashima vs Jakub Mensik", "team_label": "Brandon Nakashima", "outcome": "ganada", "was_bet": True},
+                        {"match_label": "Terence Atmane vs Alejandro Tabilo", "team_label": "Alejandro Tabilo", "outcome": "pendiente"},
+                        {"match_label": "Alex de Minaur vs Cruz Hewitt", "team_label": "Alex de Minaur", "outcome": "ganada", "was_bet": True},
+                    ],
+                },
+                {
+                    "id": 68,
+                    "created_at": "2026-07-30T17:30:00+00:00",
+                    "picks_preview_items": [
+                        {"match_label": "Ugo Humbert vs Ben Shelton", "team_label": "Ben Shelton", "outcome": "pendiente"},
+                    ],
+                },
+            ],
+            "alerts": ["⚠️ Solo 50% de picks se ejecutaron."],
+            "ai_insights": None,
+        }
+
+        text = format_audit_report_telegram(report)
+
+        self.assertIn("🗓️ Publicado hoy | 4 picks | 2W-0L-0N | 2 pend", text)
+        self.assertIn("✅💵 Brandon Nakashima vs Jakub Mensik | Brandon Nakashima", text)
+        self.assertIn("⏳ Terence Atmane vs Alejandro Tabilo | Alejandro Tabilo", text)
+        self.assertIn("✅💵 Alex de Minaur vs Cruz Hewitt | Alex de Minaur", text)
+        self.assertIn("⏳ Ugo Humbert vs Ben Shelton | Ben Shelton", text)
+        self.assertIn("🧾 Última pub #68 | 1 picks | 0W-0L-0N | 1 pend", text)
 
     def test_opciones_deporte_disponibles_incluye_todo(self):
         opciones = opciones_deporte_disponibles(selected="futbol")

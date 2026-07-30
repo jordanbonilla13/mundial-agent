@@ -101,12 +101,14 @@ def _latest_publications(limit: int = 5) -> list[dict[str, Any]]:
         if not pick_items:
             continue
         picks_preview = []
+        picks_preview_items = []
 
         for item in pick_items[:3]:
             match_label = str(item.get("partido") or "Partido").strip()
             team_label = str(item.get("equipo") or "Seleccion").strip()
             result = str(item.get("resultado") or "").strip().lower()
             state = str(item.get("estado") or "").strip().lower()
+            was_bet = _bool_pick_flag(item, "apuesta_real", False)
             if result == "win":
                 outcome = "ganada"
             elif result == "loss":
@@ -118,6 +120,14 @@ def _latest_publications(limit: int = 5) -> list[dict[str, Any]]:
             else:
                 outcome = "pendiente"
             picks_preview.append(f"{match_label} | {team_label} | {outcome}")
+            picks_preview_items.append(
+                {
+                    "match_label": match_label,
+                    "team_label": team_label,
+                    "outcome": outcome,
+                    "was_bet": was_bet,
+                }
+            )
 
         latest.append(
             {
@@ -131,10 +141,57 @@ def _latest_publications(limit: int = 5) -> list[dict[str, Any]]:
                 "lost": int(summary.get("perdidas") or 0),
                 "push": int(summary.get("nulas") or 0),
                 "picks_preview": picks_preview,
+                "picks_preview_items": picks_preview_items,
             }
         )
 
     return latest
+
+
+def _publications_for_day(*, target_date: datetime, limit: int = 12) -> list[dict[str, Any]]:
+    target_day = target_date.astimezone(timezone.utc).date()
+    return [
+        publication
+        for publication in _latest_publications(limit=limit)
+        if (_parse_report_datetime(publication.get("created_at")) or target_date).date() == target_day
+    ]
+
+
+def _daily_publication_rollup(publications: list[dict[str, Any]]) -> dict[str, Any]:
+    unique_picks: dict[tuple[str, str], dict[str, str]] = {}
+
+    for publication in sorted(
+        publications,
+        key=lambda item: _parse_report_datetime(item.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
+    ):
+        for item in publication.get("picks_preview_items", []) or []:
+            key = (
+                str(item.get("match_label") or "").strip().lower(),
+                str(item.get("team_label") or "").strip().lower(),
+            )
+            if not all(key):
+                continue
+            unique_picks[key] = {
+                "match_label": str(item.get("match_label") or "").strip(),
+                "team_label": str(item.get("team_label") or "").strip(),
+                "outcome": str(item.get("outcome") or "pendiente").strip().lower(),
+                "was_bet": bool(item.get("was_bet")),
+            }
+
+    picks = list(unique_picks.values())
+    won = sum(1 for item in picks if item.get("outcome") == "ganada")
+    lost = sum(1 for item in picks if item.get("outcome") == "perdida")
+    push = sum(1 for item in picks if item.get("outcome") == "nula")
+    pending = sum(1 for item in picks if item.get("outcome") not in {"ganada", "perdida", "nula"})
+
+    return {
+        "total_picks": len(picks),
+        "won": won,
+        "lost": lost,
+        "push": push,
+        "pending": pending,
+        "picks": picks,
+    }
 
 
 def _parse_report_datetime(value: str | None) -> datetime | None:
@@ -359,6 +416,7 @@ def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_
         },
         "model_portfolio": day_data["model_published"],
         "latest_publications": _latest_publications(),
+        "daily_publications": _publications_for_day(target_date=target_date),
         "ai_insights": None,
         "picks_detail": day_data["picks_list"],
     }
@@ -480,6 +538,8 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
     today_portfolio = portfolio.get("today") or {}
     all_time_portfolio = portfolio.get("all_time") or {}
     latest_publications = report.get("latest_publications") or []
+    daily_publications = report.get("daily_publications") or []
+    daily_rollup = _daily_publication_rollup(daily_publications)
     top_publication = latest_publications[0] if latest_publications else None
 
     lines.append(f"📊 AUDITORÍA {report['date']} | {report['status']}")
@@ -528,6 +588,20 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
         f"⚙️ Modelo | {report['calibration']['total_picks_evaluated']} eval | "
         f"conf {report['calibration']['model_confidence']:.0%}"
     )
+
+    if daily_rollup.get("total_picks", 0) > 0:
+        lines.append("")
+        lines.append(
+            f"🗓️ Publicado hoy | "
+            f"{daily_rollup.get('total_picks', 0)} picks | "
+            f"{daily_rollup.get('won', 0)}W-{daily_rollup.get('lost', 0)}L-{daily_rollup.get('push', 0)}N | "
+            f"{daily_rollup.get('pending', 0)} pend"
+        )
+        for item in daily_rollup.get("picks", [])[:6]:
+            outcome = str(item.get("outcome") or "").strip().lower()
+            was_bet = bool(item.get("was_bet"))
+            icon = "✅💵" if outcome == "ganada" and was_bet else "✅" if outcome == "ganada" else "❌" if outcome == "perdida" else "➖" if outcome == "nula" else "⏳"
+            lines.append(f"{icon} {item.get('match_label')} | {item.get('team_label')}")
 
     if top_publication:
         lines.append("")
