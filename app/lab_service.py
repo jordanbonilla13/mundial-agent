@@ -1,3 +1,5 @@
+import base64
+import json
 from datetime import datetime
 from html import escape
 from typing import Any, Callable
@@ -372,6 +374,13 @@ def render_lab_run_html(
     blocked_cards = "".join(_pick_card_html(pick, blocked=True) for pick in (blocked_recommended + blocked_discarded)) or '<div class="card"><p class="muted">No hay picks bloqueadas en esta simulacion.</p></div>'
     telegram_preview = lab.get("telegram_preview") or {}
     summary_message = escape(str(telegram_preview.get("resumen_telegram") or "Sin resumen"))
+    publish_payload_b64 = ""
+    try:
+        publish_payload_b64 = base64.b64encode(
+            json.dumps(telegram_preview, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
+    except Exception:
+        publish_payload_b64 = ""
     blocked_total = int(forecast_summary.get("total_bloqueadas_en_recomendadas", 0) or 0) + int(forecast_summary.get("total_bloqueadas_en_descartadas", 0) or 0)
     bankroll_value = "" if query_params.get("bankroll") in (None, "") else escape(str(query_params.get("bankroll")), quote=True)
     solo_stakazos_checked = "checked" if str(query_params.get("solo_stakazos") or "false").lower() == "true" else ""
@@ -400,16 +409,27 @@ def render_lab_run_html(
             '<p class="muted">No habia picks publicables con esos filtros, asi que no se ha registrado ninguna cartera.</p>'
             '</section>'
         )
+    elif notice_code == "queued":
+        job_id = escape(str(query_params.get("job_id") or "-"))
+        registered_picks = escape(str(query_params.get("registered_picks") or "0"))
+        notice_html = (
+            f'<section class="card" style="margin-top: 18px; border-color: rgba(46,108,171,0.24);">'
+            f'<div class="badge badge-yellow">Publicacion en curso</div>'
+            f'<p class="muted">El envio a Telegram se ha lanzado en segundo plano para no bloquear la web. '
+            f'Job {job_id} | picks preparadas: {registered_picks}. Refresca en unos segundos si quieres seguir revisando el lab.</p>'
+            f'</section>'
+        )
     publish_form_inputs = "".join(
         f'<input type="hidden" name="{escape(str(key), quote=True)}" value="{escape(str(value), quote=True)}">'
         for key, value in query_refresh.items()
-        if key not in {"format", "lab_notice", "publication_id", "registered_picks", "sent_messages"} and value not in (None, "")
+        if key not in {"format", "lab_notice", "publication_id", "registered_picks", "sent_messages", "job_id"} and value not in (None, "")
     )
     publish_action_html = ""
     if publishable_preview:
         publish_action_html = (
             '<form method="post" action="/lab/run/publicar" class="cta-row">'
             f"{publish_form_inputs}"
+            f'<input type="hidden" name="lab_payload" value="{escape(publish_payload_b64, quote=True)}">'
             '<button type="submit">Publicar en Telegram y registrar cartera</button>'
             '<span class="muted">Envia estas picks al canal y las deja guardadas para que /resumen las audite despues.</span>'
             "</form>"

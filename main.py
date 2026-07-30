@@ -3,6 +3,7 @@ import json
 import os
 import re
 import threading
+import uuid
 from datetime import datetime, timezone
 from html import escape
 from typing import Any
@@ -102,6 +103,7 @@ telegram_scheduler_thread: threading.Thread | None = None
 telegram_updates_thread: threading.Thread | None = None
 audit_scheduler_stop = threading.Event()
 audit_scheduler_thread: threading.Thread | None = None
+lab_publication_jobs: dict[str, dict[str, Any]] = {}
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
@@ -816,6 +818,130 @@ def publicar_pronosticos_lab(
         chat_id=chat_id,
         publication_type="lab",
     )
+
+
+def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
+    token, chat_id = telegram_config()
+    picks_publicables = list(payload.get("pronosticos", []))
+    if not picks_publicables:
+        return {
+            "ok": True,
+            "mensajes_enviados": 0,
+            "picks_guardados": 0,
+            "publication_id": None,
+        }
+
+    picks_guardados = guardar_recomendaciones_unicas(picks_publicables)
+    picks_por_fingerprint = {
+        fingerprint_pick_service(item): item
+        for item in picks_guardados
+    }
+
+    picks_publicables = [
+        {**pick, **(_raw_pick(picks_por_fingerprint.get(fingerprint_pick_service(pick), {})) if picks_por_fingerprint.get(fingerprint_pick_service(pick)) else {}), **(picks_por_fingerprint.get(fingerprint_pick_service(pick)) or {})}
+        for pick in picks_publicables
+    ]
+
+    summary_text = str(payload.get("resumen_telegram") or "").strip()
+    pick_messages = list(payload.get("mensajes_telegram") or [])
+    if len(pick_messages) != len(picks_publicables):
+        pick_messages = [formatear_mensaje_telegram_pick(pick) for pick in picks_publicables]
+    messages = ([summary_text] if summary_text else []) + pick_messages
+
+    sent_messages = []
+    publication_items = []
+
+    for index, text in enumerate(messages):
+        reply_markup = None
+        pick_id = None
+        if summary_text and index > 0:
+            pick = picks_publicables[index - 1]
+        elif not summary_text:
+            pick = picks_publicables[index]
+        else:
+            pick = None
+        if pick is not None and pick.get("id"):
+            pick_id = int(pick["id"])
+            reply_markup = telegram_keyboard_for_pick(pick_id)
+
+        result = enviar_mensaje_telegram(
+            text,
+            token=token,
+            chat_id=chat_id,
+            reply_markup=reply_markup,
+        )
+        sent_messages.append(result)
+
+        publication_items.append(
+            {
+                "telegram_message_id": ((result.get("result") or {}).get("message_id")),
+                "message_kind": "summary" if summary_text and index == 0 else "pick",
+                "text": text,
+                "pick_id": pick_id,
+            }
+        )
+
+    publicacion = registrar_publicacion_telegram(
+        publication_type="lab",
+        payload=payload,
+        items=publication_items,
+    )
+    return {
+        "ok": True,
+        "chat_id": chat_id,
+        "mensajes_enviados": len(sent_messages),
+        "picks_guardados": len(picks_guardados),
+        "publication_id": publicacion.get("id"),
+        "runtime_mode": "manual_lab",
+    }
+
+
+def iniciar_publicacion_lab_async(
+    *,
+    payload: dict[str, Any] | None,
+    bankroll: float | None,
+    perfil: str,
+    modo: str,
+    mercados: str,
+    partido: str,
+    deporte: str,
+    solo_stakazos: bool,
+) -> str:
+    job_id = uuid.uuid4().hex[:12]
+    lab_publication_jobs[job_id] = {
+        "state": "queued",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    def _worker() -> None:
+        try:
+            lab_publication_jobs[job_id]["state"] = "running"
+            if payload is not None:
+                result = publicar_payload_preparado_lab(payload)
+            else:
+                result = publicar_pronosticos_lab(
+                    bankroll=bankroll,
+                    perfil=perfil,
+                    modo=modo,
+                    mercados=mercados,
+                    partido=partido,
+                    deporte=deporte,
+                    solo_stakazos=solo_stakazos,
+                )
+            lab_publication_jobs[job_id] = {
+                "state": "completed",
+                "result": result,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as exc:
+            lab_publication_jobs[job_id] = {
+                "state": "error",
+                "error": str(exc),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return job_id
 
 
 def auto_publicar_telegram_once() -> dict | None:
@@ -3074,15 +3200,33 @@ async def lab_run_publicar(request: Request):
     deporte = str(form.get("deporte") or DEFAULT_SPORT).strip() or DEFAULT_SPORT
     solo_stakazos = str(form.get("solo_stakazos") or "false").strip().lower() == "true"
 
-    resultado = publicar_pronosticos_lab(
-        bankroll=bankroll,
-        perfil=perfil,
-        modo=modo,
-        mercados=mercados,
-        partido=partido,
-        deporte=deporte,
-        solo_stakazos=solo_stakazos,
-    )
+    payload_raw = str(form.get("lab_payload") or "").strip()
+    payload = None
+    if payload_raw:
+        try:
+            payload = json.loads(base64.b64decode(payload_raw.encode("ascii")).decode("utf-8"))
+        except Exception:
+            payload = None
+
+    if payload is not None and not list(payload.get("pronosticos") or []):
+        resultado = {"picks_guardados": 0, "publication_id": None, "mensajes_enviados": 0}
+    else:
+        job_id = iniciar_publicacion_lab_async(
+            payload=payload,
+            bankroll=bankroll,
+            perfil=perfil,
+            modo=modo,
+            mercados=mercados,
+            partido=partido,
+            deporte=deporte,
+            solo_stakazos=solo_stakazos,
+        )
+        resultado = {
+            "picks_guardados": len(list((payload or {}).get("pronosticos") or [])) if payload is not None else 0,
+            "publication_id": "",
+            "mensajes_enviados": 0,
+            "job_id": job_id,
+        }
 
     query = {
         "perfil": perfil,
@@ -3091,10 +3235,11 @@ async def lab_run_publicar(request: Request):
         "partido": partido,
         "deporte": deporte,
         "solo_stakazos": "true" if solo_stakazos else "false",
-        "lab_notice": "published" if int(resultado.get("picks_guardados") or 0) > 0 else "empty",
+        "lab_notice": "queued" if resultado.get("job_id") else ("published" if int(resultado.get("picks_guardados") or 0) > 0 else "empty"),
         "publication_id": str(resultado.get("publication_id") or ""),
         "registered_picks": str(resultado.get("picks_guardados") or 0),
         "sent_messages": str(resultado.get("mensajes_enviados") or 0),
+        "job_id": str(resultado.get("job_id") or ""),
     }
     if bankroll is not None:
         query["bankroll"] = str(bankroll)
