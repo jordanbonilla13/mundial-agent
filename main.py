@@ -6,7 +6,7 @@ import threading
 from datetime import datetime, timezone
 from html import escape
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlencode
 
 import requests
 from dotenv import load_dotenv
@@ -59,7 +59,7 @@ from app.publication_service import (
 )
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
 from app.safety_service import publication_guard_state
-from app.runtime_settings import load_runtime_settings
+from app.runtime_settings import RuntimeSettings, load_runtime_settings
 from app.telegram_service import (
     TelegramBotConfig,
     TelegramClient,
@@ -765,6 +765,56 @@ def publicar_pronosticos_telegram(
         token=token,
         chat_id=chat_id,
         publication_type=publication_type,
+    )
+
+
+def publicar_pronosticos_lab(
+    bankroll: float | None = None,
+    perfil: str = "moderado",
+    modo: str = "comparador",
+    mercados: str = "todo",
+    partido: str = "todos",
+    deporte: str = DEFAULT_SPORT,
+    solo_stakazos: bool = False,
+) -> dict[str, Any]:
+    token, chat_id = telegram_config()
+    forced_live = RuntimeSettings(
+        environment=RUNTIME_SETTINGS.environment,
+        shadow_mode=False,
+    )
+    return publish_telegram_predictions(
+        runtime_settings=forced_live,
+        publication_guard=lambda: {
+            "allow_live_publication": True,
+            "mode": "manual_lab",
+            "reasons": ["manual_lab_publish"],
+            "stats": {},
+        },
+        pronosticos_fn=pronosticos,
+        save_unique_recommendations=guardar_recomendaciones_unicas,
+        read_raw_pick=_raw_pick,
+        enrich_with_ai=enrich_picks_with_ai_narratives,
+        build_ai_summary=generate_publication_ai_summary,
+        ai_available=openai_available,
+        format_summary=format_summary_message,
+        format_pick_message=formatear_mensaje_telegram_pick,
+        telegram_keyboard_for_pick=telegram_keyboard_for_pick,
+        send_message=enviar_mensaje_telegram,
+        register_publication=registrar_publicacion_telegram,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
+        bankroll=bankroll,
+        perfil=perfil,
+        modo=modo,
+        mercados=mercados,
+        partido=partido,
+        deporte=deporte,
+        solo_stakazos=solo_stakazos,
+        token=token,
+        chat_id=chat_id,
+        publication_type="lab",
     )
 
 
@@ -3004,6 +3054,52 @@ def lab_run(
         ],
     )
     return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
+
+
+@app.post("/lab/run/publicar")
+async def lab_run_publicar(request: Request):
+    form = await form_urlencoded(request)
+    bankroll_raw = str(form.get("bankroll") or "").strip()
+    bankroll = None
+    if bankroll_raw:
+        try:
+            bankroll = float(bankroll_raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Bankroll no valido") from exc
+
+    perfil = str(form.get("perfil") or "moderado").strip() or "moderado"
+    modo = str(form.get("modo") or "comparador").strip() or "comparador"
+    mercados = str(form.get("mercados") or "todo").strip() or "todo"
+    partido = str(form.get("partido") or "todos").strip() or "todos"
+    deporte = str(form.get("deporte") or DEFAULT_SPORT).strip() or DEFAULT_SPORT
+    solo_stakazos = str(form.get("solo_stakazos") or "false").strip().lower() == "true"
+
+    resultado = publicar_pronosticos_lab(
+        bankroll=bankroll,
+        perfil=perfil,
+        modo=modo,
+        mercados=mercados,
+        partido=partido,
+        deporte=deporte,
+        solo_stakazos=solo_stakazos,
+    )
+
+    query = {
+        "perfil": perfil,
+        "modo": modo,
+        "mercados": mercados,
+        "partido": partido,
+        "deporte": deporte,
+        "solo_stakazos": "true" if solo_stakazos else "false",
+        "lab_notice": "published" if int(resultado.get("picks_guardados") or 0) > 0 else "empty",
+        "publication_id": str(resultado.get("publication_id") or ""),
+        "registered_picks": str(resultado.get("picks_guardados") or 0),
+        "sent_messages": str(resultado.get("mensajes_enviados") or 0),
+    }
+    if bankroll is not None:
+        query["bankroll"] = str(bankroll)
+
+    return RedirectResponse(url="/lab/run?" + urlencode(query), status_code=303)
 
 
 @app.get("/telegram/test")

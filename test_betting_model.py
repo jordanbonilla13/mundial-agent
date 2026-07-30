@@ -47,6 +47,7 @@ from main import (
     partidos_disponibles,
     procesar_callback_pick,
     procesar_comando_telegram,
+    publicar_pronosticos_lab,
     publicar_pronosticos_telegram,
     prioridad_pick,
     resolver_contexto_deporte,
@@ -3611,6 +3612,31 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(publications[0]["publication_type"], "manual_shadow")
         self.assertEqual(publications[0]["items"][1]["pick_id"], 7)
 
+    def test_publicar_pronosticos_lab_envia_telegram_y_registra_cartera(self):
+        with (
+            patch("main.telegram_config", return_value=("token_test", "chat_test")),
+            patch("main.publish_telegram_predictions", return_value={"publication_id": 88, "picks_guardados": 3, "mensajes_enviados": 4}) as publish_mock,
+        ):
+            result = publicar_pronosticos_lab(
+                bankroll=200.0,
+                perfil="agresivo",
+                modo="comparador",
+                mercados="resultado",
+                partido="todos",
+                deporte="tenis",
+                solo_stakazos=False,
+            )
+
+        self.assertEqual(result["publication_id"], 88)
+        self.assertEqual(result["picks_guardados"], 3)
+        self.assertEqual(result["mensajes_enviados"], 4)
+        kwargs = publish_mock.call_args.kwargs
+        self.assertEqual(kwargs["publication_type"], "lab")
+        self.assertFalse(kwargs["runtime_settings"].shadow_mode)
+        self.assertEqual(kwargs["token"], "token_test")
+        self.assertEqual(kwargs["chat_id"], "chat_test")
+        self.assertTrue(kwargs["publication_guard"]()["allow_live_publication"])
+
     def test_build_performance_guard_y_bloqueo_por_liga(self):
         guard = build_performance_guard(
             load_dashboard=lambda: {
@@ -3923,6 +3949,8 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn('id="labRunForm"', html)
         self.assertIn('labLoadingOverlay', html)
         self.assertIn('Comparando precios entre casas', html)
+        self.assertIn('/lab/run/publicar', html)
+        self.assertIn('Publicar en Telegram y registrar cartera', html)
         self.assertIn('name="deporte"', html)
         self.assertIn('name="partido"', html)
         self.assertIn('Todos los partidos', html)

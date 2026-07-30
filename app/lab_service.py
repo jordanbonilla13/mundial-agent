@@ -380,6 +380,40 @@ def render_lab_run_html(
     sport_tags = _option_tags(sport_options, str(query_params.get("deporte") or "todo"))
     market_tags = _option_tags(market_options, str(query_params.get("mercados") or "todo"))
     match_tags = _option_tags(match_options, str(query_params.get("partido") or "todos"))
+    notice_code = str(query_params.get("lab_notice") or "").strip().lower()
+    notice_html = ""
+    if notice_code == "published":
+        publication_id = escape(str(query_params.get("publication_id") or "-"))
+        registered_picks = escape(str(query_params.get("registered_picks") or "0"))
+        sent_messages = escape(str(query_params.get("sent_messages") or "0"))
+        notice_html = (
+            f'<section class="card" style="margin-top: 18px; border-color: rgba(63,132,97,0.24);">'
+            f'<div class="badge badge-green">Cartera registrada</div>'
+            f'<p class="muted">La simulacion se ha guardado como cartera del modelo para auditoria. '
+            f'Publicacion #{publication_id} | picks registradas: {registered_picks} | mensajes enviados: {sent_messages}.</p>'
+            f'</section>'
+        )
+    elif notice_code == "empty":
+        notice_html = (
+            '<section class="card" style="margin-top: 18px; border-color: rgba(164,118,36,0.24);">'
+            '<div class="badge badge-yellow">Sin publicables</div>'
+            '<p class="muted">No habia picks publicables con esos filtros, asi que no se ha registrado ninguna cartera.</p>'
+            '</section>'
+        )
+    publish_form_inputs = "".join(
+        f'<input type="hidden" name="{escape(str(key), quote=True)}" value="{escape(str(value), quote=True)}">'
+        for key, value in query_refresh.items()
+        if key not in {"format", "lab_notice", "publication_id", "registered_picks", "sent_messages"} and value not in (None, "")
+    )
+    publish_action_html = ""
+    if publishable_preview:
+        publish_action_html = (
+            '<form method="post" action="/lab/run/publicar" class="cta-row">'
+            f"{publish_form_inputs}"
+            '<button type="submit">Publicar en Telegram y registrar cartera</button>'
+            '<span class="muted">Envia estas picks al canal y las deja guardadas para que /resumen las audite despues.</span>'
+            "</form>"
+        )
     match_rows = "".join(
         f'<tr><td>{escape(str(row.get("time_label") or "-"))}</td><td>{escape(str(row.get("partido") or row.get("event_id") or "Partido"))}</td><td>{escape(str(row.get("league_label") or "General"))}</td><td><span class="badge {_badge_class(str(row.get("status_kind") or "warn"))}">{escape(str(row.get("status") or "Sin picks"))}</span></td><td>{int(row.get("publishable") or 0)} / {int(row.get("blocked") or 0)}</td></tr>'
         for row in match_overview[:12]
@@ -601,6 +635,7 @@ def render_lab_run_html(
                 </form>
                 <div class="summary">{current_filters}</div>
             </section>
+            {notice_html}
             <section class="panel" style="padding: 18px; margin-top: 18px;">
                 <div class="eyebrow" style="color: var(--brand); margin-bottom: 12px;">Mapa rapido de partidos</div>
                 <p class="lede">Usa esta tabla para ver antes de lanzar la simulacion que eventos hay, a que hora van y si ya apuntan a publicable, bloqueado o sin picks.</p>
@@ -623,6 +658,7 @@ def render_lab_run_html(
                 <div class="section-grid">
                     <h2 class="section-title">Picks que saldrian a Telegram</h2>
                     <p class="lede">Esta es la previsualizacion operativa. Si el guard lo permite y sales de shadow mode, esto es lo mas cercano a lo que se publicaria.</p>
+                    {publish_action_html}
                     {publishable_cards}
                     <h2 class="section-title">Picks frenadas por guards</h2>
                     <p class="lede">Aqui se ven las picks que el sistema ha parado por riesgo o por rendimiento historico insuficiente.</p>
