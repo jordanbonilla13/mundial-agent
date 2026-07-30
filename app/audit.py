@@ -26,6 +26,10 @@ from tracking import (
 from app.ai_service import generate_audit_ai_brief, openai_available
 from app.calibration import generate_calibration_snapshot
 
+SUMMARY_ALERTS_EXCLUDED_LEAGUES = {
+    "fifa world cup",
+}
+
 
 def _published_model_metrics(
     picks: list[dict[str, Any]],
@@ -154,11 +158,17 @@ def _metric_is_recent(metrics: Any, *, target_date: datetime, max_age_days: int 
     return age_days <= max_age_days
 
 
+def _is_excluded_summary_segment(name: str | None) -> bool:
+    return str(name or "").strip().lower() in SUMMARY_ALERTS_EXCLUDED_LEAGUES
+
+
 def _calibration_alerts_for_report(calibration: Any, *, target_date: datetime) -> list[str]:
     alerts: list[str] = []
     segments_by_type = getattr(calibration, "segments_by_type", {}) or {}
 
     for league, metrics in (segments_by_type.get("ligas", {}) or {}).items():
+        if _is_excluded_summary_segment(league):
+            continue
         if not _metric_is_recent(metrics, target_date=target_date):
             continue
         if not metrics.min_sample_warning and metrics.roi < -5:
@@ -169,6 +179,9 @@ def _calibration_alerts_for_report(calibration: Any, *, target_date: datetime) -
             )
 
     for combo, metrics in (segments_by_type.get("ligas_mercados", {}) or {}).items():
+        league_name = str(combo or "").split("::", 1)[0].strip()
+        if _is_excluded_summary_segment(league_name):
+            continue
         if not _metric_is_recent(metrics, target_date=target_date):
             continue
         if not metrics.min_sample_warning and (metrics.roi < -8 or metrics.hit_rate < 42):

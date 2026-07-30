@@ -2794,6 +2794,104 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("WNBA", joined_alerts)
         self.assertNotIn("FIFA World Cup", joined_alerts)
 
+    def test_auditoria_excluye_fifa_world_cup_del_resumen_aunque_sea_reciente(self):
+        import app.audit as audit_module
+        from datetime import datetime, timezone
+
+        fifa_metric = SegmentMetrics(
+            segment_name="FIFA World Cup",
+            segment_type="liga",
+            total_picks=18,
+            total_recommended=18,
+            picks_closed=12,
+            picks_won=3,
+            picks_lost=9,
+            picks_push=0,
+            total_staked=90.0,
+            total_profit=-20.0,
+            roi=-22.22,
+            hit_rate=25.0,
+            clv=-2.5,
+            clv_positive_count=2,
+            confidence_score=0.18,
+            last_pick_date="2026-07-29T12:00:00+00:00",
+            min_sample_warning=False,
+            trend="weak",
+            recommendation="penalizar",
+        )
+        fifa_combo_metric = SegmentMetrics(
+            segment_name="FIFA World Cup::h2h",
+            segment_type="liga_mercado",
+            total_picks=12,
+            total_recommended=12,
+            picks_closed=10,
+            picks_won=2,
+            picks_lost=8,
+            picks_push=0,
+            total_staked=60.0,
+            total_profit=-18.0,
+            roi=-30.0,
+            hit_rate=20.0,
+            clv=-3.0,
+            clv_positive_count=1,
+            confidence_score=0.14,
+            last_pick_date="2026-07-29T12:00:00+00:00",
+            min_sample_warning=False,
+            trend="weak",
+            recommendation="penalizar",
+        )
+
+        calibration = CalibrationSnapshot(
+            timestamp="2026-07-30T12:00:00+00:00",
+            total_picks_evaluated=22,
+            segments_by_type={
+                "ligas": {"FIFA World Cup": fifa_metric},
+                "mercados": {},
+                "ligas_mercados": {"FIFA World Cup::h2h": fifa_combo_metric},
+                "tiers": {},
+                "casas": {},
+            },
+            model_adjustments={"confidence_multipliers": {"model_general": 1.0}},
+            alerts=[],
+        )
+
+        original_get_picks_for_date = audit_module.get_picks_for_date
+        original_dashboard_data = audit_module.dashboard_data
+        original_generate_calibration_snapshot = audit_module.generate_calibration_snapshot
+        original_openai_available = audit_module.openai_available
+
+        try:
+            audit_module.get_picks_for_date = lambda target_date, db_path=None: {
+                "date": "2026-07-30",
+                "recommended": 1,
+                "executed": 1,
+                "closed": 1,
+                "won": 1,
+                "lost": 0,
+                "total_staked": 5.0,
+                "total_profit": 2.0,
+                "roi_pct": 40.0,
+                "hitrate": 100.0,
+                "model_published": {
+                    "today": {"published": 1, "pending": 0, "won": 1, "lost": 0, "push": 0, "roi": 40.0, "profit": 2.0, "hit_rate": 100.0},
+                    "all_time": {"published": 10, "pending": 2, "won": 5, "lost": 3, "push": 0, "roi": 8.0, "profit": 6.0, "hit_rate": 62.5},
+                },
+                "picks_list": {"recommended": [], "executed": [], "closed": []},
+            }
+            audit_module.dashboard_data = lambda db_path=None: {"resumen": {"roi": 8.0, "hit_rate": 54.0}}
+            audit_module.generate_calibration_snapshot = lambda: calibration
+            audit_module.openai_available = lambda: False
+
+            report = audit_module.generate_daily_audit_report(datetime(2026, 7, 30, tzinfo=timezone.utc))
+        finally:
+            audit_module.get_picks_for_date = original_get_picks_for_date
+            audit_module.dashboard_data = original_dashboard_data
+            audit_module.generate_calibration_snapshot = original_generate_calibration_snapshot
+            audit_module.openai_available = original_openai_available
+
+        joined_alerts = "\n".join(report["alerts"])
+        self.assertNotIn("FIFA World Cup", joined_alerts)
+
     def test_auditoria_diaria_cuenta_solo_picks_apostadas_y_cerradas(self):
         import app.audit as audit_module
         from datetime import datetime, timezone
