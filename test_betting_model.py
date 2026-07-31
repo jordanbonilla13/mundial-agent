@@ -2988,7 +2988,7 @@ class BettingModelTests(unittest.TestCase):
         try:
             main.telegram_config = lambda: ("token-test", "chat-test")
             main.telegram_client = lambda token=None, chat_id=None: DummyClient()
-            main.construir_resumen_telegram = lambda force_refresh_scores=True: (
+            main.construir_resumen_telegram = lambda force_refresh_scores=True, lookback_hours=24, score_days=3: (
                 "Resumen premium del modelo",
                 {
                     "metrics": {"roi": 8.25},
@@ -3003,8 +3003,88 @@ class BettingModelTests(unittest.TestCase):
             main.construir_resumen_telegram = original_construir_resumen
 
         self.assertEqual(sent_messages, ["Resumen premium del modelo"])
-        self.assertIn("Resumen enviado", response)
+        self.assertIn("Resumen 24h enviado", response)
         self.assertIn("12 picks", response)
+
+    def test_procesar_comando_mes_envia_auditoria_30_dias_por_telegram(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_construir_resumen = main.construir_resumen_telegram
+
+        sent_messages: list[str] = []
+        captured_args: list[dict[str, object]] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+
+            def fake_construir_resumen(force_refresh_scores=True, lookback_hours=24, score_days=3):
+                captured_args.append(
+                    {
+                        "force_refresh_scores": force_refresh_scores,
+                        "lookback_hours": lookback_hours,
+                        "score_days": score_days,
+                    }
+                )
+                return (
+                    "Resumen mensual premium",
+                    {
+                        "metrics": {"roi": 12.5},
+                        "model_portfolio": {"all_time": {"published": 44}},
+                    },
+                )
+
+            main.construir_resumen_telegram = fake_construir_resumen
+
+            response = procesar_comando_telegram("/mes")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main.construir_resumen_telegram = original_construir_resumen
+
+        self.assertEqual(sent_messages, ["Resumen mensual premium"])
+        self.assertEqual(
+            captured_args,
+            [{"force_refresh_scores": True, "lookback_hours": 24 * 30, "score_days": 30}],
+        )
+        self.assertIn("Resumen 30 dias enviado", response)
+        self.assertIn("44 picks", response)
+
+    def test_procesar_comando_help_envia_lista_de_comandos(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+
+            response = procesar_comando_telegram("/help")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+
+        self.assertEqual(len(sent_messages), 1)
+        self.assertIn("/help", sent_messages[0])
+        self.assertIn("/resumen", sent_messages[0])
+        self.assertIn("/mes", sent_messages[0])
+        self.assertIn("/apuestas", sent_messages[0])
+        self.assertIn("Ayuda enviada", response)
 
     def test_procesar_comando_apuestas_lanza_job_y_notifica(self):
         import main
@@ -4360,6 +4440,45 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Lab en espera", response.body.decode("utf-8"))
+
+    def test_get_picks_for_date_usa_ventana_de_24_horas_y_no_dia_calendario(self):
+        import app.audit as audit_module
+        from datetime import datetime, timezone
+
+        original_listar_picks = audit_module.listar_picks
+
+        try:
+            audit_module.listar_picks = lambda limit=10000, db_path=None: [
+                {
+                    "created_at": "2026-07-30T12:30:00+00:00",
+                    "estado": "cerrada",
+                    "resultado": "win",
+                    "importe_sugerido": 10.0,
+                    "profit_loss": 9.0,
+                    "raw_json": "{\"recommended_by_bot\": true, \"apuesta_real\": true, \"telegram_publicada\": true}",
+                },
+                {
+                    "created_at": "2026-07-30T09:00:00+00:00",
+                    "estado": "cerrada",
+                    "resultado": "loss",
+                    "importe_sugerido": 10.0,
+                    "profit_loss": -10.0,
+                    "raw_json": "{\"recommended_by_bot\": true, \"apuesta_real\": true, \"telegram_publicada\": true}",
+                },
+            ]
+
+            report = audit_module.get_picks_for_date(
+                datetime(2026, 7, 31, 10, 0, tzinfo=timezone.utc),
+                lookback_hours=24,
+            )
+        finally:
+            audit_module.listar_picks = original_listar_picks
+
+        self.assertEqual(report["window_label"], "Últimas 24h")
+        self.assertEqual(report["recommended"], 1)
+        self.assertEqual(report["executed"], 1)
+        self.assertEqual(report["won"], 1)
+        self.assertEqual(report["lost"], 0)
 
 
 if __name__ == "__main__":

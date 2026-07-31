@@ -30,14 +30,19 @@ SUMMARY_ALERTS_EXCLUDED_LEAGUES = {
     "fifa world cup",
 }
 
+DEFAULT_AUDIT_LOOKBACK_HOURS = 24
+DEFAULT_AUDIT_PUBLICATIONS_LIMIT = 12
+
 
 def _published_model_metrics(
     picks: list[dict[str, Any]],
     *,
     target_date: datetime,
+    lookback_hours: int,
 ) -> dict[str, Any]:
     published = [p for p in picks if _bool_pick_flag(p, "telegram_publicada", False)]
-    published_today = []
+    published_window = []
+    window_start = target_date.astimezone(timezone.utc) - timedelta(hours=max(1, int(lookback_hours or 24)))
 
     for pick in published:
         try:
@@ -53,13 +58,13 @@ def _published_model_metrics(
                 created_date = created_date.replace(tzinfo=timezone.utc)
             else:
                 created_date = created_date.astimezone(timezone.utc)
-            if created_date.date() == target_date.date():
-                published_today.append(pick)
+            if window_start <= created_date <= target_date.astimezone(timezone.utc):
+                published_window.append(pick)
         except (ValueError, AttributeError):
             continue
 
     closed = [p for p in published if p.get("estado") == "cerrada"]
-    closed_today = [p for p in published_today if p.get("estado") == "cerrada"]
+    closed_window = [p for p in published_window if p.get("estado") == "cerrada"]
 
     def _stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
         staked = sum(float(p.get("importe_sugerido") or 0) for p in rows)
@@ -79,9 +84,9 @@ def _published_model_metrics(
 
     return {
         "today": {
-            "published": len(published_today),
-            "pending": sum(1 for p in published_today if p.get("estado") != "cerrada"),
-            **_stats(closed_today),
+            "published": len(published_window),
+            "pending": sum(1 for p in published_window if p.get("estado") != "cerrada"),
+            **_stats(closed_window),
         },
         "all_time": {
             "published": len(published),
@@ -148,12 +153,13 @@ def _latest_publications(limit: int = 5) -> list[dict[str, Any]]:
     return latest
 
 
-def _publications_for_day(*, target_date: datetime, limit: int = 12) -> list[dict[str, Any]]:
-    target_day = target_date.astimezone(timezone.utc).date()
+def _publications_for_window(*, target_date: datetime, lookback_hours: int, limit: int = DEFAULT_AUDIT_PUBLICATIONS_LIMIT) -> list[dict[str, Any]]:
+    window_end = target_date.astimezone(timezone.utc)
+    window_start = window_end - timedelta(hours=max(1, int(lookback_hours or DEFAULT_AUDIT_LOOKBACK_HOURS)))
     return [
         publication
         for publication in _latest_publications(limit=limit)
-        if (_parse_report_datetime(publication.get("created_at")) or target_date).date() == target_day
+        if window_start <= (_parse_report_datetime(publication.get("created_at")) or target_date) <= window_end
     ]
 
 
@@ -247,7 +253,22 @@ def _calibration_alerts_for_report(calibration: Any, *, target_date: datetime) -
     return alerts[:2]
 
 
-def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[str, Any]:
+def _window_label_for_hours(lookback_hours: int) -> str:
+    hours = max(1, int(lookback_hours or DEFAULT_AUDIT_LOOKBACK_HOURS))
+    if hours == 24:
+        return "Últimas 24h"
+    if hours % 24 == 0:
+        days = hours // 24
+        return f"Últimos {days} días"
+    return f"Últimas {hours}h"
+
+
+def get_picks_for_date(
+    target_date: datetime,
+    db_path: str = DB_PATH,
+    *,
+    lookback_hours: int = DEFAULT_AUDIT_LOOKBACK_HOURS,
+) -> dict[str, Any]:
     """
     Obtiene picks recomendadas y ejecutadas para una fecha específica.
     
@@ -260,8 +281,10 @@ def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[st
     
     all_picks = listar_picks(limit=10000, db_path=db_path)
     
-    # Filtrar por fecha
+    # Filtrar por ventana
     picks_today = []
+    window_end = target_date.astimezone(timezone.utc)
+    window_start = window_end - timedelta(hours=max(1, int(lookback_hours or DEFAULT_AUDIT_LOOKBACK_HOURS)))
     for pick in all_picks:
         try:
             created_str = (
@@ -277,7 +300,7 @@ def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[st
                 created_date = created_date.replace(tzinfo=timezone.utc)
             else:
                 created_date = created_date.astimezone(timezone.utc)
-            if created_date.date() == target_date.date():
+            if window_start <= created_date <= window_end:
                 picks_today.append(pick)
         except (ValueError, AttributeError):
             continue
@@ -286,7 +309,7 @@ def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[st
     recommended = [p for p in picks_today if _bool_pick_flag(p, "recommended_by_bot", True)]
     executed = [p for p in picks_today if _bool_pick_flag(p, "apuesta_real", False)]
     closed = [p for p in picks_today if p.get("estado") == "cerrada" and _bool_pick_flag(p, "apuesta_real", False)]
-    model_published = _published_model_metrics(all_picks, target_date=target_date)
+    model_published = _published_model_metrics(all_picks, target_date=target_date, lookback_hours=lookback_hours)
     
     # Métricas
     total_staked = sum(float(p.get("importe_sugerido") or 0) for p in closed)
@@ -299,6 +322,7 @@ def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[st
     
     return {
         "date": target_date.date().isoformat(),
+        "window_label": _window_label_for_hours(lookback_hours),
         "recommended": len(recommended),
         "executed": len(executed),
         "closed": len(closed),
@@ -317,7 +341,12 @@ def get_picks_for_date(target_date: datetime, db_path: str = DB_PATH) -> dict[st
     }
 
 
-def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_PATH) -> dict[str, Any]:
+def generate_daily_audit_report(
+    target_date: datetime = None,
+    db_path: str = DB_PATH,
+    *,
+    lookback_hours: int = DEFAULT_AUDIT_LOOKBACK_HOURS,
+) -> dict[str, Any]:
     """
     Genera reporte completo de auditoría para un día.
     
@@ -333,7 +362,7 @@ def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_
         target_date = datetime.now(timezone.utc)
     
     # Datos del día
-    day_data = get_picks_for_date(target_date, db_path)
+    day_data = get_picks_for_date(target_date, db_path, lookback_hours=lookback_hours)
     
     # Datos generales (histórico)
     general_data = dashboard_data(db_path=db_path)
@@ -388,6 +417,7 @@ def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "date": day_data["date"],
+        "window_label": day_data["window_label"],
         "status": status,
         "status_detail": status_detail,
         "picks": {
@@ -416,7 +446,7 @@ def generate_daily_audit_report(target_date: datetime = None, db_path: str = DB_
         },
         "model_portfolio": day_data["model_published"],
         "latest_publications": _latest_publications(),
-        "daily_publications": _publications_for_day(target_date=target_date),
+        "daily_publications": _publications_for_window(target_date=target_date, lookback_hours=lookback_hours),
         "ai_insights": None,
         "picks_detail": day_data["picks_list"],
     }
@@ -541,19 +571,20 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
     daily_publications = report.get("daily_publications") or []
     daily_rollup = _daily_publication_rollup(daily_publications)
     top_publication = latest_publications[0] if latest_publications else None
+    window_label = str(report.get("window_label") or "Últimas 24h")
 
-    lines.append(f"📊 AUDITORÍA {report['date']} | {report['status']}")
+    lines.append(f"📊 AUDITORÍA {window_label} | {report['status']}")
     lines.append(report["status_detail"])
     lines.append("")
     lines.append("🤖 Portfolio modelo")
     lines.append(
-        f"Hoy: {today_portfolio.get('published', 0)} pub | "
+        f"{window_label}: {today_portfolio.get('published', 0)} pub | "
         f"{today_portfolio.get('closed', 0)} cerr | "
         f"{today_portfolio.get('pending', 0)} pend | "
         f"{today_portfolio.get('won', 0)}W-{today_portfolio.get('lost', 0)}L-{today_portfolio.get('push', 0)}N"
     )
     lines.append(
-        f"ROI/Hit hoy: {today_portfolio.get('roi', 0):+.2f}% | "
+        f"ROI/Hit {window_label.lower()}: {today_portfolio.get('roi', 0):+.2f}% | "
         f"{today_portfolio.get('hit_rate', 0):.0f}%"
     )
     lines.append(
@@ -564,7 +595,7 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
     )
 
     lines.append("")
-    lines.append("📈 Día real")
+    lines.append(f"📈 Real {window_label.lower()}")
     lines.append(
         f"Rec {report['picks']['recommended']} | "
         f"Ejec {report['picks']['executed']} | "
@@ -577,7 +608,7 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
             f"Hit {report['metrics']['hitrate']:.0f}%"
         )
     else:
-        lines.append("Sin cerradas reales hoy.")
+        lines.append(f"Sin cerradas reales en {window_label.lower()}.")
 
     lines.append("")
     lines.append(
@@ -592,12 +623,123 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
     if daily_rollup.get("total_picks", 0) > 0:
         lines.append("")
         lines.append(
-            f"🗓️ Publicado hoy | "
+            f"🗓️ Publicado {window_label.lower()} | "
             f"{daily_rollup.get('total_picks', 0)} picks | "
             f"{daily_rollup.get('won', 0)}W-{daily_rollup.get('lost', 0)}L-{daily_rollup.get('push', 0)}N | "
             f"{daily_rollup.get('pending', 0)} pend"
         )
         for item in daily_rollup.get("picks", [])[:6]:
+            outcome = str(item.get("outcome") or "").strip().lower()
+            was_bet = bool(item.get("was_bet"))
+            icon = "✅💵" if outcome == "ganada" and was_bet else "✅" if outcome == "ganada" else "❌" if outcome == "perdida" else "➖" if outcome == "nula" else "⏳"
+            lines.append(f"{icon} {item.get('match_label')} | {item.get('team_label')}")
+
+    if top_publication:
+        lines.append("")
+        lines.append(
+            f"🧾 Última pub #{top_publication.get('id')} | "
+            f"{top_publication.get('total_picks', 0)} picks | "
+            f"{top_publication.get('won', 0)}W-{top_publication.get('lost', 0)}L-{top_publication.get('push', 0)}N | "
+            f"{top_publication.get('pending', 0)} pend"
+        )
+        for preview in top_publication.get("picks_preview", [])[:3]:
+            outcome = preview.rsplit("|", 1)[-1].strip().lower()
+            icon = "✅" if outcome == "ganada" else "❌" if outcome == "perdida" else "➖" if outcome == "nula" else "⏳"
+            compact_preview = (
+                preview.replace(" | ganada", "")
+                .replace(" | perdida", "")
+                .replace(" | nula", "")
+                .replace(" | pendiente", "")
+            )
+            lines.append(f"{icon} {compact_preview}")
+
+    if report["alerts"]:
+        lines.append("")
+        lines.append("🚨 Alertas")
+        for alert in report["alerts"][:2]:
+            lines.append(alert)
+
+    if report.get("ai_insights"):
+        lines.append("")
+        lines.append(f"🧠 {report['ai_insights']}")
+
+    return "\n".join(lines)
+
+
+def format_audit_report_telegram(report: dict[str, Any]) -> str:
+    """Formatea el reporte de auditoria para Telegram en version compacta."""
+
+    lines: list[str] = []
+    portfolio = report.get("model_portfolio") or {}
+    window_portfolio = portfolio.get("today") or {}
+    all_time_portfolio = portfolio.get("all_time") or {}
+    latest_publications = report.get("latest_publications") or []
+    window_publications = report.get("daily_publications") or []
+    window_rollup = _daily_publication_rollup(window_publications)
+    top_publication = latest_publications[0] if latest_publications else None
+    window_label = str(report.get("window_label") or "Últimas 24h")
+    is_daily_24h = window_label == "Últimas 24h"
+    portfolio_label = "Hoy" if is_daily_24h else window_label
+    published_label = "Publicado hoy" if is_daily_24h else f"Publicado {window_label.lower()}"
+    real_label = "Día real" if is_daily_24h else f"Real {window_label.lower()}"
+    roi_hit_label = "ROI/Hit hoy" if is_daily_24h else f"ROI/Hit {window_label.lower()}"
+
+    lines.append(f"📊 AUDITORÍA {window_label} | {report['status']}")
+    lines.append(report["status_detail"])
+    lines.append("")
+    lines.append("🤖 Portfolio modelo")
+    lines.append(
+        f"{portfolio_label}: {window_portfolio.get('published', 0)} pub | "
+        f"{window_portfolio.get('closed', 0)} cerr | "
+        f"{window_portfolio.get('pending', 0)} pend | "
+        f"{window_portfolio.get('won', 0)}W-{window_portfolio.get('lost', 0)}L-{window_portfolio.get('push', 0)}N"
+    )
+    lines.append(
+        f"{roi_hit_label}: {window_portfolio.get('roi', 0):+.2f}% | "
+        f"{window_portfolio.get('hit_rate', 0):.0f}%"
+    )
+    lines.append(
+        f"Global: {all_time_portfolio.get('published', 0)} pub | "
+        f"{all_time_portfolio.get('closed', 0)} cerr | "
+        f"{all_time_portfolio.get('pending', 0)} pend | "
+        f"{all_time_portfolio.get('won', 0)}W-{all_time_portfolio.get('lost', 0)}L-{all_time_portfolio.get('push', 0)}N"
+    )
+
+    lines.append("")
+    lines.append(f"📈 {real_label}")
+    lines.append(
+        f"Rec {report['picks']['recommended']} | "
+        f"Ejec {report['picks']['executed']} | "
+        f"Cerr {report['picks']['closed']} | "
+        f"{report['picks']['won']}W-{report['picks']['lost']}L"
+    )
+    if report["picks"]["closed"] > 0:
+        lines.append(
+            f"€{report['metrics']['profit']:+.2f} | ROI {report['metrics']['roi']:+.2f}% | "
+            f"Hit {report['metrics']['hitrate']:.0f}%"
+        )
+    else:
+        lines.append(f"Sin cerradas reales en {window_label.lower()}.")
+
+    lines.append("")
+    lines.append(
+        f"📊 vs hist | ROI {report['vs_historical']['roi_delta']:+.2f}pp | "
+        f"Hit {report['vs_historical']['hitrate_delta']:+.2f}pp"
+    )
+    lines.append(
+        f"⚙️ Modelo | {report['calibration']['total_picks_evaluated']} eval | "
+        f"conf {report['calibration']['model_confidence']:.0%}"
+    )
+
+    if window_rollup.get("total_picks", 0) > 0:
+        lines.append("")
+        lines.append(
+            f"🗓️ {published_label} | "
+            f"{window_rollup.get('total_picks', 0)} picks | "
+            f"{window_rollup.get('won', 0)}W-{window_rollup.get('lost', 0)}L-{window_rollup.get('push', 0)}N | "
+            f"{window_rollup.get('pending', 0)} pend"
+        )
+        for item in window_rollup.get("picks", [])[:6]:
             outcome = str(item.get("outcome") or "").strip().lower()
             was_bet = bool(item.get("was_bet"))
             icon = "✅💵" if outcome == "ganada" and was_bet else "✅" if outcome == "ganada" else "❌" if outcome == "perdida" else "➖" if outcome == "nula" else "⏳"

@@ -73,12 +73,13 @@ def build_telegram_audit_summary(
     format_report: Callable[[dict[str, Any]], str],
     refresh_scores: Callable[[int], list[dict[str, Any]]],
     liquidate_picks: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    score_days: int = 3,
 ) -> tuple[str, dict[str, Any]]:
     liquidation_result: dict[str, Any] | None = None
 
     if force_refresh_scores:
         try:
-            recent_scores = refresh_scores(3)
+            recent_scores = refresh_scores(max(1, int(score_days or 3)))
             liquidation_result = liquidate_picks(recent_scores)
         except Exception as exc:
             liquidation_result = {

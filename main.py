@@ -665,12 +665,35 @@ def procesar_comando_telegram(command_text: str) -> str:
     if command.startswith("/resumen"):
         token, chat_id = telegram_config()
         client = telegram_client(token=token, chat_id=chat_id)
-        report_text, report = construir_resumen_telegram(force_refresh_scores=True)
+        report_text, report = construir_resumen_telegram(force_refresh_scores=True, lookback_hours=24, score_days=3)
         client.send_message(report_text)
         return (
-            f"Resumen enviado. ROI hoy: {report['metrics']['roi']:+.2f}% | "
+            f"Resumen 24h enviado. ROI: {report['metrics']['roi']:+.2f}% | "
             f"Portfolio publicado: {report['model_portfolio']['all_time']['published']} picks."
         )
+
+    if command.startswith("/mes"):
+        token, chat_id = telegram_config()
+        client = telegram_client(token=token, chat_id=chat_id)
+        report_text, report = construir_resumen_telegram(force_refresh_scores=True, lookback_hours=24 * 30, score_days=30)
+        client.send_message(report_text)
+        return (
+            f"Resumen 30 dias enviado. ROI: {report['metrics']['roi']:+.2f}% | "
+            f"Portfolio publicado: {report['model_portfolio']['all_time']['published']} picks."
+        )
+
+    if command.startswith("/help"):
+        token, chat_id = telegram_config()
+        client = telegram_client(token=token, chat_id=chat_id)
+        help_text = (
+            "<b>Comandos disponibles</b>\n"
+            "/help - ver esta ayuda\n"
+            "/resumen - auditoria compacta de las ultimas 24h\n"
+            "/mes - auditoria compacta de los ultimos 30 dias\n"
+            "/apuestas - lanzar el preset del lab y publicar picks publicables"
+        )
+        client.send_message(help_text)
+        return "Ayuda enviada por Telegram."
 
     if command.startswith("/apuestas"):
         token, chat_id = telegram_config()
@@ -683,16 +706,22 @@ def procesar_comando_telegram(command_text: str) -> str:
         )
         return f"/apuestas lanzado. Job {job_id}."
 
-    return "Comando no soportado. Usa /resumen o /apuestas."
+    return "Comando no soportado. Usa /help, /resumen, /mes o /apuestas."
 
 
-def construir_resumen_telegram(force_refresh_scores: bool = True) -> tuple[str, dict[str, Any]]:
+def construir_resumen_telegram(
+    force_refresh_scores: bool = True,
+    *,
+    lookback_hours: int = 24,
+    score_days: int = 3,
+) -> tuple[str, dict[str, Any]]:
     return build_telegram_audit_summary(
         force_refresh_scores=force_refresh_scores,
-        generate_report=generate_daily_audit_report,
+        generate_report=lambda: generate_daily_audit_report(lookback_hours=lookback_hours),
         format_report=format_audit_report_telegram,
         refresh_scores=lambda days: scores_for_pending_bot_picks(days_from=days),
         liquidate_picks=liquidar_picks_con_scores,
+        score_days=score_days,
     )
 
 
