@@ -642,6 +642,65 @@ def telegram_keyboard_for_pick(pick_id: int) -> dict[str, Any]:
     return telegram_keyboard_for_pick_service(pick_id)
 
 
+def telegram_resolution_keyboard_for_pick(pick_id: int) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Ganada", "callback_data": f"pick:{pick_id}:win"},
+                {"text": "Perdida", "callback_data": f"pick:{pick_id}:loss"},
+                {"text": "Nula", "callback_data": f"pick:{pick_id}:push"},
+            ],
+        ]
+    }
+
+
+def _format_real_pick_compact(pick: dict[str, Any], *, include_result: bool) -> str:
+    pick_id = int(pick.get("id") or 0)
+    partido = telegram_text_service(pick.get("partido") or "Partido")
+    equipo = telegram_text_service(pick.get("equipo") or "Seleccion")
+    liga = telegram_text_service(pick.get("league_label") or pick.get("sport_label") or "General")
+    mercado = telegram_text_service(pick.get("mercado") or "mercado")
+    cuota = telegram_text_service(pick.get("cuota") or pick.get("cuota_apuesta") or "-")
+    stake = telegram_text_service(pick.get("stake") or "-")
+    importe = telegram_text_service(pick.get("importe_sugerido") or "-")
+
+    lines = [
+        f"<b>#{pick_id} | {partido}</b>",
+        f"🎯 <b>Pick:</b> {equipo}",
+        f"📌 <b>Mercado:</b> {mercado}",
+        f"🏟️ <b>Liga:</b> {liga}",
+        f"💸 <b>Cuota:</b> {cuota} | <b>Stake:</b> {stake} | <b>Importe:</b> {importe}",
+    ]
+
+    if include_result:
+        resultado = str(pick.get("resultado") or "").strip().lower()
+        estado = str(pick.get("estado") or "").strip().lower()
+        profit = pick.get("profit_loss")
+        icon = "✅" if resultado == "win" else "❌" if resultado == "loss" else "➖" if resultado == "push" else "⏳"
+        result_label = "ganada" if resultado == "win" else "perdida" if resultado == "loss" else "nula" if resultado == "push" else estado or "pendiente"
+        profit_text = ""
+        if profit not in {None, ""}:
+            try:
+                profit_text = f" | <b>P/L:</b> {float(profit):+.2f} EUR"
+            except (TypeError, ValueError):
+                profit_text = f" | <b>P/L:</b> {telegram_text_service(profit)}"
+        lines.append(f"{icon} <b>Resultado:</b> {result_label}{profit_text}")
+
+    return "\n".join(lines)
+
+
+def _real_bets_pending(limit: int = 10) -> list[dict[str, Any]]:
+    return listar_picks(limit=limit, estado="pendiente", apuesta_real=True)
+
+
+def _real_bets_by_result(result: str, *, limit: int = 10) -> list[dict[str, Any]]:
+    return [
+        pick
+        for pick in listar_picks(limit=max(limit * 3, 50), estado="cerrada", apuesta_real=True)
+        if str(pick.get("resultado") or "").strip().lower() == result
+    ][:limit]
+
+
 def procesar_callback_pick(pick_id: int, action: str) -> str:
     if action == "bet":
         pick = marcar_apuesta_real_pick(pick_id)
@@ -690,10 +749,62 @@ def procesar_comando_telegram(command_text: str) -> str:
             "/help - ver esta ayuda\n"
             "/resumen - auditoria compacta de las ultimas 24h\n"
             "/mes - auditoria compacta de los ultimos 30 dias\n"
+            "/pendientes - apuestas reales pendientes de cerrar\n"
+            "/ganadas - historico reciente de apuestas reales ganadas\n"
+            "/perdidas - historico reciente de apuestas reales perdidas\n"
             "/apuestas - lanzar el preset del lab y publicar picks publicables"
         )
         client.send_message(help_text)
         return "Ayuda enviada por Telegram."
+
+    if command.startswith("/pendientes"):
+        token, chat_id = telegram_config()
+        client = telegram_client(token=token, chat_id=chat_id)
+        picks = _real_bets_pending(limit=10)
+        if not picks:
+            client.send_message("📭 <b>/pendientes</b>\nNo tienes apuestas reales pendientes ahora mismo.")
+            return "Pendientes enviado. 0 apuestas."
+
+        client.send_message(
+            f"📋 <b>Apuestas pendientes</b>\n"
+            f"Te muestro las {len(picks)} apuestas reales pendientes mas recientes para cerrar rapido desde Telegram."
+        )
+        for pick in picks:
+            client.send_message(
+                _format_real_pick_compact(pick, include_result=False),
+                reply_markup=telegram_resolution_keyboard_for_pick(int(pick["id"])),
+            )
+        return f"Pendientes enviado. {len(picks)} apuestas."
+
+    if command.startswith("/ganadas"):
+        token, chat_id = telegram_config()
+        client = telegram_client(token=token, chat_id=chat_id)
+        picks = _real_bets_by_result("win", limit=10)
+        if not picks:
+            client.send_message("✅ <b>/ganadas</b>\nNo hay apuestas reales ganadas en el historico reciente.")
+            return "Ganadas enviado. 0 apuestas."
+
+        lines = ["✅ <b>Ultimas ganadas</b>"]
+        for pick in picks:
+            lines.append(_format_real_pick_compact(pick, include_result=True))
+            lines.append("")
+        client.send_message("\n".join(lines).strip())
+        return f"Ganadas enviado. {len(picks)} apuestas."
+
+    if command.startswith("/perdidas"):
+        token, chat_id = telegram_config()
+        client = telegram_client(token=token, chat_id=chat_id)
+        picks = _real_bets_by_result("loss", limit=10)
+        if not picks:
+            client.send_message("❌ <b>/perdidas</b>\nNo hay apuestas reales perdidas en el historico reciente.")
+            return "Perdidas enviado. 0 apuestas."
+
+        lines = ["❌ <b>Ultimas perdidas</b>"]
+        for pick in picks:
+            lines.append(_format_real_pick_compact(pick, include_result=True))
+            lines.append("")
+        client.send_message("\n".join(lines).strip())
+        return f"Perdidas enviado. {len(picks)} apuestas."
 
     if command.startswith("/apuestas"):
         token, chat_id = telegram_config()
@@ -706,7 +817,7 @@ def procesar_comando_telegram(command_text: str) -> str:
         )
         return f"/apuestas lanzado. Job {job_id}."
 
-    return "Comando no soportado. Usa /help, /resumen, /mes o /apuestas."
+    return "Comando no soportado. Usa /help, /resumen, /mes, /pendientes, /ganadas, /perdidas o /apuestas."
 
 
 def construir_resumen_telegram(

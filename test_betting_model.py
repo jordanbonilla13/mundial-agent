@@ -3083,8 +3083,149 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("/help", sent_messages[0])
         self.assertIn("/resumen", sent_messages[0])
         self.assertIn("/mes", sent_messages[0])
+        self.assertIn("/pendientes", sent_messages[0])
+        self.assertIn("/ganadas", sent_messages[0])
+        self.assertIn("/perdidas", sent_messages[0])
         self.assertIn("/apuestas", sent_messages[0])
         self.assertIn("Ayuda enviada", response)
+
+    def test_procesar_comando_pendientes_envia_apuestas_reales_con_botones(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_real_bets_pending = main._real_bets_pending
+
+        sent_messages: list[dict[str, object]] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append({"text": text, "reply_markup": reply_markup})
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main._real_bets_pending = lambda limit=10: [
+                {
+                    "id": 101,
+                    "partido": "Alex de Minaur vs Ben Shelton",
+                    "equipo": "Alex de Minaur",
+                    "league_label": "ATP Washington Open",
+                    "mercado": "h2h",
+                    "cuota": 2.1,
+                    "stake": 1.7,
+                    "importe_sugerido": 3.7,
+                    "estado": "pendiente",
+                }
+            ]
+
+            response = procesar_comando_telegram("/pendientes")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main._real_bets_pending = original_real_bets_pending
+
+        self.assertEqual(len(sent_messages), 2)
+        self.assertIn("Apuestas pendientes", str(sent_messages[0]["text"]))
+        self.assertIn("Alex de Minaur vs Ben Shelton", str(sent_messages[1]["text"]))
+        keyboard = sent_messages[1]["reply_markup"]
+        self.assertIsInstance(keyboard, dict)
+        self.assertIn("inline_keyboard", keyboard)
+        self.assertIn("win", str(keyboard))
+        self.assertIn("loss", str(keyboard))
+        self.assertIn("push", str(keyboard))
+        self.assertIn("Pendientes enviado. 1 apuestas.", response)
+
+    def test_procesar_comando_ganadas_envia_historico_reciente(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_real_bets_by_result = main._real_bets_by_result
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main._real_bets_by_result = lambda result, limit=10: [
+                {
+                    "id": 55,
+                    "partido": "Brandon Nakashima vs Jakub Mensik",
+                    "equipo": "Brandon Nakashima",
+                    "league_label": "ATP Washington Open",
+                    "mercado": "h2h",
+                    "cuota": 2.45,
+                    "stake": 2,
+                    "importe_sugerido": 5.0,
+                    "estado": "cerrada",
+                    "resultado": "win",
+                    "profit_loss": 7.25,
+                }
+            ]
+
+            response = procesar_comando_telegram("/ganadas")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main._real_bets_by_result = original_real_bets_by_result
+
+        self.assertEqual(len(sent_messages), 1)
+        self.assertIn("Ultimas ganadas", sent_messages[0])
+        self.assertIn("Brandon Nakashima vs Jakub Mensik", sent_messages[0])
+        self.assertIn("Resultado", sent_messages[0])
+        self.assertIn("Ganadas enviado. 1 apuestas.", response)
+
+    def test_procesar_comando_perdidas_envia_historico_reciente(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_real_bets_by_result = main._real_bets_by_result
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main._real_bets_by_result = lambda result, limit=10: [
+                {
+                    "id": 56,
+                    "partido": "Taylor Fritz vs Kamil Majchrzak",
+                    "equipo": "Taylor Fritz",
+                    "league_label": "ATP Washington Open",
+                    "mercado": "h2h",
+                    "cuota": 1.85,
+                    "stake": 2,
+                    "importe_sugerido": 4.0,
+                    "estado": "cerrada",
+                    "resultado": "loss",
+                    "profit_loss": -4.0,
+                }
+            ]
+
+            response = procesar_comando_telegram("/perdidas")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main._real_bets_by_result = original_real_bets_by_result
+
+        self.assertEqual(len(sent_messages), 1)
+        self.assertIn("Ultimas perdidas", sent_messages[0])
+        self.assertIn("Taylor Fritz vs Kamil Majchrzak", sent_messages[0])
+        self.assertIn("Resultado", sent_messages[0])
+        self.assertIn("Perdidas enviado. 1 apuestas.", response)
 
     def test_procesar_comando_apuestas_lanza_job_y_notifica(self):
         import main
