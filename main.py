@@ -58,6 +58,11 @@ from app.publication_service import (
     publish_telegram_predictions,
     select_picks_for_telegram,
 )
+from app.recent_panel_service import (
+    build_recent_form_panel,
+    format_recent_form_panel_telegram,
+    render_recent_form_panel_html,
+)
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
 from app.safety_service import publication_guard_state
 from app.runtime_settings import RuntimeSettings, load_runtime_settings
@@ -749,6 +754,7 @@ def procesar_comando_telegram(command_text: str) -> str:
             "/help - ver esta ayuda\n"
             "/resumen - auditoria compacta de las ultimas 24h\n"
             "/mes - auditoria compacta de los ultimos 30 dias\n"
+            "/panel - forma reciente del modelo\n"
             "/pendientes - apuestas reales pendientes de cerrar\n"
             "/ganadas - historico reciente de apuestas reales ganadas\n"
             "/perdidas - historico reciente de apuestas reales perdidas\n"
@@ -756,6 +762,13 @@ def procesar_comando_telegram(command_text: str) -> str:
         )
         client.send_message(help_text)
         return "Ayuda enviada por Telegram."
+
+    if command.startswith("/panel"):
+        token, chat_id = telegram_config()
+        client = telegram_client(token=token, chat_id=chat_id)
+        panel = build_recent_form_panel()
+        client.send_message(format_recent_form_panel_telegram(panel))
+        return f"Panel enviado. Evaluaciones: {int(panel.get('total_evaluations') or 0)}."
 
     if command.startswith("/pendientes"):
         token, chat_id = telegram_config()
@@ -817,7 +830,7 @@ def procesar_comando_telegram(command_text: str) -> str:
         )
         return f"/apuestas lanzado. Job {job_id}."
 
-    return "Comando no soportado. Usa /help, /resumen, /mes, /pendientes, /ganadas, /perdidas o /apuestas."
+    return "Comando no soportado. Usa /help, /resumen, /mes, /panel, /pendientes, /ganadas, /perdidas o /apuestas."
 
 
 def construir_resumen_telegram(
@@ -3684,6 +3697,15 @@ def tracking_riesgo():
 @app.get("/tracking/dashboard-data")
 def tracking_dashboard_data():
     return dashboard_data()
+
+
+@app.get("/tracking/panel", response_class=HTMLResponse)
+def tracking_panel(format: str = "html"):
+    panel = build_recent_form_panel()
+    if str(format or "html").strip().lower() == "json":
+        return panel
+    html = render_recent_form_panel_html(panel, premium_css=premium_ui_css)
+    return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
 
 
 @app.get("/tracking/evaluaciones")

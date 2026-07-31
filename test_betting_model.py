@@ -25,6 +25,7 @@ from app.forecasting import apply_market_regime_guard
 from app.lab_service import _event_time_label, build_empty_lab_run, build_lab_run, render_lab_run_html
 from app.performance_guard_service import apply_performance_guard_to_pick, build_performance_guard
 from app.publication_service import publish_telegram_predictions
+from app.recent_panel_service import build_recent_form_panel, format_recent_form_panel_telegram
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
 from app.runtime_settings import RuntimeSettings
 from app.safety_service import publication_guard_state
@@ -1398,6 +1399,35 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(panel["solo_stakazos"]["clv_positivo_pct"], 100.0)
         self.assertEqual(panel["solo_stakazos"]["cerradas"], 1)
         self.assertEqual(panel["solo_elite"]["cerradas"], 1)
+
+    def test_recent_form_panel_resume_ventanas_y_segmentos(self):
+        import app.recent_panel_service as panel_module
+
+        original_listar_evaluaciones = panel_module.listar_evaluaciones_picks
+
+        try:
+            panel_module.listar_evaluaciones_picks = lambda limit=5000, db_path=None: [
+                {"resultado": "loss", "clv_pct": -1.2, "value_captured": -0.04, "sport_label": "Tenis", "mercado": "h2h"},
+                {"resultado": "win", "clv_pct": 1.8, "value_captured": 0.08, "sport_label": "Tenis", "mercado": "h2h"},
+                {"resultado": "win", "clv_pct": 0.6, "value_captured": 0.03, "sport_label": "Baloncesto", "mercado": "totals"},
+                {"resultado": "push", "clv_pct": 0.0, "value_captured": 0.0, "sport_label": "Baloncesto", "mercado": "totals"},
+                {"resultado": "win", "clv_pct": 1.1, "value_captured": 0.02, "sport_label": "Futbol", "mercado": "btts"},
+            ]
+
+            panel = build_recent_form_panel()
+        finally:
+            panel_module.listar_evaluaciones_picks = original_listar_evaluaciones
+
+        self.assertEqual(panel["total_evaluations"], 5)
+        self.assertEqual(panel["windows"][0]["size"], 10)
+        self.assertEqual(panel["windows"][0]["sample"], 5)
+        self.assertEqual(panel["current_streak"]["type"], "loss")
+        self.assertEqual(panel["current_streak"]["count"], 1)
+        self.assertEqual(panel["by_sport"][0]["name"], "Tenis")
+        text = format_recent_form_panel_telegram(panel)
+        self.assertIn("PANEL RECIENTE DEL MODELO", text)
+        self.assertIn("Por deporte", text)
+        self.assertIn("Por mercado", text)
 
     def test_penalizaciones_historicas_detecta_liga_y_tier_flojos(self):
         pick = {
@@ -3083,11 +3113,43 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("/help", sent_messages[0])
         self.assertIn("/resumen", sent_messages[0])
         self.assertIn("/mes", sent_messages[0])
+        self.assertIn("/panel", sent_messages[0])
         self.assertIn("/pendientes", sent_messages[0])
         self.assertIn("/ganadas", sent_messages[0])
         self.assertIn("/perdidas", sent_messages[0])
         self.assertIn("/apuestas", sent_messages[0])
         self.assertIn("Ayuda enviada", response)
+
+    def test_procesar_comando_panel_envia_panel_reciente(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_build_panel = main.build_recent_form_panel
+        original_format_panel = main.format_recent_form_panel_telegram
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main.build_recent_form_panel = lambda: {"total_evaluations": 27}
+            main.format_recent_form_panel_telegram = lambda panel: "Panel reciente premium"
+
+            response = procesar_comando_telegram("/panel")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main.build_recent_form_panel = original_build_panel
+            main.format_recent_form_panel_telegram = original_format_panel
+
+        self.assertEqual(sent_messages, ["Panel reciente premium"])
+        self.assertIn("Panel enviado. Evaluaciones: 27.", response)
 
     def test_procesar_comando_pendientes_envia_apuestas_reales_con_botones(self):
         import main
@@ -4534,6 +4596,7 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn('Comparando precios entre casas', html)
         self.assertIn('/lab/run/publicar', html)
         self.assertIn('Publicar en Telegram y registrar cartera', html)
+        self.assertIn('/tracking/panel', html)
         self.assertIn('<option value="todo" selected>Todo - deportes base</option>', html)
         self.assertIn('name="deporte"', html)
         self.assertIn('name="partido"', html)

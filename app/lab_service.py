@@ -662,6 +662,7 @@ def render_lab_run_html(
                 <div class="cta-row">
                     <a class="button-link" href="{refresh_href}">Refrescar simulacion</a>
                     <a class="button-link secondary" href="{json_href}">Abrir JSON tecnico</a>
+                    <a class="button-link secondary" href="/tracking/panel">Abrir panel reciente</a>
                 </div>
             </section>
             <section class="filters">
