@@ -50,7 +50,7 @@ from app.operating_mode import (
 )
 from app.evaluation_service import build_telegram_audit_summary, scores_for_pending_bot_picks as scores_for_pending_bot_picks_service
 from app.exposure import apply_exposure_limits
-from app.lab_service import build_lab_run, render_lab_run_html
+from app.lab_service import build_empty_lab_run, build_lab_run, render_lab_run_html
 from app.prediction_service import build_prediction_payload
 from app.performance_guard_service import build_performance_guard, apply_performance_guard_to_pick
 from app.publication_service import (
@@ -3175,44 +3175,48 @@ def lab_run(
     deporte: str = "todo",
     solo_stakazos: bool = False,
     format: str = "html",
+    execute: bool = False,
 ):
-    lab_data = build_lab_run(
-        runtime_settings=RUNTIME_SETTINGS,
-        publication_guard=lambda: publication_guard_state(
+    if execute:
+        lab_data = build_lab_run(
             runtime_settings=RUNTIME_SETTINGS,
-            load_stats=estadisticas,
-            load_learning=aprendizaje,
-        ),
-        run_forecast=lambda request: apuestas_hoy(
-            bankroll=request.bankroll,
-            perfil=request.perfil,
-            modo=request.modo,
-            mercados=request.mercados,
-            partido=request.partido,
-            guardar=request.guardar,
-            deporte=request.deporte,
-            solo_elite=request.solo_elite,
-            solo_stakazos=request.solo_stakazos,
-        ),
-        build_prediction_payload=build_prediction_payload,
-        ai_available=openai_available,
-        select_picks_for_telegram=seleccionar_picks_para_telegram,
-        enrich_with_ai=enrich_picks_with_ai_narratives,
-        build_ai_summary=generate_publication_ai_summary,
-        format_pick_message=formatear_mensaje_telegram_pick,
-        format_summary_message=format_summary_message,
-        perfil=perfil,
-        modo=modo,
-        mercados=mercados,
-        partido=partido,
-        deporte=deporte,
-        bankroll=bankroll,
-        solo_stakazos=solo_stakazos,
-        perfiles_stake=PERFILES_STAKE,
-        modos_informe=MODOS_INFORME,
-        perfil_label=perfil_es,
-        modo_label=modo_es,
-    )
+            publication_guard=lambda: publication_guard_state(
+                runtime_settings=RUNTIME_SETTINGS,
+                load_stats=estadisticas,
+                load_learning=aprendizaje,
+            ),
+            run_forecast=lambda request: apuestas_hoy(
+                bankroll=request.bankroll,
+                perfil=request.perfil,
+                modo=request.modo,
+                mercados=request.mercados,
+                partido=request.partido,
+                guardar=request.guardar,
+                deporte=request.deporte,
+                solo_elite=request.solo_elite,
+                solo_stakazos=request.solo_stakazos,
+            ),
+            build_prediction_payload=build_prediction_payload,
+            ai_available=openai_available,
+            select_picks_for_telegram=seleccionar_picks_para_telegram,
+            enrich_with_ai=enrich_picks_with_ai_narratives,
+            build_ai_summary=generate_publication_ai_summary,
+            format_pick_message=formatear_mensaje_telegram_pick,
+            format_summary_message=format_summary_message,
+            perfil=perfil,
+            modo=modo,
+            mercados=mercados,
+            partido=partido,
+            deporte=deporte,
+            bankroll=bankroll,
+            solo_stakazos=solo_stakazos,
+            perfiles_stake=PERFILES_STAKE,
+            modos_informe=MODOS_INFORME,
+            perfil_label=perfil_es,
+            modo_label=modo_es,
+        )
+    else:
+        lab_data = build_empty_lab_run(runtime_settings=RUNTIME_SETTINGS)
     if str(format or "html").strip().lower() == "json":
         return lab_data
 
@@ -3227,6 +3231,7 @@ def lab_run(
             "partido": partido,
             "deporte": deporte,
             "solo_stakazos": "true" if solo_stakazos else "false",
+            "execute": "true" if execute else "",
         },
         premium_css=premium_ui_css,
         profile_options=[

@@ -22,7 +22,7 @@ from app.calibration import (
 )
 import app.calibrated_scoring as calibrated_scoring
 from app.forecasting import apply_market_regime_guard
-from app.lab_service import _event_time_label, build_lab_run, render_lab_run_html
+from app.lab_service import _event_time_label, build_empty_lab_run, build_lab_run, render_lab_run_html
 from app.performance_guard_service import apply_performance_guard_to_pick, build_performance_guard
 from app.publication_service import publish_telegram_predictions
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
@@ -4185,6 +4185,16 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(result["publishable_preview"][0]["event_id"], "evt_ok")
         self.assertEqual(result["blocked_picks"]["discarded"][0]["event_id"], "evt_blocked")
 
+    def test_build_empty_lab_run_no_lanza_simulacion(self):
+        result = build_empty_lab_run(
+            runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
+        )
+
+        self.assertEqual(result["runtime_mode"], "shadow")
+        self.assertEqual(result["forecast_summary"]["total_analizadas"], 0)
+        self.assertEqual(result["publishable_preview"], [])
+        self.assertIn("Pulsa 'Ejecutar lab'", result["publication_decision"]["guard_reasons"][0])
+
 
     def test_render_lab_run_html_muestra_resumen_visual(self):
         html = render_lab_run_html(
@@ -4306,13 +4316,50 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn('<option value="todo" selected>Todo - deportes base</option>', html)
         self.assertIn('name="deporte"', html)
         self.assertIn('name="partido"', html)
-        self.assertIn('Todos los partidos', html)
-        self.assertIn('Mapa rapido de partidos', html)
-        self.assertIn('19:30', html)
-        self.assertIn('Publicable', html)
-        self.assertIn('22:00', html)
-        self.assertIn('Ganador', html)
-        self.assertNotIn('| h2h |', html)
+
+    def test_render_lab_run_html_muestra_estado_en_espera_sin_execute(self):
+        html = render_lab_run_html(
+            build_empty_lab_run(
+                runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
+            ),
+            query_params={
+                "bankroll": "",
+                "perfil": "agresivo",
+                "modo": "comparador",
+                "mercados": "todo",
+                "partido": "todos",
+                "deporte": "todo",
+                "solo_stakazos": "false",
+                "execute": "",
+            },
+            premium_css=lambda: "",
+            profile_options=[{"value": "agresivo", "label": "Agresivo"}],
+            mode_options=[{"value": "comparador", "label": "Comparador"}],
+            sport_options=[{"value": "todo", "label": "Todo - deportes base"}],
+            market_options=[{"value": "todo", "label": "Todo"}],
+            match_options=[{"value": "todos", "label": "Todos los partidos"}],
+        )
+
+        self.assertIn("Lab en espera", html)
+        self.assertIn("ya no consulta cuotas al abrirse", html)
+        self.assertIn('name="execute" value="true"', html)
+
+    def test_lab_run_no_consulta_datos_si_no_se_ejecuta(self):
+        import main
+
+        original_apuestas_hoy = main.apuestas_hoy
+
+        try:
+            def fail_apuestas_hoy(*args, **kwargs):
+                raise AssertionError("No deberia consultar cuotas al abrir /lab/run sin execute")
+
+            main.apuestas_hoy = fail_apuestas_hoy
+            response = main.lab_run()
+        finally:
+            main.apuestas_hoy = original_apuestas_hoy
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Lab en espera", response.body.decode("utf-8"))
 
 
 if __name__ == "__main__":

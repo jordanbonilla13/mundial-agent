@@ -266,6 +266,45 @@ def build_lab_run(
     }
 
 
+def build_empty_lab_run(*, runtime_settings: RuntimeSettings) -> dict[str, Any]:
+    return {
+        "runtime_mode": runtime_settings.publication_mode,
+        "publication_guard": {
+            "allow_live_publication": False,
+            "mode": runtime_settings.publication_mode,
+            "reasons": ["lab_idle"],
+        },
+        "publication_decision": {
+            "would_publish_live": False,
+            "runtime_mode": runtime_settings.publication_mode,
+            "guard_mode": runtime_settings.publication_mode,
+            "guard_reasons": ["Pulsa 'Ejecutar lab' para lanzar la simulacion."],
+        },
+        "match_overview": [],
+        "forecast_summary": {
+            "sport_label": "Todo",
+            "league_label": "Todas las ligas",
+            "total_analizadas": 0,
+            "total_recomendadas": 0,
+            "total_descartadas_preview": 0,
+            "total_publicables_preview": 0,
+            "total_bloqueadas_en_recomendadas": 0,
+            "total_bloqueadas_en_descartadas": 0,
+        },
+        "publishable_preview": [],
+        "blocked_picks": {
+            "recommended": [],
+            "discarded": [],
+        },
+        "forecast": {},
+        "telegram_preview": {
+            "resumen_telegram": "Todavia no se ha ejecutado la simulacion. Ajusta filtros y pulsa Ejecutar lab.",
+            "pronosticos": [],
+            "mensajes_telegram": [],
+        },
+    }
+
+
 def _badge_class(kind: str) -> str:
     return {
         "ok": "badge-green",
@@ -390,6 +429,7 @@ def render_lab_run_html(
     market_tags = _option_tags(market_options, str(query_params.get("mercados") or "todo"))
     match_tags = _option_tags(match_options, str(query_params.get("partido") or "todos"))
     notice_code = str(query_params.get("lab_notice") or "").strip().lower()
+    has_run = str(query_params.get("execute") or "").strip().lower() in {"1", "true", "yes", "si", "on"}
     notice_html = ""
     if notice_code == "published":
         publication_id = escape(str(query_params.get("publication_id") or "-"))
@@ -419,10 +459,17 @@ def render_lab_run_html(
             f'Job {job_id} | picks preparadas: {registered_picks}. Refresca en unos segundos si quieres seguir revisando el lab.</p>'
             f'</section>'
         )
+    elif not has_run:
+        notice_html = (
+            '<section class="card" style="margin-top: 18px; border-color: rgba(46,108,171,0.24);">'
+            '<div class="badge badge-yellow">Lab en espera</div>'
+            '<p class="muted">Esta pantalla ya no consulta cuotas al abrirse. Ajusta filtros y pulsa <strong>Ejecutar lab</strong> cuando quieras lanzar la simulacion.</p>'
+            '</section>'
+        )
     publish_form_inputs = "".join(
         f'<input type="hidden" name="{escape(str(key), quote=True)}" value="{escape(str(value), quote=True)}">'
         for key, value in query_refresh.items()
-        if key not in {"format", "lab_notice", "publication_id", "registered_picks", "sent_messages", "job_id"} and value not in (None, "")
+        if key not in {"format", "lab_notice", "publication_id", "registered_picks", "sent_messages", "job_id", "execute"} and value not in (None, "")
     )
     publish_action_html = ""
     if publishable_preview:
@@ -620,6 +667,7 @@ def render_lab_run_html(
             <section class="filters">
                 <div class="eyebrow" style="color: var(--brand); margin-bottom: 12px;">Configurar simulacion</div>
                 <form method="get" action="/lab/run" id="labRunForm">
+                    <input type="hidden" name="execute" value="true">
                     <div class="field">
                         <label>Bankroll</label>
                         <input type="number" step="0.01" name="bankroll" value="{bankroll_value}" placeholder="Opcional">
