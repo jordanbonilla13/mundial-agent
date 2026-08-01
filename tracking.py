@@ -854,7 +854,7 @@ def listar_picks(
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM picks ORDER BY id DESC LIMIT ?",
+                "SELECT * FROM picks WHERE estado <> 'archivada' ORDER BY id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
 
@@ -892,6 +892,48 @@ def listar_picks(
         picks = sorted(picks, key=lambda p: int(p.get("id") or 0), reverse=True)
 
     return picks[:limit]
+
+
+def archivar_picks_pendientes(
+    *,
+    id_desde: int | None = None,
+    id_hasta: int | None = None,
+    db_path: str = DB_PATH,
+) -> dict[str, Any]:
+    inicializar_db(db_path)
+
+    condiciones = ["estado = 'pendiente'"]
+    params: list[Any] = []
+
+    if id_desde is not None:
+        condiciones.append("id >= ?")
+        params.append(int(id_desde))
+    if id_hasta is not None:
+        condiciones.append("id <= ?")
+        params.append(int(id_hasta))
+
+    where_clause = " AND ".join(condiciones)
+
+    with conectar(db_path) as conn:
+        selected = conn.execute(
+            f"SELECT id FROM picks WHERE {where_clause}",
+            tuple(params),
+        ).fetchall()
+        affected_ids = [int(row["id"]) for row in selected]
+
+        if affected_ids:
+            conn.execute(
+                f"UPDATE picks SET estado = 'archivada' WHERE {where_clause}",
+                tuple(params),
+            )
+            conn.commit()
+
+    return {
+        "archivadas": len(affected_ids),
+        "ids": affected_ids,
+        "id_desde": id_desde,
+        "id_hasta": id_hasta,
+    }
 
 
 def actualizar_resultado(

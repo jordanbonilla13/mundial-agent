@@ -32,7 +32,7 @@ from app.safety_service import publication_guard_state
 from app.operating_mode import multi_sport_pick_limit, single_sport_pick_limit, telegram_pick_limit
 from app.exposure import apply_exposure_limits
 from app.audit import format_audit_report_telegram
-from tracking import actualizar_resultado, estadisticas, guardar_recomendaciones
+from tracking import actualizar_resultado, archivar_picks_pendientes, estadisticas, guardar_recomendaciones
 from tracking import aprendizaje, dashboard_data, guardar_snapshot_cuotas, liquidar_picks_con_scores, listar_evaluaciones_picks, listar_picks, obtener_closing_odds_pick, penalizaciones_historicas
 from tracking import actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, guardar_apuesta_real, marcar_apuesta_real_pick, obtener_bankroll
 from tracking import guardar_recomendaciones_unicas, listar_publicaciones_telegram, registrar_publicacion_telegram
@@ -2355,6 +2355,51 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(len(apostadas), 1)
         self.assertEqual(apostadas[0]["id"], pick["id"])
         self.assertEqual(len(no_apostadas), 0)
+
+    def test_archivar_picks_pendientes_las_saca_de_pendientes_y_listados(self):
+        recomendacion = {
+            "event_id": "evt_archive",
+            "commence_time": "2026-07-15T20:00:00Z",
+            "sport_key": "soccer_spain_la_liga",
+            "sport_label": "Futbol",
+            "league_key": "la_liga",
+            "league_label": "La Liga",
+            "partido": "A vs B",
+            "equipo": "A",
+            "equipo_raw": "A",
+            "tipo_resultado": "home",
+            "tipo_resultado_raw": "home",
+            "casa": "Pinnacle",
+            "mercado": "h2h",
+            "cuota_apuesta": 2.0,
+            "importe_sugerido": 5.0,
+            "stake": 1.0,
+            "recomendacion": "Value",
+            "motivo": "Test",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "tracker.sqlite3")
+            picks = guardar_recomendaciones_unicas(
+                [
+                    recomendacion,
+                    {**recomendacion, "event_id": "evt_archive_2", "partido": "C vs D"},
+                ],
+                db_path=db_path,
+            )
+            resultado = archivar_picks_pendientes(
+                id_desde=min(p["id"] for p in picks),
+                id_hasta=max(p["id"] for p in picks),
+                db_path=db_path,
+            )
+            visibles = listar_picks(db_path=db_path)
+            pendientes = listar_picks(db_path=db_path, estado="pendiente")
+            stats = estadisticas(db_path=db_path)
+
+        self.assertEqual(resultado["archivadas"], 2)
+        self.assertEqual(visibles, [])
+        self.assertEqual(pendientes, [])
+        self.assertEqual(stats["picks_pendientes"], 0)
 
     def test_procesar_callback_pick_marca_apostada(self):
         import main
