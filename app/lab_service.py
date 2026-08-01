@@ -159,6 +159,14 @@ def _lab_pick_snapshot(pick: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _lab_display_key(pick: dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(pick.get("event_id") or "").strip().lower(),
+        str(pick.get("mercado") or "").strip().lower(),
+        str(pick.get("equipo") or "").strip().lower(),
+    )
+
+
 def build_lab_run(
     *,
     runtime_settings: RuntimeSettings,
@@ -410,7 +418,13 @@ def render_lab_run_html(
         if value not in (None, "")
     )
     publishable_cards = "".join(_pick_card_html(pick, blocked=False) for pick in publishable_preview) or '<div class="card"><p class="muted">No hay picks publicables con estos filtros.</p></div>'
-    blocked_cards = "".join(_pick_card_html(pick, blocked=True) for pick in (blocked_recommended + blocked_discarded)) or '<div class="card"><p class="muted">No hay picks bloqueadas en esta simulacion.</p></div>'
+    publishable_keys = {_lab_display_key(pick) for pick in publishable_preview}
+    visible_blocked = [
+        pick
+        for pick in (blocked_recommended + blocked_discarded)
+        if _lab_display_key(pick) not in publishable_keys
+    ]
+    blocked_cards = "".join(_pick_card_html(pick, blocked=True) for pick in visible_blocked) or '<div class="card"><p class="muted">No hay picks bloqueadas en esta simulacion.</p></div>'
     telegram_preview = lab.get("telegram_preview") or {}
     summary_message = escape(str(telegram_preview.get("resumen_telegram") or "Sin resumen"))
     publish_payload_b64 = ""
@@ -420,7 +434,7 @@ def render_lab_run_html(
         ).decode("ascii")
     except Exception:
         publish_payload_b64 = ""
-    blocked_total = int(forecast_summary.get("total_bloqueadas_en_recomendadas", 0) or 0) + int(forecast_summary.get("total_bloqueadas_en_descartadas", 0) or 0)
+    blocked_total = len(visible_blocked)
     bankroll_value = "" if query_params.get("bankroll") in (None, "") else escape(str(query_params.get("bankroll")), quote=True)
     solo_stakazos_checked = "checked" if str(query_params.get("solo_stakazos") or "false").lower() == "true" else ""
     profile_tags = _option_tags(profile_options, str(query_params.get("perfil") or "moderado"))
