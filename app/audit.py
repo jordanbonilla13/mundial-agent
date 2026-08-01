@@ -563,6 +563,9 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
 def format_audit_report_telegram(report: dict[str, Any]) -> str:
     """Formatea el reporte de auditoria para Telegram en version compacta."""
 
+    def result_triplet(won: int, lost: int, push: int) -> str:
+        return f"✅{won} ❌{lost} ➖{push}"
+
     lines: list[str] = []
     portfolio = report.get("model_portfolio") or {}
     today_portfolio = portfolio.get("today") or {}
@@ -692,7 +695,7 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
         f"{portfolio_label}: {window_portfolio.get('published', 0)} pub | "
         f"{window_portfolio.get('closed', 0)} cerr | "
         f"{window_portfolio.get('pending', 0)} pend | "
-        f"{window_portfolio.get('won', 0)}W-{window_portfolio.get('lost', 0)}L-{window_portfolio.get('push', 0)}N"
+        f"{result_triplet(window_portfolio.get('won', 0), window_portfolio.get('lost', 0), window_portfolio.get('push', 0))}"
     )
     lines.append(
         f"{roi_hit_label}: {window_portfolio.get('roi', 0):+.2f}% | "
@@ -702,7 +705,7 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
         f"Global: {all_time_portfolio.get('published', 0)} pub | "
         f"{all_time_portfolio.get('closed', 0)} cerr | "
         f"{all_time_portfolio.get('pending', 0)} pend | "
-        f"{all_time_portfolio.get('won', 0)}W-{all_time_portfolio.get('lost', 0)}L-{all_time_portfolio.get('push', 0)}N"
+        f"{result_triplet(all_time_portfolio.get('won', 0), all_time_portfolio.get('lost', 0), all_time_portfolio.get('push', 0))}"
     )
 
     lines.append("")
@@ -711,7 +714,7 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
         f"Rec {report['picks']['recommended']} | "
         f"Ejec {report['picks']['executed']} | "
         f"Cerr {report['picks']['closed']} | "
-        f"{report['picks']['won']}W-{report['picks']['lost']}L"
+        f"✅{report['picks']['won']} ❌{report['picks']['lost']}"
     )
     if report["picks"]["closed"] > 0:
         lines.append(
@@ -736,7 +739,7 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
         lines.append(
             f"🗓️ {published_label} | "
             f"{window_rollup.get('total_picks', 0)} picks | "
-            f"{window_rollup.get('won', 0)}W-{window_rollup.get('lost', 0)}L-{window_rollup.get('push', 0)}N | "
+            f"{result_triplet(window_rollup.get('won', 0), window_rollup.get('lost', 0), window_rollup.get('push', 0))} | "
             f"{window_rollup.get('pending', 0)} pend"
         )
         for item in window_rollup.get("picks", [])[:6]:
@@ -750,7 +753,7 @@ def format_audit_report_telegram(report: dict[str, Any]) -> str:
         lines.append(
             f"🧾 Última pub #{top_publication.get('id')} | "
             f"{top_publication.get('total_picks', 0)} picks | "
-            f"{top_publication.get('won', 0)}W-{top_publication.get('lost', 0)}L-{top_publication.get('push', 0)}N | "
+            f"{result_triplet(top_publication.get('won', 0), top_publication.get('lost', 0), top_publication.get('push', 0))} | "
             f"{top_publication.get('pending', 0)} pend"
         )
         for preview in top_publication.get("picks_preview", [])[:3]:

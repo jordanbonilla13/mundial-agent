@@ -18,12 +18,16 @@ def _safe_float(value: Any) -> float | None:
 def _result_icon(result: str | None) -> str:
     normalized = str(result or "").strip().lower()
     if normalized == "win":
-        return "W"
+        return "✅"
     if normalized == "loss":
-        return "L"
+        return "❌"
     if normalized == "push":
-        return "N"
-    return "-"
+        return "➖"
+    return "⏳"
+
+
+def _result_triplet(wins: int, losses: int, pushes: int) -> str:
+    return f"✅{wins} ❌{losses} ➖{pushes}"
 
 
 def _window_metrics(rows: list[dict[str, Any]], size: int) -> dict[str, Any]:
@@ -98,12 +102,12 @@ def _build_alerts(sport_rows: list[dict[str, Any]], market_rows: list[dict[str, 
     for row in sport_rows:
         if row["sample"] >= 5 and (row["hit_rate"] < 40 or (row["clv_avg"] is not None and row["clv_avg"] < 0)):
             alerts.append(
-                f"{row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | hit {row['hit_rate']:.0f}%"
+                f"{row['name']}: {_result_triplet(row['wins'], row['losses'], row['pushes'])} | hit {row['hit_rate']:.0f}%"
             )
     for row in market_rows:
         if row["sample"] >= 5 and (row["hit_rate"] < 42 or (row["clv_avg"] is not None and row["clv_avg"] < 0)):
             alerts.append(
-                f"{row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | hit {row['hit_rate']:.0f}%"
+                f"{row['name']}: {_result_triplet(row['wins'], row['losses'], row['pushes'])} | hit {row['hit_rate']:.0f}%"
             )
     return alerts[:4]
 
@@ -168,7 +172,7 @@ def format_recent_form_panel_telegram(panel: dict[str, Any]) -> str:
 
     for window in panel.get("windows", []):
         lines.append(
-            f"Ult {window['size']}: {window['wins']}W-{window['losses']}L-{window['pushes']}N | "
+            f"Ult {window['size']}: {_result_triplet(window['wins'], window['losses'], window['pushes'])} | "
             f"hit {window['hit_rate']:.0f}% | CLV {window['clv_avg'] if window['clv_avg'] is not None else '-'} | "
             f"seq {window['sequence']}"
         )
@@ -179,7 +183,7 @@ def format_recent_form_panel_telegram(panel: dict[str, Any]) -> str:
         lines.append("Por deporte")
         for row in sport_rows[:4]:
             lines.append(
-                f"{row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | "
+                f"{row['name']}: {_result_triplet(row['wins'], row['losses'], row['pushes'])} | "
                 f"hit {row['hit_rate']:.0f}% | CLV {row['clv_avg'] if row['clv_avg'] is not None else '-'}"
             )
 
@@ -189,7 +193,7 @@ def format_recent_form_panel_telegram(panel: dict[str, Any]) -> str:
         lines.append("Por mercado")
         for row in market_rows[:4]:
             lines.append(
-                f"{row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | "
+                f"{row['name']}: {_result_triplet(row['wins'], row['losses'], row['pushes'])} | "
                 f"hit {row['hit_rate']:.0f}% | CLV {row['clv_avg'] if row['clv_avg'] is not None else '-'}"
             )
 
