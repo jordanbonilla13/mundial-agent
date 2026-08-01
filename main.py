@@ -2137,8 +2137,14 @@ def traducir_apuesta(apuesta: dict) -> dict:
         apuesta.get("mercado"),
         apuesta.get("outcome_point"),
         apuesta.get("outcome_description"),
+        apuesta.get("sport_key"),
+        apuesta.get("sport_label"),
     )
-    apuesta["tipo_resultado_es"] = tipo_resultado_es(apuesta.get("tipo_resultado"))
+    apuesta["tipo_resultado_es"] = tipo_resultado_es(
+        apuesta.get("tipo_resultado"),
+        apuesta.get("sport_key"),
+        apuesta.get("sport_label"),
+    )
     apuesta["recomendacion_es"] = recomendacion_es(apuesta.get("recomendacion"))
     apuesta["motivo_es"] = motivo_es(apuesta.get("motivo"))
     apuesta["sport_label"] = apuesta.get("sport_label") or "General"
@@ -2550,9 +2556,13 @@ def que_tiene_que_pasar(apuesta: dict) -> str:
 
 def etiqueta_tipo_apuesta(apuesta: dict) -> tuple[str, str]:
     mercado = apuesta.get("mercado")
+    sport_key = str(apuesta.get("sport_key") or "")
 
     if mercado == "h2h":
         return "Resultado elegido", apuesta.get("tipo_resultado_es", "")
+
+    if sport_key.startswith("basketball_") and mercado in {"totals", "alternate_totals", "team_totals", "totals_h1", "totals_h2"}:
+        return "Mercado", apuesta.get("tipo_resultado_es", "")
 
     return "Mercado", apuesta.get("tipo_resultado_es", "")
 
@@ -4034,18 +4044,26 @@ def mis_apuestas(
     elite_tier: str | None = None,
     solo_elite: bool = False,
     solo_stakazos: bool = False,
+    apuesta_scope: str = "reales",
     sport_label: str | None = None,
     league_label: str | None = None,
     min_quality_score: int = 0,
     min_reliability_score: int = 0,
     order_by: str = "recientes",
 ):
+    apuesta_real_filter = True
+    if apuesta_scope == "todas":
+        apuesta_real_filter = None
+    elif apuesta_scope == "modelo":
+        apuesta_real_filter = False
+
     picks = listar_picks(
         limit=300,
         estado=estado,
         elite_tier=elite_tier,
         solo_elite=solo_elite,
         solo_stakazos=solo_stakazos,
+        apuesta_real=apuesta_real_filter,
         sport_label=sport_label,
         league_label=league_label,
         min_quality_score=min_quality_score or None,
@@ -4054,13 +4072,21 @@ def mis_apuestas(
     )
     pendientes = [p for p in picks if p["estado"] == "pendiente"]
     cerradas = [p for p in picks if p["estado"] == "cerrada"]
-    stats = estadisticas()
     premium = dashboard_data()
     bankroll = obtener_bankroll()
     checked_elite = "checked" if solo_elite else ""
     checked_stakazos = "checked" if solo_stakazos else ""
     sport_options = sorted({str((_raw_pick(p).get("sport_label") or p.get("sport_label") or "")).strip() for p in picks if (_raw_pick(p).get("sport_label") or p.get("sport_label"))})
     league_options = sorted({str((_raw_pick(p).get("league_label") or p.get("league_label") or "")).strip() for p in picks if (_raw_pick(p).get("league_label") or p.get("league_label"))})
+    scope_label = {
+        "reales": "Reales",
+        "modelo": "No reales",
+        "todas": "Todas",
+    }.get(apuesta_scope, "Reales")
+
+    visible_apostado = round(sum(float(p.get("importe_sugerido") or 0) for p in cerradas), 2)
+    visible_beneficio = round(sum(float(p.get("profit_loss") or 0) for p in cerradas), 2)
+    visible_roi = round((visible_beneficio / visible_apostado) * 100, 2) if visible_apostado else 0.0
 
     def pick_meta(pick: dict) -> tuple[str, float, float]:
         raw = _raw_pick(pick)
@@ -4367,6 +4393,14 @@ def mis_apuestas(
                     </select>
                 </div>
                 <div class="field">
+                    <label>Alcance</label>
+                    <select name="apuesta_scope">
+                        <option value="reales" {"selected" if apuesta_scope == "reales" else ""}>Solo reales</option>
+                        <option value="modelo" {"selected" if apuesta_scope == "modelo" else ""}>Solo no reales</option>
+                        <option value="todas" {"selected" if apuesta_scope == "todas" else ""}>Todas</option>
+                    </select>
+                </div>
+                <div class="field">
                     <label>Orden</label>
                     <select name="order_by">
                         <option value="recientes" {"selected" if order_by == "recientes" else ""}>Mas recientes</option>
@@ -4435,10 +4469,10 @@ def mis_apuestas(
         </div>
         <div class="summary">
             <div class="metric">Bankroll actual<strong>{bankroll:.2f} EUR</strong></div>
-            <div class="metric">Pendientes<strong>{stats['picks_pendientes']}</strong></div>
-            <div class="metric">Cerradas<strong>{stats['picks_cerrados']}</strong></div>
-            <div class="metric">Beneficio<strong>{stats['beneficio']:.2f} EUR</strong></div>
-            <div class="metric">ROI<strong>{stats['roi']:.2f}%</strong></div>
+            <div class="metric">Pendientes {escape(scope_label)}<strong>{len(pendientes)}</strong></div>
+            <div class="metric">Cerradas {escape(scope_label)}<strong>{len(cerradas)}</strong></div>
+            <div class="metric">Beneficio {escape(scope_label)}<strong>{visible_beneficio:.2f} EUR</strong></div>
+            <div class="metric">ROI {escape(scope_label)}<strong>{visible_roi:.2f}%</strong></div>
         </div>
         <h2>Resumen premium</h2>
         <div class="summary">

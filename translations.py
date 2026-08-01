@@ -121,37 +121,49 @@ def equipo_es(nombre: str | None) -> str:
     return TEAM_NAMES_ES.get(nombre, nombre)
 
 
+def _is_basketball_context(
+    sport_key: str | None = None,
+    sport_label: str | None = None,
+) -> bool:
+    sport_key_text = str(sport_key or "").strip().lower()
+    sport_label_text = str(sport_label or "").strip().lower()
+    return sport_key_text.startswith("basketball_") or sport_label_text == "baloncesto"
+
+
 def apuesta_es(
     nombre: str | None,
     mercado: str | None = None,
     point: float | None = None,
     description: str | None = None,
+    sport_key: str | None = None,
+    sport_label: str | None = None,
 ) -> str:
     descripcion = equipo_es(description)
+    basketball = _is_basketball_context(sport_key, sport_label)
 
     if mercado in {"totals", "alternate_totals"}:
         if nombre == "Over":
-            return f"Más de {point:g} goles" if point is not None else "Más goles"
+            return f"Más de {point:g} puntos" if basketball and point is not None else f"Más de {point:g} goles" if point is not None else "Más puntos" if basketball else "Más goles"
         if nombre == "Under":
-            return f"Menos de {point:g} goles" if point is not None else "Menos goles"
+            return f"Menos de {point:g} puntos" if basketball and point is not None else f"Menos de {point:g} goles" if point is not None else "Menos puntos" if basketball else "Menos goles"
 
     if mercado == "totals_h1":
         if nombre == "Over":
-            return f"1ª parte: más de {point:g} goles" if point is not None else "1ª parte: más goles"
+            return f"1ª parte: más de {point:g} puntos" if basketball and point is not None else f"1ª parte: más de {point:g} goles" if point is not None else "1ª parte: más puntos" if basketball else "1ª parte: más goles"
         if nombre == "Under":
-            return f"1ª parte: menos de {point:g} goles" if point is not None else "1ª parte: menos goles"
+            return f"1ª parte: menos de {point:g} puntos" if basketball and point is not None else f"1ª parte: menos de {point:g} goles" if point is not None else "1ª parte: menos puntos" if basketball else "1ª parte: menos goles"
 
     if mercado == "totals_h2":
         if nombre == "Over":
-            return f"2ª parte: más de {point:g} goles" if point is not None else "2ª parte: más goles"
+            return f"2ª parte: más de {point:g} puntos" if basketball and point is not None else f"2ª parte: más de {point:g} goles" if point is not None else "2ª parte: más puntos" if basketball else "2ª parte: más goles"
         if nombre == "Under":
-            return f"2ª parte: menos de {point:g} goles" if point is not None else "2ª parte: menos goles"
+            return f"2ª parte: menos de {point:g} puntos" if basketball and point is not None else f"2ª parte: menos de {point:g} goles" if point is not None else "2ª parte: menos puntos" if basketball else "2ª parte: menos goles"
 
     if mercado == "team_totals":
         if nombre == "Over":
-            return f"{descripcion}: más de {point:g} goles" if point is not None else f"{descripcion}: más goles"
+            return f"{descripcion}: más de {point:g} puntos" if basketball and point is not None else f"{descripcion}: más de {point:g} goles" if point is not None else f"{descripcion}: más puntos" if basketball else f"{descripcion}: más goles"
         if nombre == "Under":
-            return f"{descripcion}: menos de {point:g} goles" if point is not None else f"{descripcion}: menos goles"
+            return f"{descripcion}: menos de {point:g} puntos" if basketball and point is not None else f"{descripcion}: menos de {point:g} goles" if point is not None else f"{descripcion}: menos puntos" if basketball else f"{descripcion}: menos goles"
 
     if mercado == "alternate_team_totals_corners":
         if nombre == "Over":
@@ -186,9 +198,24 @@ def apuesta_es(
     return equipo_es(nombre)
 
 
-def tipo_resultado_es(tipo: str | None) -> str:
+def tipo_resultado_es(
+    tipo: str | None,
+    sport_key: str | None = None,
+    sport_label: str | None = None,
+) -> str:
     if not tipo:
         return ""
+
+    if _is_basketball_context(sport_key, sport_label):
+        basketball_labels = {
+            "totals": "Puntos totales",
+            "team_totals": "Puntos por equipo",
+            "alternate_totals": "Total de puntos alternativo",
+            "totals_h1": "Puntos - 1ª parte",
+            "totals_h2": "Puntos - 2ª parte",
+        }
+        if tipo in basketball_labels:
+            return basketball_labels[tipo]
 
     return RESULT_TYPES_ES.get(tipo, tipo)
 
