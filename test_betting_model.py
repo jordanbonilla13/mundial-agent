@@ -32,7 +32,7 @@ from app.safety_service import publication_guard_state
 from app.operating_mode import multi_sport_pick_limit, single_sport_pick_limit, telegram_pick_limit
 from app.exposure import apply_exposure_limits
 from app.audit import format_audit_report_telegram
-from tracking import actualizar_resultado, archivar_picks_pendientes, estadisticas, guardar_recomendaciones
+from tracking import actualizar_resultado, archivar_picks_pendientes, conectar, eliminar_picks_archivadas, estadisticas, guardar_recomendaciones
 from tracking import aprendizaje, dashboard_data, guardar_snapshot_cuotas, liquidar_picks_con_scores, listar_evaluaciones_picks, listar_picks, obtener_closing_odds_pick, penalizaciones_historicas
 from tracking import actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, guardar_apuesta_real, marcar_apuesta_real_pick, obtener_bankroll
 from tracking import guardar_recomendaciones_unicas, listar_publicaciones_telegram, registrar_publicacion_telegram
@@ -2400,6 +2400,57 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(visibles, [])
         self.assertEqual(pendientes, [])
         self.assertEqual(stats["picks_pendientes"], 0)
+
+    def test_eliminar_picks_archivadas_las_borra_fisicamente(self):
+        recomendacion = {
+            "event_id": "evt_delete_archived",
+            "commence_time": "2026-07-15T20:00:00Z",
+            "sport_key": "basketball_wnba",
+            "sport_label": "Baloncesto",
+            "league_key": "wnba",
+            "league_label": "WNBA",
+            "partido": "Old A vs Old B",
+            "equipo": "Old A",
+            "equipo_raw": "Old A",
+            "tipo_resultado": "home",
+            "tipo_resultado_raw": "home",
+            "casa": "Pinnacle",
+            "mercado": "h2h",
+            "cuota_apuesta": 1.9,
+            "importe_sugerido": 4.0,
+            "stake": 1.0,
+            "recomendacion": "Cleanup",
+            "motivo": "Test",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "tracker.sqlite3")
+            picks = guardar_recomendaciones_unicas(
+                [
+                    recomendacion,
+                    {**recomendacion, "event_id": "evt_delete_archived_2", "partido": "Old C vs Old D"},
+                ],
+                db_path=db_path,
+            )
+            archivar_picks_pendientes(
+                id_desde=min(p["id"] for p in picks),
+                id_hasta=max(p["id"] for p in picks),
+                db_path=db_path,
+            )
+            resultado = eliminar_picks_archivadas(
+                id_desde=min(p["id"] for p in picks),
+                id_hasta=max(p["id"] for p in picks),
+                db_path=db_path,
+            )
+            visibles = listar_picks(db_path=db_path)
+            archivadas = listar_picks(db_path=db_path, estado="archivada")
+            with conectar(db_path) as conn:
+                total_picks = conn.execute("SELECT COUNT(*) AS total FROM picks").fetchone()["total"]
+
+        self.assertEqual(resultado["eliminadas"], 2)
+        self.assertEqual(visibles, [])
+        self.assertEqual(archivadas, [])
+        self.assertEqual(total_picks, 0)
 
     def test_procesar_callback_pick_marca_apostada(self):
         import main

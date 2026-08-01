@@ -84,7 +84,7 @@ from betting_model import (
 )
 from elo import obtener_elos
 from tracking import _bool_pick_flag, _raw_pick, actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, actualizar_resultado, estadisticas, guardar_recomendaciones, listar_picks
-from tracking import archivar_picks_pendientes, guardar_apuesta_real, guardar_setting, marcar_apuesta_real_pick, obtener_setting
+from tracking import archivar_picks_pendientes, eliminar_picks_archivadas, guardar_apuesta_real, guardar_setting, marcar_apuesta_real_pick, obtener_setting
 from tracking import dashboard_data, guardar_snapshot_cuotas, aprendizaje, liquidar_picks_con_scores, listar_evaluaciones_picks, obtener_bankroll, penalizaciones_historicas
 from tracking import guardar_recomendaciones_unicas, inicializar_db, listar_publicaciones_telegram, registrar_publicacion_telegram
 from translations import (
@@ -3978,6 +3978,22 @@ async def tracking_archivar_picks_form(request: Request):
     return RedirectResponse(url="/mis-apuestas", status_code=303)
 
 
+@app.post("/tracking/picks/eliminar-archivadas-form")
+async def tracking_eliminar_picks_archivadas_form(request: Request):
+    form = await form_urlencoded(request)
+    id_desde_raw = str(form.get("id_desde") or "").strip()
+    id_hasta_raw = str(form.get("id_hasta") or "").strip()
+
+    id_desde = int(id_desde_raw) if id_desde_raw else None
+    id_hasta = int(id_hasta_raw) if id_hasta_raw else None
+
+    if id_desde is None and id_hasta is None:
+        raise HTTPException(status_code=400, detail="Debes indicar al menos un limite para eliminar.")
+
+    eliminar_picks_archivadas(id_desde=id_desde, id_hasta=id_hasta)
+    return RedirectResponse(url="/mis-apuestas", status_code=303)
+
+
 @app.get("/mis-apuestas", response_class=HTMLResponse)
 def mis_apuestas(
     estado: str | None = None,
@@ -4369,6 +4385,18 @@ def mis_apuestas(
                     <input name="id_hasta" type="number" min="1" step="1" placeholder="103">
                 </div>
                 <button type="submit">Archivar pendientes de ese rango</button>
+            </form>
+            <p style="margin-top: 12px;">Si despues quieres borrarlas de verdad, este segundo paso solo elimina picks ya archivadas para que no sigan ocupando base de datos ni entren en ningun calculo futuro.</p>
+            <form method="post" action="/tracking/picks/eliminar-archivadas-form" class="bankroll-form">
+                <div class="field">
+                    <label>ID desde</label>
+                    <input name="id_desde" type="number" min="1" step="1" placeholder="37">
+                </div>
+                <div class="field">
+                    <label>ID hasta</label>
+                    <input name="id_hasta" type="number" min="1" step="1" placeholder="103">
+                </div>
+                <button type="submit" class="loss">Borrar archivadas de ese rango</button>
             </form>
         </div>
         <div class="summary">

@@ -936,6 +936,57 @@ def archivar_picks_pendientes(
     }
 
 
+def eliminar_picks_archivadas(
+    *,
+    id_desde: int | None = None,
+    id_hasta: int | None = None,
+    db_path: str = DB_PATH,
+) -> dict[str, Any]:
+    inicializar_db(db_path)
+
+    condiciones = ["estado = 'archivada'"]
+    params: list[Any] = []
+
+    if id_desde is not None:
+        condiciones.append("id >= ?")
+        params.append(int(id_desde))
+    if id_hasta is not None:
+        condiciones.append("id <= ?")
+        params.append(int(id_hasta))
+
+    where_clause = " AND ".join(condiciones)
+
+    with conectar(db_path) as conn:
+        selected = conn.execute(
+            f"SELECT id FROM picks WHERE {where_clause}",
+            tuple(params),
+        ).fetchall()
+        affected_ids = [int(row["id"]) for row in selected]
+
+        if affected_ids:
+            placeholders = ", ".join("?" for _ in affected_ids)
+            conn.execute(
+                f"UPDATE telegram_publication_items SET pick_id = NULL WHERE pick_id IN ({placeholders})",
+                tuple(affected_ids),
+            )
+            conn.execute(
+                f"DELETE FROM pick_evaluations WHERE pick_id IN ({placeholders})",
+                tuple(affected_ids),
+            )
+            conn.execute(
+                f"DELETE FROM picks WHERE id IN ({placeholders})",
+                tuple(affected_ids),
+            )
+            conn.commit()
+
+    return {
+        "eliminadas": len(affected_ids),
+        "ids": affected_ids,
+        "id_desde": id_desde,
+        "id_hasta": id_hasta,
+    }
+
+
 def actualizar_resultado(
     pick_id: int,
     resultado: str,
@@ -1107,7 +1158,11 @@ def listar_publicaciones_telegram(limit: int = 20, db_path: str = DB_PATH) -> li
                     (publicacion["id"],),
                 ).fetchall()
             ]
-            pick_items = [item for item in items if item.get("message_kind") == "pick"]
+            pick_items = [
+                item
+                for item in items
+                if item.get("message_kind") == "pick" and item.get("pick_id")
+            ]
             ganadas = sum(1 for item in pick_items if item.get("resultado") == "win")
             perdidas = sum(1 for item in pick_items if item.get("resultado") == "loss")
             nulas = sum(1 for item in pick_items if item.get("resultado") == "push")
