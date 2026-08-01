@@ -32,10 +32,10 @@ from app.safety_service import publication_guard_state
 from app.operating_mode import multi_sport_pick_limit, single_sport_pick_limit, telegram_pick_limit
 from app.exposure import apply_exposure_limits
 from app.audit import format_audit_report_telegram
-from tracking import actualizar_resultado, archivar_picks_pendientes, conectar, eliminar_picks_archivadas, estadisticas, guardar_recomendaciones
+from tracking import actualizar_resultado, archivar_picks_pendientes, conectar, eliminar_picks_archivadas, eliminar_reset_historial_deporte, estadisticas, guardar_recomendaciones
 from tracking import aprendizaje, dashboard_data, guardar_snapshot_cuotas, liquidar_picks_con_scores, listar_evaluaciones_picks, listar_picks, obtener_closing_odds_pick, penalizaciones_historicas
 from tracking import actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, guardar_apuesta_real, marcar_apuesta_real_pick, obtener_bankroll
-from tracking import guardar_recomendaciones_unicas, listar_publicaciones_telegram, registrar_publicacion_telegram
+from tracking import guardar_recomendaciones_unicas, guardar_reset_historial_deporte, listar_publicaciones_telegram, registrar_publicacion_telegram
 from main import (
     adaptar_api_football_odds,
     adaptar_sportsgameodds_events,
@@ -2451,6 +2451,81 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(visibles, [])
         self.assertEqual(archivadas, [])
         self.assertEqual(total_picks, 0)
+
+    def test_reset_historial_por_deporte_filtra_evaluaciones_y_dashboard(self):
+        recomendacion_futbol = {
+            "event_id": "evt_reset_soccer_old",
+            "commence_time": "2026-07-15T20:00:00Z",
+            "sport_key": "soccer_spain_la_liga",
+            "sport_label": "Futbol",
+            "league_key": "la_liga",
+            "league_label": "La Liga",
+            "partido": "A vs B",
+            "equipo": "A",
+            "equipo_raw": "A",
+            "tipo_resultado": "home",
+            "tipo_resultado_raw": "home",
+            "casa": "Pinnacle",
+            "mercado": "h2h",
+            "cuota_apuesta": 2.0,
+            "importe_sugerido": 5.0,
+            "stake": 1.0,
+            "recomendacion": "Value",
+            "motivo": "Test",
+        }
+        recomendacion_tenis = {
+            **recomendacion_futbol,
+            "event_id": "evt_reset_tennis",
+            "sport_key": "tennis_atp",
+            "sport_label": "Tenis",
+            "league_key": "atp",
+            "league_label": "ATP Test",
+            "partido": "C vs D",
+            "equipo": "C",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "tracker.sqlite3")
+            old_pick = guardar_recomendaciones_unicas([recomendacion_futbol], db_path=db_path)[0]
+            new_pick = guardar_recomendaciones_unicas(
+                [{**recomendacion_futbol, "event_id": "evt_reset_soccer_new", "partido": "E vs F", "equipo": "E"}],
+                db_path=db_path,
+            )[0]
+            tennis_pick = guardar_recomendaciones_unicas([recomendacion_tenis], db_path=db_path)[0]
+
+            with conectar(db_path) as conn:
+                conn.execute("UPDATE picks SET created_at = ? WHERE id = ?", ("2026-07-01T10:00:00+00:00", old_pick["id"]))
+                conn.execute("UPDATE picks SET created_at = ? WHERE id = ?", ("2026-08-01T10:00:00+00:00", new_pick["id"]))
+                conn.execute("UPDATE picks SET created_at = ? WHERE id = ?", ("2026-07-01T11:00:00+00:00", tennis_pick["id"]))
+                conn.commit()
+
+            actualizar_resultado(old_pick["id"], "loss", closing_odds=2.1, db_path=db_path)
+            actualizar_resultado(new_pick["id"], "win", closing_odds=1.8, db_path=db_path)
+            actualizar_resultado(tennis_pick["id"], "win", closing_odds=1.9, db_path=db_path)
+
+            with conectar(db_path) as conn:
+                conn.execute("UPDATE pick_evaluations SET created_at = ? WHERE pick_id = ?", ("2026-07-01T10:05:00+00:00", old_pick["id"]))
+                conn.execute("UPDATE pick_evaluations SET created_at = ? WHERE pick_id = ?", ("2026-08-01T10:05:00+00:00", new_pick["id"]))
+                conn.execute("UPDATE pick_evaluations SET created_at = ? WHERE pick_id = ?", ("2026-07-01T11:05:00+00:00", tennis_pick["id"]))
+                conn.commit()
+
+            guardar_reset_historial_deporte("Futbol", "2026-08-01T00:00:00+00:00", db_path=db_path)
+            evaluaciones = listar_evaluaciones_picks(limit=20, db_path=db_path)
+            dashboard = dashboard_data(db_path=db_path)
+            panel = build_recent_form_panel(db_path=db_path)
+            eliminar_reset_historial_deporte("Futbol", db_path=db_path)
+            evaluaciones_sin_reset = listar_evaluaciones_picks(limit=20, db_path=db_path)
+
+        event_ids = {item["event_id"] for item in evaluaciones}
+        deportes_dashboard = {item["nombre"]: item["cerradas"] for item in dashboard["por_deporte"]}
+        deportes_panel = {item["name"]: item["sample"] for item in panel["by_sport"]}
+        event_ids_sin_reset = {item["event_id"] for item in evaluaciones_sin_reset}
+
+        self.assertEqual(event_ids, {"evt_reset_soccer_new", "evt_reset_tennis"})
+        self.assertEqual(deportes_dashboard.get("Futbol"), 1)
+        self.assertEqual(deportes_dashboard.get("Tenis"), 1)
+        self.assertEqual(deportes_panel.get("Futbol"), 1)
+        self.assertIn("evt_reset_soccer_old", event_ids_sin_reset)
 
     def test_procesar_callback_pick_marca_apostada(self):
         import main

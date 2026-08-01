@@ -3,7 +3,7 @@ from __future__ import annotations
 from html import escape
 from typing import Any, Callable
 
-from tracking import DB_PATH, listar_evaluaciones_picks
+from tracking import DB_PATH, listar_evaluaciones_picks, obtener_resets_historial_deportes
 
 
 def _safe_float(value: Any) -> float | None:
@@ -98,12 +98,12 @@ def _build_alerts(sport_rows: list[dict[str, Any]], market_rows: list[dict[str, 
     for row in sport_rows:
         if row["sample"] >= 5 and (row["hit_rate"] < 40 or (row["clv_avg"] is not None and row["clv_avg"] < 0)):
             alerts.append(
-                f"⚠️ {row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | hit {row['hit_rate']:.0f}%"
+                f"{row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | hit {row['hit_rate']:.0f}%"
             )
     for row in market_rows:
         if row["sample"] >= 5 and (row["hit_rate"] < 42 or (row["clv_avg"] is not None and row["clv_avg"] < 0)):
             alerts.append(
-                f"⚠️ {row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | hit {row['hit_rate']:.0f}%"
+                f"{row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | hit {row['hit_rate']:.0f}%"
             )
     return alerts[:4]
 
@@ -114,6 +114,16 @@ def build_recent_form_panel(db_path: str = DB_PATH) -> dict[str, Any]:
     recent_50 = recent_rows[:50]
     by_sport = _group_recent_metrics(recent_50, "sport_label", top=6)
     by_market = _group_recent_metrics(recent_50, "mercado", top=6)
+    history_resets = obtener_resets_historial_deportes(db_path=db_path)
+    available_sports = sorted(
+        {
+            "Futbol",
+            "Baloncesto",
+            "Tenis",
+            *[str(row.get("sport_label") or "").strip() for row in evaluations if str(row.get("sport_label") or "").strip()],
+            *history_resets.keys(),
+        }
+    )
 
     return {
         "total_evaluations": len(recent_rows),
@@ -126,6 +136,8 @@ def build_recent_form_panel(db_path: str = DB_PATH) -> dict[str, Any]:
         "by_sport": by_sport,
         "by_market": by_market,
         "alerts": _build_alerts(by_sport, by_market),
+        "history_resets": history_resets,
+        "available_sports": available_sports,
     }
 
 
@@ -141,12 +153,18 @@ def format_recent_form_panel_telegram(panel: dict[str, Any]) -> str:
     )
 
     lines = [
-        "📈 PANEL RECIENTE DEL MODELO",
+        "PANEL RECIENTE DEL MODELO",
         f"Evaluaciones totales: {int(panel.get('total_evaluations') or 0)}",
         f"Racha actual: {streak_label}",
-        "",
-        "🪟 Ventanas",
     ]
+
+    history_resets = panel.get("history_resets") or {}
+    if history_resets:
+        lines.append("Resets activos:")
+        for sport, cutoff in history_resets.items():
+            lines.append(f"- {sport}: desde {cutoff}")
+
+    lines.extend(["", "Ventanas"])
 
     for window in panel.get("windows", []):
         lines.append(
@@ -158,7 +176,7 @@ def format_recent_form_panel_telegram(panel: dict[str, Any]) -> str:
     sport_rows = panel.get("by_sport", [])
     if sport_rows:
         lines.append("")
-        lines.append("🏟️ Por deporte")
+        lines.append("Por deporte")
         for row in sport_rows[:4]:
             lines.append(
                 f"{row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | "
@@ -168,7 +186,7 @@ def format_recent_form_panel_telegram(panel: dict[str, Any]) -> str:
     market_rows = panel.get("by_market", [])
     if market_rows:
         lines.append("")
-        lines.append("🎯 Por mercado")
+        lines.append("Por mercado")
         for row in market_rows[:4]:
             lines.append(
                 f"{row['name']}: {row['wins']}W-{row['losses']}L-{row['pushes']}N | "
@@ -178,7 +196,7 @@ def format_recent_form_panel_telegram(panel: dict[str, Any]) -> str:
     alerts = panel.get("alerts", [])
     if alerts:
         lines.append("")
-        lines.append("🚨 Alertas")
+        lines.append("Alertas")
         lines.extend(alerts[:3])
 
     return "\n".join(lines)
@@ -213,6 +231,20 @@ def render_recent_form_panel_html(panel: dict[str, Any], *, premium_css: Callabl
         ) or '<tr><td colspan="5" class="muted">Sin datos suficientes.</td></tr>'
 
     alert_html = "".join(f"<li>{escape(str(alert))}</li>" for alert in panel.get("alerts", [])) or "<li>Sin alertas activas.</li>"
+    history_resets = panel.get("history_resets") or {}
+    available_sports = [sport for sport in panel.get("available_sports", []) if str(sport or "").strip()]
+    reset_options = "".join(
+        f'<option value="{escape(str(sport))}">{escape(str(sport))}</option>'
+        for sport in available_sports
+    )
+    clear_options = "".join(
+        f'<option value="{escape(str(sport))}">{escape(str(sport))}</option>'
+        for sport in history_resets.keys()
+    )
+    history_reset_html = "".join(
+        f"<li><strong>{escape(str(sport))}</strong>: cuenta solo desde {escape(str(cutoff))}</li>"
+        for sport, cutoff in history_resets.items()
+    ) or "<li>Sin resets activos.</li>"
 
     return f"""
     <html>
@@ -275,6 +307,20 @@ def render_recent_form_panel_html(panel: dict[str, Any], *, premium_css: Callabl
                 </div>
             </section>
             <div class="stack">
+                <section class="card">
+                    <h3>Reiniciar historial por deporte</h3>
+                    <p>Esto no borra datos. Hace que el modelo ignore evaluaciones y picks antiguos de ese deporte para panel, calibracion y guards.</p>
+                    <form method="post" action="/tracking/panel/reset-sport-form" class="inline-form" style="margin-bottom: 12px;">
+                        <select name="sport_label">{reset_options}</select>
+                        <input name="cutoff_at" type="datetime-local">
+                        <button type="submit">Reiniciar desde esa fecha</button>
+                    </form>
+                    <form method="post" action="/tracking/panel/clear-sport-reset-form" class="inline-form" style="margin-bottom: 12px;">
+                        <select name="sport_label">{clear_options or '<option value="">Sin resets</option>'}</select>
+                        <button type="submit">Quitar reset</button>
+                    </form>
+                    <ul class="alert-list">{history_reset_html}</ul>
+                </section>
                 <section class="grid-3">
                     {window_cards}
                 </section>

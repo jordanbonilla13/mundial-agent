@@ -84,7 +84,7 @@ from betting_model import (
 )
 from elo import obtener_elos
 from tracking import _bool_pick_flag, _raw_pick, actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, actualizar_resultado, estadisticas, guardar_recomendaciones, listar_picks
-from tracking import archivar_picks_pendientes, eliminar_picks_archivadas, guardar_apuesta_real, guardar_setting, marcar_apuesta_real_pick, obtener_setting
+from tracking import archivar_picks_pendientes, eliminar_picks_archivadas, eliminar_reset_historial_deporte, guardar_apuesta_real, guardar_reset_historial_deporte, guardar_setting, marcar_apuesta_real_pick, obtener_setting
 from tracking import dashboard_data, guardar_snapshot_cuotas, aprendizaje, liquidar_picks_con_scores, listar_evaluaciones_picks, obtener_bankroll, penalizaciones_historicas
 from tracking import guardar_recomendaciones_unicas, inicializar_db, listar_publicaciones_telegram, registrar_publicacion_telegram
 from translations import (
@@ -3706,6 +3706,40 @@ def tracking_panel(format: str = "html"):
         return panel
     html = render_recent_form_panel_html(panel, premium_css=premium_ui_css)
     return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
+
+
+@app.post("/tracking/panel/reset-sport-form")
+async def tracking_panel_reset_sport_form(request: Request):
+    form = await form_urlencoded(request)
+    sport_label = str(form.get("sport_label") or "").strip()
+    cutoff_at = str(form.get("cutoff_at") or "").strip()
+
+    if not sport_label:
+        raise HTTPException(status_code=400, detail="Debes indicar un deporte.")
+
+    if cutoff_at:
+        cutoff_at = cutoff_at.replace(" ", "T")
+        if len(cutoff_at) == 16:
+            cutoff_at = f"{cutoff_at}:00+00:00"
+        elif len(cutoff_at) == 19 and "+" not in cutoff_at and "Z" not in cutoff_at:
+            cutoff_at = f"{cutoff_at}+00:00"
+    else:
+        cutoff_at = datetime.now(timezone.utc).isoformat()
+
+    guardar_reset_historial_deporte(sport_label, cutoff_at)
+    return RedirectResponse(url="/tracking/panel", status_code=303)
+
+
+@app.post("/tracking/panel/clear-sport-reset-form")
+async def tracking_panel_clear_sport_reset_form(request: Request):
+    form = await form_urlencoded(request)
+    sport_label = str(form.get("sport_label") or "").strip()
+
+    if not sport_label:
+        raise HTTPException(status_code=400, detail="Debes indicar un deporte.")
+
+    eliminar_reset_historial_deporte(sport_label)
+    return RedirectResponse(url="/tracking/panel", status_code=303)
 
 
 @app.get("/tracking/evaluaciones")

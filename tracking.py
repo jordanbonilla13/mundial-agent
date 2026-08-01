@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover
 
 DB_PATH = os.getenv("BETTING_DB_PATH", "betting_tracker.sqlite3")
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+SPORT_HISTORY_RESETS_SETTING = "sport_history_resets"
 IDENTITY_TABLES = {
     "picks",
     "odds_snapshots",
@@ -434,6 +435,114 @@ def guardar_setting(key: str, value: str, db_path: str = DB_PATH) -> None:
             (key, value, ahora),
         )
         conn.commit()
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def obtener_resets_historial_deportes(db_path: str = DB_PATH) -> dict[str, str]:
+    raw = obtener_setting(SPORT_HISTORY_RESETS_SETTING, "{}", db_path=db_path) or "{}"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(data, dict):
+        return {}
+
+    sanitized: dict[str, str] = {}
+    for sport_label, cutoff in data.items():
+        sport = str(sport_label or "").strip()
+        cutoff_text = str(cutoff or "").strip()
+        if not sport or not cutoff_text:
+            continue
+        if _parse_iso_datetime(cutoff_text) is None:
+            continue
+        sanitized[sport] = cutoff_text
+    return sanitized
+
+
+def guardar_reset_historial_deporte(
+    sport_label: str,
+    cutoff_iso: str | None = None,
+    db_path: str = DB_PATH,
+) -> dict[str, str]:
+    sport = str(sport_label or "").strip()
+    if not sport:
+        raise ValueError("sport_label es obligatorio")
+
+    cutoff_text = str(cutoff_iso or datetime.now(UTC).isoformat()).strip()
+    cutoff_dt = _parse_iso_datetime(cutoff_text)
+    if cutoff_dt is None:
+        raise ValueError("cutoff_iso invalido")
+
+    resets = obtener_resets_historial_deportes(db_path=db_path)
+    resets[sport] = cutoff_dt.isoformat()
+    guardar_setting(
+        SPORT_HISTORY_RESETS_SETTING,
+        json.dumps(resets, ensure_ascii=False),
+        db_path=db_path,
+    )
+    return resets
+
+
+def eliminar_reset_historial_deporte(
+    sport_label: str,
+    db_path: str = DB_PATH,
+) -> dict[str, str]:
+    sport = str(sport_label or "").strip()
+    resets = obtener_resets_historial_deportes(db_path=db_path)
+    if sport in resets:
+        del resets[sport]
+        guardar_setting(
+            SPORT_HISTORY_RESETS_SETTING,
+            json.dumps(resets, ensure_ascii=False),
+            db_path=db_path,
+        )
+    return resets
+
+
+def filtrar_registros_por_reset_deporte(
+    rows: list[dict[str, Any]],
+    *,
+    db_path: str = DB_PATH,
+    sport_getter: Any = None,
+    created_field: str = "created_at",
+) -> list[dict[str, Any]]:
+    resets = obtener_resets_historial_deportes(db_path=db_path)
+    if not resets:
+        return list(rows)
+
+    filtered: list[dict[str, Any]] = []
+    for row in rows:
+        if callable(sport_getter):
+            sport = str(sport_getter(row) or "").strip()
+        else:
+            sport = str(row.get("sport_label") or "").strip()
+
+        cutoff_text = resets.get(sport)
+        if not cutoff_text:
+            filtered.append(row)
+            continue
+
+        created_dt = _parse_iso_datetime(row.get(created_field))
+        cutoff_dt = _parse_iso_datetime(cutoff_text)
+        if created_dt is None or cutoff_dt is None or created_dt >= cutoff_dt:
+            filtered.append(row)
+
+    return filtered
 
 
 def obtener_bankroll(default: float = 25, db_path: str = DB_PATH) -> float:
@@ -1589,7 +1698,11 @@ def _metricas_grupo(picks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def listar_evaluaciones_picks(limit: int = 200, db_path: str = DB_PATH) -> list[dict[str, Any]]:
+def listar_evaluaciones_picks(
+    limit: int = 200,
+    db_path: str = DB_PATH,
+    apply_history_resets: bool = True,
+) -> list[dict[str, Any]]:
     inicializar_db(db_path)
     limit = max(1, min(limit, 1000))
 
@@ -1599,7 +1712,10 @@ def listar_evaluaciones_picks(limit: int = 200, db_path: str = DB_PATH) -> list[
             (limit,),
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    evaluaciones = [dict(row) for row in rows]
+    if apply_history_resets:
+        evaluaciones = filtrar_registros_por_reset_deporte(evaluaciones, db_path=db_path)
+    return evaluaciones
 
 
 def resumen_calibracion_modelo(db_path: str = DB_PATH) -> dict[str, Any]:
@@ -1653,7 +1769,11 @@ def dashboard_data(db_path: str = DB_PATH) -> dict[str, Any]:
     with conectar(db_path) as conn:
         rows = conn.execute("SELECT * FROM picks ORDER BY id DESC").fetchall()
 
-    picks = [dict(row) for row in rows]
+    picks = filtrar_registros_por_reset_deporte(
+        [dict(row) for row in rows],
+        db_path=db_path,
+        sport_getter=lambda pick: _raw_pick(pick).get("sport_label") or pick.get("sport_label"),
+    )
     stakazos = [
         pick for pick in picks
         if str((_raw_pick(pick).get("elite_tier") or pick.get("elite_tier") or "")).lower() == "stakazo"
@@ -1856,7 +1976,11 @@ def penalizaciones_historicas(db_path: str = DB_PATH) -> dict[str, dict[str, Any
     # Construir penalizaciones por combinacion liga + mercado usando picks cerrados
     with conectar(db_path) as conn:
         rows = conn.execute("SELECT * FROM picks ORDER BY id DESC").fetchall()
-    picks = [dict(row) for row in rows]
+    picks = filtrar_registros_por_reset_deporte(
+        [dict(row) for row in rows],
+        db_path=db_path,
+        sport_getter=lambda pick: _raw_pick(pick).get("sport_label") or pick.get("sport_label"),
+    )
     grouped_combo: dict[str, list[dict[str, Any]]] = {}
     for pick in picks:
         league = str((_raw_pick(pick).get("league_label") or pick.get("league_label") or "sin_liga"))
