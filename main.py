@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from html import escape
 from typing import Any
 from urllib.parse import parse_qs, urlencode
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -98,6 +99,8 @@ from translations import (
     tipo_resultado_es,
 )
 
+LAB_INPUT_TIMEZONE = ZoneInfo("Europe/Madrid")
+
 
 load_dotenv()
 RUNTIME_SETTINGS = load_runtime_settings()
@@ -141,7 +144,7 @@ API_FOOTBALL_MAX_PAGES = int(os.getenv("API_FOOTBALL_MAX_PAGES", "1"))
 DEFAULT_SPORT = sports_layer.DEFAULT_SPORT
 PERFILES_STAKE = {"conservador", "moderado", "agresivo", "alto_riesgo"}
 MODOS_INFORME = {"comparador", "pinnacle"}
-FEATURED_MARKETS = {"h2h", "totals"}
+FEATURED_MARKETS = {"h2h", "spreads", "totals"}
 ADDITIONAL_MARKETS = {
     "alternate_totals",
     "alternate_totals_cards",
@@ -161,6 +164,7 @@ MERCADOS_DISPONIBLES = FEATURED_MARKETS | ADDITIONAL_MARKETS
 FILTROS_MERCADO = {
     "todo": [
         "h2h",
+        "spreads",
         "btts",
         "double_chance",
         "totals",
@@ -174,6 +178,7 @@ FILTROS_MERCADO = {
     "ambos_anotan": ["btts"],
     "se_clasificara": [],
     "doble_oportunidad": ["double_chance"],
+    "handicap": ["spreads"],
     "total_goles": ["totals", "alternate_totals"],
     "goles_intervalo": ["totals_h1", "totals_h2"],
     "corners": ["alternate_totals_corners", "alternate_team_totals_corners", "corners_1x2"],
@@ -242,7 +247,7 @@ SPORT_CATALOG = {
         "league_key": "nba",
         "league_label": "NBA",
         "supports_elo": False,
-        "default_markets": "h2h,totals",
+        "default_markets": "h2h,spreads,totals",
     },
 }
 SPORT_MARKET_CONFIG = {
@@ -286,10 +291,12 @@ SPORT_MARKET_CONFIG = {
         ],
     },
     "baloncesto": {
-        "default_filter": "total_goles",
+        "default_filter": "todo",
         "allowed_filters": [
+            "todo",
             "resultado",
             "h2h",
+            "handicap",
             "total_goles",
         ],
     },
@@ -300,6 +307,7 @@ SPORT_FILTER_LABELS = {
     "h2h": "Ganador",
     "ambos_anotan": "Ambos equipos anotaran",
     "doble_oportunidad": "Doble oportunidad",
+    "handicap": "Handicap",
     "total_goles": "Totales",
     "goles_intervalo": "Intervalos / parciales",
     "corners": "Corners",
@@ -2277,10 +2285,38 @@ def merge_event_markets(evento_base: dict, evento_extra: dict) -> dict:
     return evento_base
 
 
+def normalizar_snapshot_lab(value: str | None) -> tuple[str | None, str | None]:
+    text = str(value or "").strip()
+    if not text:
+        return None, None
+
+    try:
+        normalized = f"{text[:-1]}+00:00" if text.endswith("Z") else text
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Fecha historica no valida para el lab.") from exc
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=LAB_INPUT_TIMEZONE)
+
+    parsed_utc = parsed.astimezone(timezone.utc).replace(microsecond=0)
+    display_local = parsed.astimezone(LAB_INPUT_TIMEZONE).strftime("%Y-%m-%dT%H:%M")
+    return parsed_utc.isoformat().replace("+00:00", "Z"), display_local
+
+
 @app.get("/cuotas")
-def cuotas(mercados: str = "h2h,totals", deporte: str | None = None):
+def cuotas(mercados: str = "h2h,totals", deporte: str | None = None, historical_date: str | None = None):
     mercados_lista = [m.strip() for m in mercados.split(",") if m.strip()]
     contexto = resolver_contexto_deporte(deporte)
+
+    if historical_date:
+        if ODDS_PROVIDER in {"sportsgameodds", "sports_game_odds", "sgo", "api_football", "api-football", "apifootball"}:
+            raise HTTPException(
+                status_code=400,
+                detail="El modo historico del lab solo esta disponible con The Odds API como proveedor principal.",
+            )
+        mercados_historicos = [m for m in mercados_lista if m in FEATURED_MARKETS] or ["h2h"]
+        return provider_layer.fetch_the_odds_historical_odds(mercados_historicos, contexto, historical_date)
 
     if ODDS_PROVIDER in {"sportsgameodds", "sports_game_odds", "sgo"}:
         return sports_layer.enriquecer_eventos_contexto(
@@ -2359,6 +2395,14 @@ def deportes_disponibles(provider: str | None = None):
 def resolver_mercados(filtro: str, deporte: str | None = None) -> tuple[list[str], str | None]:
     config = config_mercados_deporte(deporte)
     filtro_normalizado = filtro if filtro in config["allowed_filters"] else config["default_filter"]
+    contexto = resolver_contexto_deporte(deporte)
+    sport_key = str(contexto.get("sport_key") or "").lower()
+
+    if filtro_normalizado == "todo":
+        if sport_key.startswith("basketball_"):
+            return ["h2h", "spreads", "totals", "alternate_totals"], None
+        if sport_key.startswith("tennis_"):
+            return ["h2h"], None
 
     if filtro_normalizado in FILTROS_MERCADO:
         mercados = FILTROS_MERCADO[filtro_normalizado]
@@ -2460,6 +2504,8 @@ def titulo_card_apuesta(apuesta: dict) -> str:
     if sport_key.startswith("basketball_"):
         if mercado == "h2h":
             return f"Apostar a que {equipo} gana el partido"
+        if mercado == "spreads":
+            return f"Apostar al handicap: {equipo}"
         if mercado in {"totals", "alternate_totals"}:
             return f"Apostar al total de puntos: {equipo}"
 
@@ -2476,6 +2522,9 @@ def titulo_card_apuesta(apuesta: dict) -> str:
 
     if mercado == "double_chance":
         return f"Apostar doble oportunidad: {equipo}"
+
+    if mercado == "spreads":
+        return f"Apostar al handicap: {equipo}"
 
     if mercado and mercado != "h2h":
         return f"Apostar: {equipo}"
@@ -2498,6 +2547,15 @@ def que_tiene_que_pasar(apuesta: dict) -> str:
     if sport_key.startswith("basketball_"):
         if mercado == "h2h":
             return f"{equipo} debe ganar el partido segun el mercado moneyline de la casa."
+        if mercado == "spreads":
+            point_text = f"{abs(float(point)):.1f}" if point is not None else None
+            if point is None:
+                return f"{equipo} debe cubrir el handicap publicado por la casa."
+            if float(point) < 0:
+                return f"{equipo} debe ganar por mas de {point_text} puntos para cubrir el handicap."
+            if float(point) > 0:
+                return f"{equipo} puede ganar o perder por menos de {point_text} puntos para cubrir el handicap."
+            return f"{equipo} debe cubrir el handicap 0, equivalente a ganar el partido."
         if mercado in {"totals", "alternate_totals"}:
             if equipo_raw == "Over":
                 return f"El partido debe superar la linea total de puntos de {point:g}." if point is not None else "El partido debe superar la linea total de puntos."
@@ -2547,6 +2605,16 @@ def que_tiene_que_pasar(apuesta: dict) -> str:
 
     if mercado == "double_chance":
         return f"La apuesta gana si se cumple cualquiera de estas opciones: {equipo}."
+
+    if mercado == "spreads":
+        point_text = f"{abs(float(point)):.1f}" if point is not None else None
+        if point is None:
+            return f"{equipo} debe cubrir el handicap fijado por la casa."
+        if float(point) < 0:
+            return f"{equipo} debe ganar por mas de {point_text} unidades para cubrir el handicap."
+        if float(point) > 0:
+            return f"{equipo} puede ganar o perder por menos de {point_text} unidades para cubrir el handicap."
+        return f"{equipo} debe cubrir el handicap 0."
 
     if mercado == "corners_1x2":
         return f"{equipo} debe sacar mas corners que el rival."
@@ -2788,6 +2856,8 @@ def apuestas_hoy(
     deporte: str = DEFAULT_SPORT,
     solo_elite: bool = False,
     solo_stakazos: bool = False,
+    historical_mode: bool = False,
+    historical_date: str | None = None,
 ):
     deps = ForecastDependencies(
         provider_name=ODDS_PROVIDER,
@@ -2851,6 +2921,8 @@ def apuestas_hoy(
             deporte=nested_request.deporte,
             solo_elite=nested_request.solo_elite,
             solo_stakazos=nested_request.solo_stakazos,
+            historical_mode=nested_request.historical_mode,
+            historical_date=nested_request.historical_date,
         ),
     )
     return run_forecast_request(
@@ -2864,6 +2936,8 @@ def apuestas_hoy(
             deporte=deporte,
             solo_elite=solo_elite,
             solo_stakazos=solo_stakazos,
+            historical_mode=historical_mode,
+            historical_date=historical_date,
         ),
         deps,
     )
@@ -3337,9 +3411,24 @@ def lab_run(
     partido: str = "todos",
     deporte: str = "todo",
     solo_stakazos: bool = False,
+    simulation_mode: str = "live",
+    snapshot_at: str | None = None,
     format: str = "html",
     execute: bool = False,
 ):
+    simulation_mode = str(simulation_mode or "live").strip().lower()
+    historical_mode = simulation_mode == "historical"
+    snapshot_at_utc = None
+    snapshot_at_display = ""
+    notice_code = ""
+
+    if snapshot_at:
+        snapshot_at_utc, snapshot_at_display = normalizar_snapshot_lab(snapshot_at)
+
+    if execute and historical_mode and not snapshot_at_utc:
+        execute = False
+        notice_code = "snapshot_required"
+
     if execute:
         lab_data = build_lab_run(
             runtime_settings=RUNTIME_SETTINGS,
@@ -3358,6 +3447,8 @@ def lab_run(
                 deporte=request.deporte,
                 solo_elite=request.solo_elite,
                 solo_stakazos=request.solo_stakazos,
+                historical_mode=request.historical_mode,
+                historical_date=request.historical_date,
             ),
             build_prediction_payload=build_prediction_payload,
             ai_available=openai_available,
@@ -3366,6 +3457,7 @@ def lab_run(
             build_ai_summary=generate_publication_ai_summary,
             format_pick_message=formatear_mensaje_telegram_pick,
             format_summary_message=format_summary_message,
+            fetch_scores=scores,
             perfil=perfil,
             modo=modo,
             mercados=mercados,
@@ -3373,6 +3465,8 @@ def lab_run(
             deporte=deporte,
             bankroll=bankroll,
             solo_stakazos=solo_stakazos,
+            simulation_mode=simulation_mode,
+            historical_snapshot_at=snapshot_at_utc,
             perfiles_stake=PERFILES_STAKE,
             modos_informe=MODOS_INFORME,
             perfil_label=perfil_es,
@@ -3394,7 +3488,10 @@ def lab_run(
             "partido": partido,
             "deporte": deporte,
             "solo_stakazos": "true" if solo_stakazos else "false",
+            "simulation_mode": simulation_mode,
+            "snapshot_at": snapshot_at_display,
             "execute": "true" if execute else "",
+            "lab_notice": notice_code,
         },
         premium_css=premium_ui_css,
         profile_options=[

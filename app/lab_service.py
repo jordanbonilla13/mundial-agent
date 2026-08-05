@@ -1,6 +1,6 @@
 import base64
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from html import escape
 from typing import Any, Callable
 from urllib.parse import urlencode
@@ -13,22 +13,280 @@ from app.runtime_settings import RuntimeSettings
 DISPLAY_TIMEZONE = ZoneInfo("Europe/Madrid")
 
 
-def _event_time_label(value: Any) -> str:
+def _parse_event_datetime(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text:
-        return "-"
+        return None
 
     try:
         normalized = f"{text[:-1]}+00:00" if text.endswith("Z") else text
         dt = datetime.fromisoformat(normalized)
     except ValueError:
+        return None
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+
+    return dt
+
+
+def _event_time_label(value: Any) -> str:
+    dt = _parse_event_datetime(value)
+    if dt is None:
+        text = str(value or "").strip()
+        if not text:
+            return "-"
         time_part = text.split("T")[-1].replace("Z", "")
         return time_part[:5] if len(time_part) >= 5 else text
 
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-
     return dt.astimezone(DISPLAY_TIMEZONE).strftime("%H:%M")
+
+
+def _score_map(evento: dict[str, Any]) -> dict[str, int]:
+    scores: dict[str, int] = {}
+
+    for item in evento.get("scores") or []:
+        name = item.get("name")
+        score = item.get("score")
+        if name is None or score is None:
+            continue
+        try:
+            scores[str(name)] = int(score)
+        except (TypeError, ValueError):
+            continue
+
+    return scores
+
+
+def _result_side(home_score: int, away_score: int) -> str:
+    if home_score > away_score:
+        return "home"
+    if away_score > home_score:
+        return "away"
+    return "draw"
+
+
+def _selected_side(pick: dict[str, Any], home_team: str, away_team: str) -> str | None:
+    tipo = str(pick.get("tipo_resultado_raw") or pick.get("tipo_resultado") or "").strip().lower()
+    if tipo in {"home", "away", "draw"}:
+        return tipo
+
+    equipo_raw = str(pick.get("equipo_raw") or pick.get("equipo") or "").strip().lower()
+    if equipo_raw == str(home_team or "").strip().lower():
+        return "home"
+    if equipo_raw == str(away_team or "").strip().lower():
+        return "away"
+    if equipo_raw == "draw":
+        return "draw"
+    return None
+
+
+def _resolve_pick_result_with_score(pick: dict[str, Any], evento: dict[str, Any]) -> str | None:
+    scores = _score_map(evento)
+    home_team = str(evento.get("home_team") or "")
+    away_team = str(evento.get("away_team") or "")
+
+    if not home_team or not away_team or home_team not in scores or away_team not in scores:
+        return None
+
+    home_score = scores[home_team]
+    away_score = scores[away_team]
+    market = str(pick.get("mercado") or "").strip().lower()
+    selection = str(pick.get("equipo_raw") or pick.get("equipo") or "").strip()
+    description = str(pick.get("outcome_description") or "").strip()
+    point = pick.get("outcome_point")
+
+    try:
+        point_value = float(point) if point is not None else None
+    except (TypeError, ValueError):
+        point_value = None
+
+    if market == "h2h":
+        selected = _selected_side(pick, home_team, away_team)
+        if selected is None:
+            return None
+        return "win" if selected == _result_side(home_score, away_score) else "loss"
+
+    if market == "spreads":
+        if point_value is None:
+            return None
+        selected = _selected_side(pick, home_team, away_team)
+        if selected == "home":
+            adjusted_selected = home_score + point_value
+            adjusted_other = away_score
+        elif selected == "away":
+            adjusted_selected = away_score + point_value
+            adjusted_other = home_score
+        else:
+            return None
+
+        if adjusted_selected == adjusted_other:
+            return "push"
+        return "win" if adjusted_selected > adjusted_other else "loss"
+
+    if market in {"totals", "alternate_totals"}:
+        if point_value is None:
+            return None
+        total = home_score + away_score
+        if total == point_value:
+            return "push"
+        if selection.lower() == "over":
+            return "win" if total > point_value else "loss"
+        if selection.lower() == "under":
+            return "win" if total < point_value else "loss"
+        return None
+
+    if market == "team_totals":
+        if point_value is None or not description:
+            return None
+        team_score = scores.get(description)
+        if team_score is None:
+            return None
+        if team_score == point_value:
+            return "push"
+        if selection.lower() == "over":
+            return "win" if team_score > point_value else "loss"
+        if selection.lower() == "under":
+            return "win" if team_score < point_value else "loss"
+        return None
+
+    if market == "btts":
+        both_score = home_score > 0 and away_score > 0
+        if selection.lower() == "yes":
+            return "win" if both_score else "loss"
+        if selection.lower() == "no":
+            return "win" if not both_score else "loss"
+        return None
+
+    if market == "double_chance":
+        options = [part.strip().lower() for part in selection.split(" or ") if part.strip()]
+        result_name = {
+            "home": home_team.lower(),
+            "away": away_team.lower(),
+            "draw": "draw",
+        }[_result_side(home_score, away_score)]
+        return "win" if result_name in options else "loss"
+
+    return None
+
+
+def _simulated_profit_loss(pick: dict[str, Any], result: str) -> float:
+    amount = float(pick.get("importe_sugerido") or 0)
+    odds = float(pick.get("cuota") or pick.get("cuota_apuesta") or 0)
+    if result == "win":
+        return round(amount * (odds - 1), 2)
+    if result == "loss":
+        return round(-amount, 2)
+    return 0.0
+
+
+def _simulate_historical_lab(
+    *,
+    picks: list[dict[str, Any]],
+    fetch_scores: Callable[[int, str | None], list[dict[str, Any]]] | None,
+) -> dict[str, Any]:
+    if not picks or fetch_scores is None:
+        return {
+            "enabled": False,
+            "evaluated": 0,
+            "closed": 0,
+            "pending": 0,
+            "won": 0,
+            "lost": 0,
+            "push": 0,
+            "staked": 0.0,
+            "profit": 0.0,
+            "roi": 0.0,
+            "hit_rate": 0.0,
+            "coverage_note": None,
+        }
+
+    events_by_id: dict[str, dict[str, Any]] = {}
+    sport_keys = {
+        str(pick.get("sport_key") or "").strip()
+        for pick in picks
+        if str(pick.get("sport_key") or "").strip()
+    }
+    for sport_key in sport_keys:
+        try:
+            sport_scores = fetch_scores(3, sport_key)
+        except Exception:
+            continue
+        for event in sport_scores or []:
+            event_id = str(event.get("id") or "").strip()
+            if event_id:
+                events_by_id[event_id] = event
+
+    now = datetime.now(UTC)
+    won = lost = push = closed = 0
+    staked = profit = 0.0
+    coverage_missing = 0
+
+    for pick in picks:
+        pick["historical_result"] = None
+        pick["historical_result_icon"] = "⏳"
+        pick["historical_result_label"] = "Pendiente"
+        pick["historical_profit_loss"] = None
+        pick["historical_status_detail"] = "Sin marcador final todavia."
+
+        event_dt = _parse_event_datetime(pick.get("commence_time"))
+        if event_dt is not None and event_dt > now:
+            pick["historical_status_detail"] = "El partido aun no ha empezado en el momento actual."
+            continue
+
+        event = events_by_id.get(str(pick.get("event_id") or "").strip())
+        if not event:
+            coverage_missing += 1
+            pick["historical_status_detail"] = "No he encontrado marcador final en la ventana reciente del proveedor."
+            continue
+
+        if event.get("completed") is not True:
+            pick["historical_status_detail"] = "El evento sigue abierto o sin cierre oficial."
+            continue
+
+        result = _resolve_pick_result_with_score(pick, event)
+        if result is None:
+            pick["historical_status_detail"] = "Mercado no liquidable automaticamente con el marcador recibido."
+            continue
+
+        pick["historical_result"] = result
+        pick["historical_result_icon"] = "✅" if result == "win" else "❌" if result == "loss" else "➖"
+        pick["historical_result_label"] = "Ganada" if result == "win" else "Perdida" if result == "loss" else "Nula"
+        pick["historical_profit_loss"] = _simulated_profit_loss(pick, result)
+        pick["historical_status_detail"] = "Resultado simulado con marcador final del proveedor."
+        closed += 1
+        staked += float(pick.get("importe_sugerido") or 0)
+        profit += float(pick["historical_profit_loss"] or 0)
+        if result == "win":
+            won += 1
+        elif result == "loss":
+            lost += 1
+        else:
+            push += 1
+
+    evaluated = len(picks)
+    pending = evaluated - closed
+    coverage_note = None
+    if coverage_missing:
+        coverage_note = (
+            f"{coverage_missing} pick(s) siguen sin marcador recuperable en esta simulacion. "
+            "The Odds API scores solo cubre ventana reciente."
+        )
+
+    return {
+        "enabled": True,
+        "evaluated": evaluated,
+        "closed": closed,
+        "pending": pending,
+        "won": won,
+        "lost": lost,
+        "push": push,
+        "staked": round(staked, 2),
+        "profit": round(profit, 2),
+        "roi": round((profit / staked) * 100, 2) if staked else 0.0,
+        "hit_rate": round((won / closed) * 100, 2) if closed else 0.0,
+        "coverage_note": coverage_note,
+    }
 
 
 def _build_match_overview(
@@ -141,12 +399,20 @@ def _build_match_overview(
 def _lab_pick_snapshot(pick: dict[str, Any]) -> dict[str, Any]:
     return {
         "event_id": pick.get("event_id"),
+        "sport_key": pick.get("sport_key"),
         "sport_label": pick.get("sport_label"),
         "league_label": pick.get("league_label"),
+        "commence_time": pick.get("commence_time"),
         "partido": pick.get("partido") or pick.get("partido_es"),
         "equipo": pick.get("equipo") or pick.get("equipo_es"),
+        "equipo_raw": pick.get("equipo_raw") or pick.get("equipo"),
         "mercado": pick.get("mercado"),
+        "tipo_resultado": pick.get("tipo_resultado"),
+        "tipo_resultado_raw": pick.get("tipo_resultado_raw") or pick.get("tipo_resultado"),
+        "outcome_point": pick.get("outcome_point"),
+        "outcome_description": pick.get("outcome_description"),
         "casa": pick.get("casa"),
+        "cuota": pick.get("cuota"),
         "stake": pick.get("stake"),
         "importe_sugerido": pick.get("importe_sugerido"),
         "recomendacion": pick.get("recomendacion"),
@@ -179,6 +445,7 @@ def build_lab_run(
     build_ai_summary: Callable[..., str | None],
     format_pick_message: Callable[[dict[str, Any]], str],
     format_summary_message: Callable[..., str],
+    fetch_scores: Callable[[int, str | None], list[dict[str, Any]]] | None,
     perfil: str,
     modo: str,
     mercados: str,
@@ -190,7 +457,10 @@ def build_lab_run(
     modos_informe: set[str],
     perfil_label: Callable[[str | None], str],
     modo_label: Callable[[str | None], str],
+    simulation_mode: str = "live",
+    historical_snapshot_at: str | None = None,
 ) -> dict[str, Any]:
+    historical_mode = str(simulation_mode or "live").strip().lower() == "historical"
     forecast = run_forecast(
         ForecastRequest(
             bankroll=bankroll,
@@ -202,6 +472,8 @@ def build_lab_run(
             deporte=deporte,
             solo_elite=False,
             solo_stakazos=solo_stakazos,
+            historical_mode=historical_mode,
+            historical_date=historical_snapshot_at,
         )
     )
     prediction_payload = build_prediction_payload(
@@ -237,11 +509,17 @@ def build_lab_run(
         _lab_pick_snapshot(pick)
         for pick in prediction_payload.get("pronosticos", [])
     ]
+    guard_reasons = list(guard.get("reasons") or [])
+    would_publish_live = bool(guard.get("allow_live_publication", False)) and not runtime_settings.shadow_mode
+    if historical_mode:
+        would_publish_live = False
+        guard_reasons.insert(0, "Simulacion historica: el lab solo compara y no publica picks del pasado.")
+
     publication_decision = {
-        "would_publish_live": bool(guard.get("allow_live_publication", False)) and not runtime_settings.shadow_mode,
+        "would_publish_live": would_publish_live,
         "runtime_mode": runtime_settings.publication_mode,
         "guard_mode": guard.get("mode"),
-        "guard_reasons": list(guard.get("reasons") or []),
+        "guard_reasons": guard_reasons,
     }
     match_overview = _build_match_overview(
         available_matches=list(forecast.get("partidos_disponibles", [])),
@@ -249,11 +527,24 @@ def build_lab_run(
         discarded=forecast_discarded,
         publishable=publishable_preview,
     )
+    historical_evaluation = _simulate_historical_lab(
+        picks=publishable_preview,
+        fetch_scores=fetch_scores if historical_mode else None,
+    )
     return {
         "runtime_mode": runtime_settings.publication_mode,
         "publication_guard": guard,
         "publication_decision": publication_decision,
         "match_overview": match_overview,
+        "simulation_context": {
+            "mode": "historical" if historical_mode else "live",
+            "historical_mode": historical_mode,
+            "snapshot_at": forecast.get("historical_snapshot_at") or historical_snapshot_at,
+            "market_notice": forecast.get("historical_market_notice"),
+            "provider_name": forecast.get("proveedor_cuotas"),
+            "snapshots_guardados": int(forecast.get("snapshots_guardados", 0) or 0),
+        },
+        "historical_evaluation": historical_evaluation,
         "forecast_summary": {
             "sport_label": forecast.get("sport_label"),
             "league_label": forecast.get("league_label"),
@@ -289,6 +580,14 @@ def build_empty_lab_run(*, runtime_settings: RuntimeSettings) -> dict[str, Any]:
             "guard_reasons": ["Pulsa 'Ejecutar lab' para lanzar la simulacion."],
         },
         "match_overview": [],
+        "simulation_context": {
+            "mode": "live",
+            "historical_mode": False,
+            "snapshot_at": None,
+            "market_notice": None,
+            "provider_name": None,
+            "snapshots_guardados": 0,
+        },
         "forecast_summary": {
             "sport_label": "Todo",
             "league_label": "Todas las ligas",
@@ -298,6 +597,20 @@ def build_empty_lab_run(*, runtime_settings: RuntimeSettings) -> dict[str, Any]:
             "total_publicables_preview": 0,
             "total_bloqueadas_en_recomendadas": 0,
             "total_bloqueadas_en_descartadas": 0,
+        },
+        "historical_evaluation": {
+            "enabled": False,
+            "evaluated": 0,
+            "closed": 0,
+            "pending": 0,
+            "won": 0,
+            "lost": 0,
+            "push": 0,
+            "staked": 0.0,
+            "profit": 0.0,
+            "roi": 0.0,
+            "hit_rate": 0.0,
+            "coverage_note": None,
         },
         "publishable_preview": [],
         "blocked_picks": {
@@ -325,6 +638,7 @@ def _market_label(value: Any) -> str:
     market = str(value or "").strip().lower()
     return {
         "h2h": "Ganador",
+        "spreads": "Handicap",
         "totals": "Totales",
         "alternate_totals": "Totales alternativos",
         "btts": "Ambos anotan",
@@ -352,6 +666,17 @@ def _pick_card_html(pick: dict[str, Any], *, blocked: bool) -> str:
     badge_kind = "danger" if blocked else "ok"
     badge_text = "Bloqueada" if blocked else "Publicable"
     card_class = "bet-red" if blocked else "bet-green"
+    historical_html = ""
+    if pick.get("historical_result_label"):
+        result_label = escape(str(pick.get("historical_result_label") or "Pendiente"))
+        result_icon = escape(str(pick.get("historical_result_icon") or "⏳"))
+        detail = escape(str(pick.get("historical_status_detail") or ""))
+        profit_loss = pick.get("historical_profit_loss")
+        profit_text = f" | P/L simulado: EUR {float(profit_loss):+.2f}" if isinstance(profit_loss, (int, float)) else ""
+        historical_html = (
+            f'<p><strong>{result_icon} {result_label}</strong><span class="muted">{profit_text}</span></p>'
+            f'<p class="muted">{detail}</p>'
+        )
     return f"""
         <article class="card bet-card {card_class}">
             <div class="badge {_badge_class(badge_kind)}">{badge_text}</div>
@@ -366,6 +691,7 @@ def _pick_card_html(pick: dict[str, Any], *, blocked: bool) -> str:
             </div>
             <p><strong>{recommendation}</strong></p>
             <p class="muted">{reason}</p>
+            {historical_html}
         </article>
     """
 
@@ -393,13 +719,20 @@ def render_lab_run_html(
 ) -> str:
     forecast_summary = lab.get("forecast_summary") or {}
     publication_decision = lab.get("publication_decision") or {}
+    simulation_context = lab.get("simulation_context") or {}
     publishable_preview = lab.get("publishable_preview") or []
     blocked_picks = lab.get("blocked_picks") or {}
+    historical_evaluation = lab.get("historical_evaluation") or {}
     blocked_recommended = blocked_picks.get("recommended") or []
     blocked_discarded = blocked_picks.get("discarded") or []
     match_overview = lab.get("match_overview") or []
     reasons = publication_decision.get("guard_reasons") or []
     runtime_mode = escape(str(lab.get("runtime_mode") or "shadow"))
+    historical_mode = bool(simulation_context.get("historical_mode"))
+    snapshot_at = escape(str(simulation_context.get("snapshot_at") or ""))
+    market_notice = escape(str(simulation_context.get("market_notice") or ""))
+    provider_name = escape(str(simulation_context.get("provider_name") or "the_odds_api"))
+    snapshots_guardados = int(simulation_context.get("snapshots_guardados", 0) or 0)
     sport_label = escape(str(forecast_summary.get("sport_label") or "Todo"))
     league_label = escape(str(forecast_summary.get("league_label") or "Todas las ligas"))
     would_publish_live = bool(publication_decision.get("would_publish_live"))
@@ -435,8 +768,53 @@ def render_lab_run_html(
     except Exception:
         publish_payload_b64 = ""
     blocked_total = len(visible_blocked)
+    historical_summary_html = ""
+    if historical_mode and historical_evaluation.get("enabled"):
+        coverage_note = historical_evaluation.get("coverage_note")
+        coverage_html = f'<p class="muted">{escape(str(coverage_note))}</p>' if coverage_note else ""
+        historical_summary_html = f"""
+            <section class="panel" style="padding: 18px; margin-top: 18px;">
+                <div class="eyebrow" style="color: var(--brand); margin-bottom: 12px;">Backtest del snapshot</div>
+                <p class="lede">Esto no toca tu cartera real ni Telegram: solo mide como habria salido la cartera publicable del lab con marcadores finales disponibles.</p>
+                <section class="grid-2">
+                    <div class="metric">
+                        <span>Evaluadas</span>
+                        <strong>{int(historical_evaluation.get("evaluated", 0) or 0)}</strong>
+                        <small>Picks simuladas</small>
+                    </div>
+                    <div class="metric">
+                        <span>Cerradas</span>
+                        <strong>{int(historical_evaluation.get("closed", 0) or 0)}</strong>
+                        <small>Con marcador final</small>
+                    </div>
+                    <div class="metric">
+                        <span>W-L-N</span>
+                        <strong>{int(historical_evaluation.get("won", 0) or 0)}-{int(historical_evaluation.get("lost", 0) or 0)}-{int(historical_evaluation.get("push", 0) or 0)}</strong>
+                        <small>Ganadas, perdidas y nulas</small>
+                    </div>
+                    <div class="metric">
+                        <span>Pendientes</span>
+                        <strong>{int(historical_evaluation.get("pending", 0) or 0)}</strong>
+                        <small>Sin cierre recuperado</small>
+                    </div>
+                    <div class="metric">
+                        <span>Beneficio</span>
+                        <strong>EUR {float(historical_evaluation.get("profit", 0) or 0):+.2f}</strong>
+                        <small>Resultado simulado</small>
+                    </div>
+                    <div class="metric">
+                        <span>ROI / Hit</span>
+                        <strong>{float(historical_evaluation.get("roi", 0) or 0):+.2f}% | {float(historical_evaluation.get("hit_rate", 0) or 0):.2f}%</strong>
+                        <small>Sobre picks cerradas</small>
+                    </div>
+                </section>
+                {coverage_html}
+            </section>
+        """
     bankroll_value = "" if query_params.get("bankroll") in (None, "") else escape(str(query_params.get("bankroll")), quote=True)
     solo_stakazos_checked = "checked" if str(query_params.get("solo_stakazos") or "false").lower() == "true" else ""
+    simulation_mode_value = str(query_params.get("simulation_mode") or "live")
+    snapshot_input_value = escape(str(query_params.get("snapshot_at") or ""), quote=True)
     profile_tags = _option_tags(profile_options, str(query_params.get("perfil") or "moderado"))
     mode_tags = _option_tags(mode_options, str(query_params.get("modo") or "comparador"))
     sport_tags = _option_tags(sport_options, str(query_params.get("deporte") or "todo"))
@@ -473,6 +851,13 @@ def render_lab_run_html(
             f'Job {job_id} | picks preparadas: {registered_picks}. Refresca en unos segundos si quieres seguir revisando el lab.</p>'
             f'</section>'
         )
+    elif notice_code == "snapshot_required":
+        notice_html = (
+            '<section class="card" style="margin-top: 18px; border-color: rgba(164,118,36,0.24);">'
+            '<div class="badge badge-yellow">Fecha requerida</div>'
+            '<p class="muted">Para ejecutar el modo historico del lab tienes que indicar una fecha y hora de snapshot.</p>'
+            '</section>'
+        )
     elif not has_run:
         notice_html = (
             '<section class="card" style="margin-top: 18px; border-color: rgba(46,108,171,0.24);">'
@@ -486,7 +871,7 @@ def render_lab_run_html(
         if key not in {"format", "lab_notice", "publication_id", "registered_picks", "sent_messages", "job_id", "execute"} and value not in (None, "")
     )
     publish_action_html = ""
-    if publishable_preview:
+    if publishable_preview and not historical_mode:
         publish_action_html = (
             '<form method="post" action="/lab/run/publicar" class="cta-row">'
             f"{publish_form_inputs}"
@@ -494,6 +879,13 @@ def render_lab_run_html(
             '<button type="submit">Publicar en Telegram y registrar cartera</button>'
             '<span class="muted">Envia estas picks al canal y las deja guardadas para que /resumen las audite despues.</span>'
             "</form>"
+        )
+    elif publishable_preview and historical_mode:
+        publish_action_html = (
+            '<div class="card" style="border-color: rgba(164,118,36,0.24);">'
+            '<div class="badge badge-yellow">Solo simulacion</div>'
+            '<p class="muted">Estas picks vienen de un snapshot historico, asi que el lab no permite publicarlas ni registrarlas en cartera real.</p>'
+            '</div>'
         )
     match_rows = "".join(
         f'<tr><td>{escape(str(row.get("time_label") or "-"))}</td><td>{escape(str(row.get("partido") or row.get("event_id") or "Partido"))}</td><td>{escape(str(row.get("league_label") or "General"))}</td><td><span class="badge {_badge_class(str(row.get("status_kind") or "warn"))}">{escape(str(row.get("status") or "Sin picks"))}</span></td><td>{int(row.get("publishable") or 0)} / {int(row.get("blocked") or 0)}</td></tr>'
@@ -670,6 +1062,7 @@ def render_lab_run_html(
                     <span>Runtime: {runtime_mode}</span>
                     <span>Perfil: {escape(str(query_params.get("perfil") or "moderado"))}</span>
                     <span>Modo: {escape(str(query_params.get("modo") or "comparador"))}</span>
+                    <span>Simulacion: {"historica" if historical_mode else "actual"}</span>
                     <span>Mercados: {escape(str(query_params.get("mercados") or "todo"))}</span>
                     <span>Partido: {escape(str(query_params.get("partido") or "todos"))}</span>
                 </div>
@@ -700,6 +1093,17 @@ def render_lab_run_html(
                         <select name="deporte">{sport_tags}</select>
                     </div>
                     <div class="field">
+                        <label>Simulacion</label>
+                        <select name="simulation_mode" id="simulation_mode">
+                            <option value="live" {"selected" if simulation_mode_value == "live" else ""}>Actual</option>
+                            <option value="historical" {"selected" if simulation_mode_value == "historical" else ""}>Historica</option>
+                        </select>
+                    </div>
+                    <div class="field" id="snapshotField">
+                        <label>Snapshot historico</label>
+                        <input type="datetime-local" name="snapshot_at" value="{snapshot_input_value}">
+                    </div>
+                    <div class="field">
                         <label>Mercados</label>
                         <select name="mercados">{market_tags}</select>
                     </div>
@@ -719,6 +1123,7 @@ def render_lab_run_html(
                 <div class="summary">{current_filters}</div>
             </section>
             {notice_html}
+            {historical_summary_html}
             <section class="panel" style="padding: 18px; margin-top: 18px;">
                 <div class="eyebrow" style="color: var(--brand); margin-bottom: 12px;">Mapa rapido de partidos</div>
                 <p class="lede">Usa esta tabla para ver antes de lanzar la simulacion que eventos hay, a que hora van y si ya apuntan a publicable, bloqueado o sin picks.</p>
@@ -749,12 +1154,29 @@ def render_lab_run_html(
                 </div>
                 <div class="stack">
                     <section class="card">
+                        <div class="badge {_badge_class('warn' if historical_mode else 'ok')}">{"Modo historico" if historical_mode else "Modo actual"}</div>
+                        <h3>Contexto de simulacion</h3>
+                        <p class="muted">Proveedor: {provider_name}</p>
+                        <p class="muted">Snapshot: {snapshot_at or 'Tiempo real'}</p>
+                        <p class="muted">{market_notice or ('El lab usa cuotas actuales y mantiene ventana operativa de proximidad.' if not historical_mode else 'Se usa snapshot historico y se limita a mercados featured compatibles.')}</p>
+                    </section>
+                    <section class="card">
                         <div class="badge {_badge_class(status_badge)}">{escape(status_label)}</div>
                         <h3>Decision de publicacion</h3>
                         <p class="muted">El motor combina el runtime actual con el publication guard.</p>
                         <ul class="reasons-list">{reasons_html}</ul>
                     </section>
                     <section class="grid-2">
+                        <div class="metric">
+                            <span>Simulacion</span>
+                            <strong>{"Historica" if historical_mode else "Actual"}</strong>
+                            <small>Modo operativo del lab</small>
+                        </div>
+                        <div class="metric">
+                            <span>Snapshots</span>
+                            <strong>{snapshots_guardados}</strong>
+                            <small>Filas guardadas en esta corrida</small>
+                        </div>
                         <div class="metric">
                             <span>Recomendadas</span>
                             <strong>{int(forecast_summary.get("total_recomendadas", 0) or 0)}</strong>
@@ -789,20 +1211,38 @@ def render_lab_run_html(
                 const overlay = document.getElementById("labLoadingOverlay");
                 const message = document.getElementById("labLoadingMessage");
                 const steps = Array.from(document.querySelectorAll("#labLoadingSteps li"));
+                const simulationSelect = document.getElementById("simulation_mode");
+                const snapshotField = document.getElementById("snapshotField");
                 if (!form || !overlay || !message || steps.length === 0) {{
                     return;
                 }}
 
-                const messages = [
+                const liveMessages = [
                     "Obteniendo cuotas y horarios actualizados...",
                     "Comparando precios entre casas...",
                     "Priorizando mejores ligas y partidos activos...",
                     "Filtrando value, riesgo y picks publicables..."
                 ];
+                const historicalMessages = [
+                    "Buscando snapshot historico en The Odds API...",
+                    "Cargando cuotas featured del momento elegido...",
+                    "Comparando casas sobre el snapshot historico...",
+                    "Filtrando value y picks simulables en pasado..."
+                ];
 
                 let intervalId = null;
+                const toggleSnapshotField = () => {{
+                    if (!simulationSelect || !snapshotField) {{
+                        return;
+                    }}
+                    snapshotField.style.display = simulationSelect.value === "historical" ? "block" : "none";
+                }};
+                toggleSnapshotField();
+                if (simulationSelect) {{
+                    simulationSelect.addEventListener("change", toggleSnapshotField);
+                }}
 
-                const startOverlay = () => {{
+                const startOverlay = (messages) => {{
                     overlay.classList.add("visible");
                     overlay.setAttribute("aria-hidden", "false");
                     let index = 0;
@@ -816,7 +1256,10 @@ def render_lab_run_html(
                 }};
 
                 form.addEventListener("submit", () => {{
-                    startOverlay();
+                    const selectedMessages = simulationSelect && simulationSelect.value === "historical"
+                        ? historicalMessages
+                        : liveMessages;
+                    startOverlay(selectedMessages);
                 }});
 
                 window.addEventListener("pageshow", () => {{

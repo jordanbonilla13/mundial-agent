@@ -2,7 +2,7 @@ import os
 
 
 DEFAULT_SPORT = os.getenv("DEFAULT_SPORT", "worldcup").strip().lower()
-FEATURED_MARKETS = {"h2h", "totals"}
+FEATURED_MARKETS = {"h2h", "spreads", "totals"}
 ADDITIONAL_MARKETS = {
     "alternate_totals",
     "alternate_totals_cards",
@@ -22,6 +22,7 @@ MERCADOS_DISPONIBLES = FEATURED_MARKETS | ADDITIONAL_MARKETS
 FILTROS_MERCADO = {
     "todo": [
         "h2h",
+        "spreads",
         "btts",
         "double_chance",
         "totals",
@@ -35,6 +36,7 @@ FILTROS_MERCADO = {
     "ambos_anotan": ["btts"],
     "se_clasificara": [],
     "doble_oportunidad": ["double_chance"],
+    "handicap": ["spreads"],
     "total_goles": ["totals", "alternate_totals"],
     "goles_intervalo": ["totals_h1", "totals_h2"],
     "corners": ["alternate_totals_corners", "alternate_team_totals_corners", "corners_1x2"],
@@ -92,7 +94,7 @@ SPORT_CATALOG = {
         "league_key": "nba",
         "league_label": "NBA",
         "supports_elo": False,
-        "default_markets": "h2h,totals",
+        "default_markets": "h2h,spreads,totals",
     },
 }
 SPORT_MARKET_CONFIG = {
@@ -136,10 +138,12 @@ SPORT_MARKET_CONFIG = {
         ],
     },
     "baloncesto": {
-        "default_filter": "total_goles",
+        "default_filter": "todo",
         "allowed_filters": [
+            "todo",
             "resultado",
             "h2h",
+            "handicap",
             "total_goles",
         ],
     },
@@ -150,6 +154,7 @@ SPORT_FILTER_LABELS = {
     "h2h": "Ganador",
     "ambos_anotan": "Ambos equipos anotaran",
     "doble_oportunidad": "Doble oportunidad",
+    "handicap": "Handicap",
     "total_goles": "Totales",
     "goles_intervalo": "Intervalos / parciales",
     "corners": "Corners",
@@ -236,7 +241,7 @@ def build_dynamic_context_from_sport_key(sport_key: str) -> dict:
         "league_key": league_key,
         "league_label": league_label,
         "supports_elo": family == "soccer",
-        "default_markets": "todo" if family == "soccer" else "h2h,totals" if family == "basketball" else "h2h",
+        "default_markets": "todo" if family == "soccer" else "h2h,spreads,totals" if family == "basketball" else "h2h",
     }
 
 

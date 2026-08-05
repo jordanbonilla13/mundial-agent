@@ -14,6 +14,11 @@ class ForecastRequest:
     deporte: str = "worldcup"
     solo_elite: bool = False
     solo_stakazos: bool = False
+    historical_mode: bool = False
+    historical_date: str | None = None
+
+
+HISTORICAL_FEATURED_MARKETS = {"h2h", "spreads", "totals"}
 
 
 class ForecastEngine:
@@ -175,6 +180,8 @@ class ForecastEngine:
                 deporte=deporte_item,
                 solo_elite=request.solo_elite,
                 solo_stakazos=request.solo_stakazos,
+                historical_mode=request.historical_mode,
+                historical_date=request.historical_date,
             )
             try:
                 if self.run_single_request is not None:
@@ -258,6 +265,9 @@ class ForecastEngine:
             "deporte": "todo",
             "solo_elite": request.solo_elite,
             "solo_stakazos": request.solo_stakazos,
+            "simulation_mode": "historical" if request.historical_mode else "live",
+            "historical_mode": request.historical_mode,
+            "historical_snapshot_at": request.historical_date,
             "source_strength": "mixed",
             "mercados": request.mercados,
             "filtro_mercados": request.mercados,
@@ -294,6 +304,21 @@ class ForecastEngine:
         perfil, modo = self._normalize_profile_and_mode(request.perfil, request.modo)
         filtro_mercados = request.mercados
         mercados_lista, aviso_mercados = self.resolve_markets(request.mercados, deporte=deporte)
+        historical_market_notice = None
+
+        if request.historical_mode:
+            requested_markets = list(mercados_lista)
+            mercados_lista = [market for market in mercados_lista if market in HISTORICAL_FEATURED_MARKETS] or ["h2h"]
+            if requested_markets != mercados_lista:
+                historical_market_notice = (
+                    "Modo historico: solo se simulan mercados featured de The Odds API "
+                    "(ganador, handicap y totales)."
+                )
+                aviso_mercados = (
+                    f"{aviso_mercados} {historical_market_notice}".strip()
+                    if aviso_mercados
+                    else historical_market_notice
+                )
 
         base_payload = {
             "bankroll": bankroll,
@@ -308,6 +333,10 @@ class ForecastEngine:
             "league_label": contexto_deporte["league_label"],
             "solo_elite": request.solo_elite,
             "solo_stakazos": request.solo_stakazos,
+            "simulation_mode": "historical" if request.historical_mode else "live",
+            "historical_mode": request.historical_mode,
+            "historical_snapshot_at": request.historical_date,
+            "historical_market_notice": historical_market_notice,
             "stake_maximo_por_pick": self.stake_limit_text(perfil),
         }
 
@@ -330,8 +359,16 @@ class ForecastEngine:
             }
 
         mercados = ",".join(mercados_lista)
-        data_completa = self.fetch_odds(mercados=mercados, deporte=deporte)
-        data_completa = self._filter_events_by_publication_window(data_completa, max_hours=72)
+        try:
+            data_completa = self.fetch_odds(
+                mercados=mercados,
+                deporte=deporte,
+                historical_date=request.historical_date if request.historical_mode else None,
+            )
+        except TypeError:
+            data_completa = self.fetch_odds(mercados=mercados, deporte=deporte)
+        if not request.historical_mode:
+            data_completa = self._filter_events_by_publication_window(data_completa, max_hours=72)
         partidos_select = self.list_matches(data_completa)
         snapshots_guardados = self.save_snapshots(data_completa)
         data = self.filter_matches(data_completa, request.partido)
@@ -396,6 +433,8 @@ class ForecastEngine:
 
         if referencia_fallback:
             criterio += f" (aviso: {self.reference_bookmaker} no estaba disponible en estas cuotas)"
+        if request.historical_mode and request.historical_date:
+            criterio += f" | snapshot historico {request.historical_date}"
 
         recomendaciones = [self.translate_pick(r) for r in recomendaciones]
         penalizaciones = self.historical_penalties()

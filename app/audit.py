@@ -34,6 +34,10 @@ DEFAULT_AUDIT_LOOKBACK_HOURS = 24
 DEFAULT_AUDIT_PUBLICATIONS_LIMIT = 12
 
 
+def result_triplet(won: int, lost: int, push: int) -> str:
+    return f"✅{won} ❌{lost} ➖{push}"
+
+
 def _published_model_metrics(
     picks: list[dict[str, Any]],
     *,
@@ -362,7 +366,11 @@ def generate_daily_audit_report(
         target_date = datetime.now(timezone.utc)
     
     # Datos del día
-    day_data = get_picks_for_date(target_date, db_path, lookback_hours=lookback_hours)
+    try:
+        day_data = get_picks_for_date(target_date, db_path, lookback_hours=lookback_hours)
+    except TypeError:
+        # Compatibilidad con tests antiguos que monkeypatchean la funcion sin lookback_hours.
+        day_data = get_picks_for_date(target_date, db_path)
     
     # Datos generales (histórico)
     general_data = dashboard_data(db_path=db_path)
@@ -417,7 +425,7 @@ def generate_daily_audit_report(
     report = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "date": day_data["date"],
-        "window_label": day_data["window_label"],
+        "window_label": day_data.get("window_label") or _window_label_for_hours(lookback_hours),
         "status": status,
         "status_detail": status_detail,
         "picks": {

@@ -19,6 +19,12 @@ from .sports import (
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 ODDS_PROVIDER = os.getenv("ODDS_PROVIDER", "the_odds_api").strip().lower()
+ODDS_API_BOOKMAKERS = os.getenv("ODDS_API_BOOKMAKERS", "").strip()
+ODDS_API_REGIONS_DEFAULT = os.getenv("ODDS_API_REGIONS_DEFAULT", "eu,uk").strip() or "eu,uk"
+ODDS_API_REGIONS_SOCCER = os.getenv("ODDS_API_REGIONS_SOCCER", ODDS_API_REGIONS_DEFAULT).strip() or ODDS_API_REGIONS_DEFAULT
+ODDS_API_REGIONS_TENNIS = os.getenv("ODDS_API_REGIONS_TENNIS", ODDS_API_REGIONS_DEFAULT).strip() or ODDS_API_REGIONS_DEFAULT
+ODDS_API_REGIONS_BASKETBALL = os.getenv("ODDS_API_REGIONS_BASKETBALL", "us,us2,eu,uk").strip() or "us,us2,eu,uk"
+ODDS_API_INCLUDE_LINKS = os.getenv("ODDS_API_INCLUDE_LINKS", "true").strip().lower() in {"1", "true", "yes", "si", "on"}
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
 API_FOOTBALL_HOST = "https://v3.football.api-sports.io"
 API_FOOTBALL_LEAGUE = os.getenv("API_FOOTBALL_LEAGUE", "1")
@@ -167,6 +173,33 @@ def the_odds_api_sports() -> list[dict]:
         raise HTTPException(status_code=502, detail="Respuesta inesperada de The Odds API al listar deportes")
 
     return data
+
+
+def the_odds_regions_for_context(contexto: dict) -> str:
+    family = family_from_sport_key(str(contexto.get("sport_key") or ""))
+    if family == "basketball":
+        return ODDS_API_REGIONS_BASKETBALL
+    if family == "tennis":
+        return ODDS_API_REGIONS_TENNIS
+    if family == "soccer":
+        return ODDS_API_REGIONS_SOCCER
+    return ODDS_API_REGIONS_DEFAULT
+
+
+def build_the_odds_query_params(contexto: dict, markets: list[str]) -> dict[str, str]:
+    params: dict[str, str] = {
+        "apiKey": ODDS_API_KEY or "",
+        "markets": ",".join(markets),
+        "oddsFormat": "decimal",
+    }
+    bookmakers = ODDS_API_BOOKMAKERS
+    if bookmakers:
+        params["bookmakers"] = bookmakers
+    else:
+        params["regions"] = the_odds_regions_for_context(contexto)
+    if ODDS_API_INCLUDE_LINKS:
+        params["includeLinks"] = "true"
+    return params
 
 
 def discover_available_catalog(provider: str | None = None) -> dict:
@@ -865,12 +898,7 @@ def fetch_the_odds_odds(mercados_lista: list[str], contexto: dict) -> list[dict]
     sport_key = contexto["sport_key"]
     url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds"
 
-    params = {
-        "apiKey": ODDS_API_KEY,
-        "regions": "eu",
-        "markets": ",".join(mercados_base),
-        "oddsFormat": "decimal",
-    }
+    params = build_the_odds_query_params(contexto, mercados_base)
 
     try:
         response = requests.get(url, params=params, timeout=15)
@@ -897,12 +925,7 @@ def fetch_the_odds_odds(mercados_lista: list[str], contexto: dict) -> list[dict]
                 continue
 
             event_url = f"https://api.the-odds-api.com/v4/sports/{sport_key}/events/{event_id}/odds"
-            event_params = {
-                "apiKey": ODDS_API_KEY,
-                "regions": "eu",
-                "markets": ",".join(mercados_adicionales),
-                "oddsFormat": "decimal",
-            }
+            event_params = build_the_odds_query_params(contexto, mercados_adicionales)
 
             try:
                 extra = requests.get(event_url, params=event_params, timeout=15)
@@ -916,6 +939,54 @@ def fetch_the_odds_odds(mercados_lista: list[str], contexto: dict) -> list[dict]
                 merge_event_markets(evento, extra_data)
 
     return enriquecer_eventos_contexto(data, contexto)
+
+
+def fetch_the_odds_historical_odds(
+    mercados_lista: list[str],
+    contexto: dict,
+    snapshot_date: str,
+) -> list[dict]:
+    if not ODDS_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Falta ODDS_API_KEY en el archivo .env",
+        )
+
+    mercados_base = [m for m in mercados_lista if m in FEATURED_MARKETS] or ["h2h"]
+    sport_key = contexto["sport_key"]
+    url = f"https://api.the-odds-api.com/v4/historical/sports/{sport_key}/odds"
+    params = build_the_odds_query_params(contexto, mercados_base)
+    params["date"] = snapshot_date
+
+    try:
+        response = requests.get(url, params=params, timeout=20)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=odds_api_error_detail(exc),
+        ) from exc
+
+    payload = response.json()
+
+    if isinstance(payload, dict) and payload.get("message"):
+        raise HTTPException(status_code=502, detail=payload["message"])
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise HTTPException(status_code=502, detail="Respuesta inesperada de The Odds API en historico")
+
+    enriched = enriquecer_eventos_contexto(payload.get("data", []), contexto)
+    snapshot_time = payload.get("timestamp")
+    previous_time = payload.get("previous_timestamp")
+    next_time = payload.get("next_timestamp")
+
+    for event in enriched:
+        event["historical_mode"] = True
+        event["historical_snapshot_time"] = snapshot_time
+        event["historical_previous_snapshot_time"] = previous_time
+        event["historical_next_snapshot_time"] = next_time
+
+    return enriched
 
 
 def fetch_the_odds_scores(days_from: int, contexto: dict) -> list[dict]:

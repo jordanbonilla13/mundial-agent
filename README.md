@@ -7,6 +7,7 @@ El objetivo del proyecto no es "apostar mas", sino tomar decisiones mas discipli
 ## Que hace hoy
 
 - Ingesta de cuotas desde `The Odds API` como proveedor principal.
+- Cobertura ampliable por regiones o lista de `bookmakers` para aprovechar planes de pago de `The Odds API`.
 - Soporte alternativo para `API-Football` y `SportsGameOdds`.
 - Comparacion contra `Pinnacle` como referencia de mercado.
 - Modelo de probabilidad que mezcla señal de mercado, contexto deportivo y ELO.
@@ -224,6 +225,21 @@ ODDS_API_KEY=tu_api_key_de_the_odds_api
 REFERENCE_BOOKMAKER=Pinnacle
 ```
 
+Configuracion recomendada para `The Odds API` con plan de pago:
+
+```env
+ODDS_API_BOOKMAKERS=
+ODDS_API_REGIONS_DEFAULT=eu,uk
+ODDS_API_REGIONS_SOCCER=eu,uk
+ODDS_API_REGIONS_TENNIS=eu,uk
+ODDS_API_REGIONS_BASKETBALL=us,us2,eu,uk
+ODDS_API_INCLUDE_LINKS=true
+```
+
+- Si `ODDS_API_BOOKMAKERS` se rellena, tiene prioridad sobre `regions`.
+- Baloncesto puede trabajar ya con `ganador`, `handicap` y `totales`.
+- La configuracion por defecto intenta ampliar consenso sin disparar el gasto tanto como pedir todas las regiones a todos los deportes.
+
 Persistencia:
 
 ```env
@@ -385,6 +401,15 @@ La mejora tecnica mas rentable ahora mismo es dividir [`main.py`](./main.py) por
 
 - El flujo de publicacion ya distingue entre `shadow mode`, bloqueo por guard y publicacion real.
 - El laboratorio de simulacion ya tiene vista HTML propia en [`/lab/run`](./main.py).
+- Ya existe comando de Telegram [`/apuestas`](./main.py) para lanzar el preset operativo del lab y publicar automaticamente picks publicables con:
+  - `bankroll=200`
+  - `perfil=agresivo`
+  - `modo=comparador`
+  - `mercados=todo`
+  - `partido=todos`
+  - `deporte=todo`
+  - `solo_stakazos=false`
+- `/apuestas` responde al instante con un `job id`, ejecuta el calculo en segundo plano y luego avisa por Telegram si publico picks o si no habia ninguna publicable.
 - `GET /lab/run` renderiza una vista visual con:
   - formulario de filtros (`bankroll`, `perfil`, `modo`, `deporte`, `mercados`, `partido`, `solo_stakazos`)
   - selector real de partidos disponibles
@@ -394,6 +419,33 @@ La mejora tecnica mas rentable ahora mismo es dividir [`main.py`](./main.py) por
   - bloque `Decision de publicacion`
   - bloque `Resumen Telegram`
 - `GET /lab/run?format=json` mantiene la salida tecnica en JSON.
+- Desde [`/lab/run`](./main.py) ya se pueden publicar picks al canal y registrarlas en cartera real del modelo para que luego entren en `/resumen`.
+- El selector de deporte por defecto en `/lab/run` queda en `Todo - deportes base`.
+- La vista `/lab/run` ya muestra overlay visual de carga mientras calcula picks.
+- Las horas de partidos en `/lab/run` se muestran convertidas a `Europe/Madrid`.
+
+### Auditoria y resumen de Telegram
+
+- `/resumen` ahora usa una version compacta, mas visual y mas rapida de leer.
+- Se eliminaron del resumen las alertas viejas de `FIFA World Cup` para que no sigan contaminando la auditoria actual.
+- El resumen ya no ensena publicaciones vacias de `0 picks`.
+- Ahora existe bloque `Publicado hoy` dentro de `/resumen`:
+  - agrega las picks unicas publicadas durante el dia
+  - muestra `ganadas`, `perdidas`, `nulas` y `pendientes`
+  - sigue manteniendo aparte la `Ultima pub` mas reciente
+- Si una pick del bloque `Publicado hoy` fue marcada como `apostada` y luego resulto `ganada`, sale con icono `✅💵`.
+- Si una pick publicada gano pero no fue marcada como apuesta real, sigue saliendo con `✅`.
+
+### Estado funcional del modelo a 30/07/2026
+
+- El modelo ya ha acertado picks recientes de tenis en las pruebas del usuario.
+- La auditoria del portfolio publicado en Telegram y las apuestas reales siguen separadas:
+  - `Portfolio modelo`: todo lo publicado por el bot
+  - `Dia real`: solo lo que el usuario marco como ejecutado
+- La siguiente comprobacion real pendiente es dejar correr varios dias el modelo con el flujo nuevo para validar si:
+  - mantiene acierto al publicar
+  - liquida bien las picks
+  - y el resumen refleja el dia de forma fiable sin ruido historico
 
 ### Guards y overrides activos
 
@@ -422,21 +474,33 @@ PERF_GUARD_ALLOW_LEAGUES=
 - `python -m py_compile main.py app\lab_service.py test_betting_model.py`
 - `python -m py_compile app\performance_guard_service.py test_betting_model.py main.py app\lab_service.py`
 - `venv\Scripts\python.exe -m unittest test_betting_model.py`
-- Ultimo estado validado: `99 tests OK`
+- Tests validados tambien para:
+  - `/resumen` por Telegram
+  - exclusion de `FIFA World Cup` en auditoria
+  - comando `/apuestas`
+  - bloque `Publicado hoy`
+- Ultimo estado validado en esta etapa: mas de `100 tests OK` en la suite principal
 
 ### Commits recientes relevantes
 
 - `e43367d` `Refactor publication flow and improve lab preview`
 - `20468f0` `Improve lab run visual workflow`
 - `355fdbc` `Allow basketball override in performance guard`
+- `2c2813b` `Compact Telegram audit summary`
+- `cc08693` `Hide FIFA World Cup from audit summary`
+- `b850f1e` `Add Telegram /apuestas command`
+- `2ce2a5d` `Improve daily Telegram audit pick recap`
 
 ### Siguiente paso recomendado para retomar
 
 1. Reiniciar la app local para asegurar que relee el `.env`.
-2. Abrir `/lab/run`.
-3. Probar con `deporte=baloncesto`.
-4. Ver si los partidos de baloncesto pasan de `Bloqueado` a `Publicable` o al menos a `Sin picks`.
-5. Si ya no quedan bloqueados por historico, revisar partido a partido por que el modelo sigue descartando picks o por que las considera malas.
+2. Probar `/apuestas` en Telegram y verificar que:
+   - responde con `job id`
+   - publica picks si existen
+   - y deja luego trazabilidad correcta en `/resumen`
+3. Abrir `/lab/run`.
+4. Revisar si el bloque `Publicado hoy` en el resumen refleja exactamente lo que se ha ido publicando durante el dia.
+5. Seguir observando varios dias seguidos antes de tocar demasiado el modelo base, para distinguir errores de tracking frente a errores reales de seleccion de picks.
 
 ### Objetivo funcional abierto
 
@@ -445,3 +509,7 @@ El objetivo inmediato no es publicar mas picks, sino comprobar si al quitar el b
 - produce picks razonables,
 - deja de sobreseleccionar picks malas,
 - y merece seguir afinandose antes de abrir otra vez Telegram en serio para ese deporte.
+
+En paralelo, tambien queda abierta esta meta operativa:
+
+- hacer que Telegram sea una consola real de trabajo del bot, donde `/apuestas` publique, `/resumen` audite limpio y el usuario pueda ver rapido que picks del dia publico el modelo, cuales aposto de verdad y cuales salieron bien o mal.

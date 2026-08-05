@@ -57,6 +57,7 @@ from main import (
     telegram_config,
     telegram_keyboard_for_pick,
 )
+from translations import apuesta_es, tipo_resultado_es
 
 
 PARTIDOS_FAKE = [
@@ -956,11 +957,24 @@ class BettingModelTests(unittest.TestCase):
     def test_resolver_mercados_limita_por_deporte(self):
         mercados_tenis, aviso_tenis = resolver_mercados("corners", deporte="tenis")
         mercados_basket, aviso_basket = resolver_mercados("todo", deporte="baloncesto")
+        mercados_handicap, aviso_handicap = resolver_mercados("handicap", deporte="baloncesto")
 
         self.assertEqual(mercados_tenis, ["h2h"])
         self.assertIn("no aplica", aviso_tenis.lower())
-        self.assertEqual(mercados_basket, ["totals", "alternate_totals"])
-        self.assertIn("total_goles", aviso_basket)
+        self.assertEqual(mercados_basket, ["h2h", "spreads", "totals", "alternate_totals"])
+        self.assertIsNone(aviso_basket)
+        self.assertEqual(mercados_handicap, ["spreads"])
+        self.assertIsNone(aviso_handicap)
+
+    def test_traducciones_handicap_baloncesto(self):
+        self.assertEqual(
+            apuesta_es("Dallas Wings", mercado="spreads", point=4.5, sport_key="basketball_wnba"),
+            "Dallas Wings +4,5",
+        )
+        self.assertEqual(
+            tipo_resultado_es("spreads", sport_key="basketball_wnba"),
+            "Handicap",
+        )
 
     def test_contexto_deporte_normaliza_alias(self):
         contexto = resolver_contexto_deporte("nba")
@@ -3607,12 +3621,12 @@ class BettingModelTests(unittest.TestCase):
 
         text = format_audit_report_telegram(report)
 
-        self.assertIn("🗓️ Publicado hoy | 4 picks | 2W-0L-0N | 2 pend", text)
+        self.assertIn("🗓️ Publicado hoy | 4 picks | ✅2 ❌0 ➖0 | 2 pend", text)
         self.assertIn("✅💵 Brandon Nakashima vs Jakub Mensik | Brandon Nakashima", text)
         self.assertIn("⏳ Terence Atmane vs Alejandro Tabilo | Alejandro Tabilo", text)
         self.assertIn("✅💵 Alex de Minaur vs Cruz Hewitt | Alex de Minaur", text)
         self.assertIn("⏳ Ugo Humbert vs Ben Shelton | Ben Shelton", text)
-        self.assertIn("🧾 Última pub #68 | 1 picks | 0W-0L-0N | 1 pend", text)
+        self.assertIn("🧾 Última pub #68 | 1 picks | ✅0 ❌0 ➖0 | 1 pend", text)
 
     def test_opciones_deporte_disponibles_incluye_todo(self):
         opciones = opciones_deporte_disponibles(selected="futbol")
@@ -4619,6 +4633,7 @@ class BettingModelTests(unittest.TestCase):
             build_ai_summary=lambda *args, **kwargs: None,
             format_pick_message=lambda pick: "pick",
             format_summary_message=lambda **kwargs: "summary",
+            fetch_scores=lambda days_from, deporte=None: [],
             perfil="moderado",
             modo="comparador",
             mercados="todo",
@@ -4638,6 +4653,162 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(result["forecast_summary"]["total_bloqueadas_en_descartadas"], 1)
         self.assertEqual(result["publishable_preview"][0]["event_id"], "evt_ok")
         self.assertEqual(result["blocked_picks"]["discarded"][0]["event_id"], "evt_blocked")
+
+    def test_build_lab_run_historico_desactiva_publicacion(self):
+        captured = {}
+
+        def fake_run_forecast(request):
+            captured["request"] = request
+            return {
+                "sport_label": "Tenis",
+                "league_label": "ATP",
+                "proveedor_cuotas": "the_odds_api",
+                "historical_snapshot_at": "2026-08-01T10:00:00Z",
+                "historical_market_notice": "Modo historico: featured only",
+                "snapshots_guardados": 12,
+                "total_analizadas": 2,
+                "total_recomendadas": 1,
+                "mejores_apuestas": [],
+                "descartadas": [],
+            }
+
+        result = build_lab_run(
+            runtime_settings=RuntimeSettings(environment="development", shadow_mode=False),
+            publication_guard=lambda: {"allow_live_publication": True, "mode": "live", "reasons": []},
+            run_forecast=fake_run_forecast,
+            build_prediction_payload=lambda **kwargs: {"pronosticos": []},
+            ai_available=lambda: False,
+            select_picks_for_telegram=lambda *args, **kwargs: [],
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            format_pick_message=lambda pick: "pick",
+            format_summary_message=lambda **kwargs: "summary",
+            fetch_scores=lambda days_from, deporte=None: [],
+            perfil="agresivo",
+            modo="comparador",
+            mercados="todo",
+            partido="todos",
+            deporte="tenis",
+            bankroll=None,
+            solo_stakazos=False,
+            perfiles_stake={"agresivo"},
+            modos_informe={"comparador"},
+            perfil_label=lambda value: value or "agresivo",
+            modo_label=lambda value: value or "comparador",
+            simulation_mode="historical",
+            historical_snapshot_at="2026-08-01T10:00:00Z",
+        )
+
+        self.assertTrue(captured["request"].historical_mode)
+        self.assertEqual(captured["request"].historical_date, "2026-08-01T10:00:00Z")
+        self.assertFalse(result["publication_decision"]["would_publish_live"])
+        self.assertTrue(result["simulation_context"]["historical_mode"])
+        self.assertEqual(result["simulation_context"]["snapshot_at"], "2026-08-01T10:00:00Z")
+
+    def test_build_lab_run_historico_autoevalua_publicables(self):
+        result = build_lab_run(
+            runtime_settings=RuntimeSettings(environment="development", shadow_mode=False),
+            publication_guard=lambda: {"allow_live_publication": True, "mode": "live", "reasons": []},
+            run_forecast=lambda request: {
+                "sport_label": "Baloncesto",
+                "league_label": "WNBA",
+                "proveedor_cuotas": "the_odds_api",
+                "historical_snapshot_at": "2026-08-04T10:00:00Z",
+                "total_analizadas": 2,
+                "total_recomendadas": 2,
+                "mejores_apuestas": [],
+                "descartadas": [],
+            },
+            build_prediction_payload=lambda **kwargs: {
+                "pronosticos": [
+                    {
+                        "event_id": "evt_hist_1",
+                        "sport_key": "basketball_wnba",
+                        "sport_label": "Baloncesto",
+                        "league_label": "WNBA",
+                        "commence_time": "2026-08-04T18:00:00Z",
+                        "partido": "Wings vs Sun",
+                        "equipo": "Under",
+                        "equipo_raw": "Under",
+                        "mercado": "totals",
+                        "outcome_point": 171.5,
+                        "casa": "1xBet",
+                        "cuota": 1.94,
+                        "stake": 1.7,
+                        "importe_sugerido": 3.84,
+                        "recomendacion": "Value",
+                        "motivo": "test",
+                    },
+                    {
+                        "event_id": "evt_hist_2",
+                        "sport_key": "basketball_wnba",
+                        "sport_label": "Baloncesto",
+                        "league_label": "WNBA",
+                        "commence_time": "2026-08-04T20:00:00Z",
+                        "partido": "Mercury vs Liberty",
+                        "equipo": "Phoenix Mercury",
+                        "equipo_raw": "Phoenix Mercury",
+                        "mercado": "spreads",
+                        "tipo_resultado": "home",
+                        "tipo_resultado_raw": "home",
+                        "outcome_point": 4.5,
+                        "casa": "Bet365",
+                        "cuota": 1.91,
+                        "stake": 1.2,
+                        "importe_sugerido": 2.4,
+                        "recomendacion": "Value",
+                        "motivo": "test",
+                    },
+                ]
+            },
+            ai_available=lambda: False,
+            select_picks_for_telegram=lambda *args, **kwargs: [],
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            format_pick_message=lambda pick: "pick",
+            format_summary_message=lambda **kwargs: "summary",
+            fetch_scores=lambda days_from, deporte=None: [
+                {
+                    "id": "evt_hist_1",
+                    "completed": True,
+                    "home_team": "Wings",
+                    "away_team": "Sun",
+                    "scores": [
+                        {"name": "Wings", "score": "80"},
+                        {"name": "Sun", "score": "85"},
+                    ],
+                },
+                {
+                    "id": "evt_hist_2",
+                    "completed": True,
+                    "home_team": "Phoenix Mercury",
+                    "away_team": "New York Liberty",
+                    "scores": [
+                        {"name": "Phoenix Mercury", "score": "89"},
+                        {"name": "New York Liberty", "score": "83"},
+                    ],
+                },
+            ],
+            perfil="agresivo",
+            modo="comparador",
+            mercados="todo",
+            partido="todos",
+            deporte="baloncesto",
+            bankroll=None,
+            solo_stakazos=False,
+            perfiles_stake={"agresivo"},
+            modos_informe={"comparador"},
+            perfil_label=lambda value: value or "agresivo",
+            modo_label=lambda value: value or "comparador",
+            simulation_mode="historical",
+            historical_snapshot_at="2026-08-04T10:00:00Z",
+        )
+
+        self.assertTrue(result["historical_evaluation"]["enabled"])
+        self.assertEqual(result["historical_evaluation"]["closed"], 2)
+        self.assertEqual(result["historical_evaluation"]["won"], 2)
+        self.assertEqual(result["publishable_preview"][0]["historical_result"], "win")
+        self.assertEqual(result["publishable_preview"][1]["historical_result"], "win")
 
     def test_build_empty_lab_run_no_lanza_simulacion(self):
         result = build_empty_lab_run(
@@ -4798,6 +4969,135 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Lab en espera", html)
         self.assertIn("ya no consulta cuotas al abrirse", html)
         self.assertIn('name="execute" value="true"', html)
+
+    def test_render_lab_run_html_historico_oculta_publicacion(self):
+        html = render_lab_run_html(
+            {
+                "runtime_mode": "live",
+                "publication_decision": {
+                    "would_publish_live": False,
+                    "runtime_mode": "live",
+                    "guard_mode": "live",
+                    "guard_reasons": ["Simulacion historica: el lab solo compara y no publica picks del pasado."],
+                },
+                "simulation_context": {
+                    "mode": "historical",
+                    "historical_mode": True,
+                    "snapshot_at": "2026-08-01T10:00:00Z",
+                    "market_notice": "Modo historico: solo featured.",
+                    "provider_name": "the_odds_api",
+                    "snapshots_guardados": 14,
+                },
+                "historical_evaluation": {
+                    "enabled": True,
+                    "evaluated": 1,
+                    "closed": 1,
+                    "pending": 0,
+                    "won": 1,
+                    "lost": 0,
+                    "push": 0,
+                    "staked": 2.5,
+                    "profit": 2.25,
+                    "roi": 90.0,
+                    "hit_rate": 100.0,
+                    "coverage_note": None,
+                },
+                "forecast_summary": {
+                    "sport_label": "Tenis",
+                    "league_label": "ATP",
+                    "total_analizadas": 5,
+                    "total_recomendadas": 1,
+                    "total_descartadas_preview": 1,
+                    "total_publicables_preview": 1,
+                    "total_bloqueadas_en_recomendadas": 0,
+                    "total_bloqueadas_en_descartadas": 0,
+                },
+                "publishable_preview": [
+                    {
+                        "event_id": "evt_hist",
+                        "partido": "Player A vs Player B",
+                        "equipo": "Player A",
+                        "mercado": "h2h",
+                        "casa": "Bet365",
+                        "league_label": "ATP",
+                        "stake": 1,
+                        "importe_sugerido": 2.5,
+                        "recomendacion": "Value",
+                        "motivo": "test",
+                        "historical_result_label": "Ganada",
+                        "historical_result_icon": "✅",
+                        "historical_profit_loss": 2.25,
+                        "historical_status_detail": "Resultado simulado con marcador final del proveedor.",
+                    }
+                ],
+                "blocked_picks": {"recommended": [], "discarded": []},
+                "match_overview": [],
+                "telegram_preview": {"resumen_telegram": "Resumen historico", "pronosticos": [{"id": 1}]},
+            },
+            query_params={
+                "perfil": "agresivo",
+                "modo": "comparador",
+                "mercados": "todo",
+                "partido": "todos",
+                "deporte": "tenis",
+                "solo_stakazos": "false",
+                "simulation_mode": "historical",
+                "snapshot_at": "2026-08-01T12:00",
+                "execute": "true",
+            },
+            premium_css=lambda: "",
+            profile_options=[{"value": "agresivo", "label": "Agresivo"}],
+            mode_options=[{"value": "comparador", "label": "Comparador"}],
+            sport_options=[{"value": "tenis", "label": "Tenis"}],
+            market_options=[{"value": "todo", "label": "Todo"}],
+            match_options=[{"value": "todos", "label": "Todos los partidos"}],
+        )
+
+        self.assertIn("Modo historico", html)
+        self.assertIn("Snapshot: 2026-08-01T10:00:00Z", html)
+        self.assertIn('name="simulation_mode"', html)
+        self.assertIn('name="snapshot_at"', html)
+        self.assertIn("Solo simulacion", html)
+        self.assertIn("Backtest del snapshot", html)
+        self.assertIn("Resultado simulado con marcador final del proveedor.", html)
+        self.assertNotIn("/lab/run/publicar", html)
+
+    def test_cuotas_historicas_usan_the_odds_api_historical(self):
+        import main
+
+        original_provider = main.ODDS_PROVIDER
+        original_fetch_historical = main.provider_layer.fetch_the_odds_historical_odds
+        original_fetch_live = main.provider_layer.fetch_the_odds_odds
+
+        try:
+            main.ODDS_PROVIDER = "the_odds_api"
+            called = {}
+
+            def fake_historical(markets, context, snapshot):
+                called["markets"] = markets
+                called["context"] = context
+                called["snapshot"] = snapshot
+                return [{"id": "hist_evt"}]
+
+            def fail_live(*args, **kwargs):
+                raise AssertionError("No deberia usar el endpoint live en modo historico")
+
+            main.provider_layer.fetch_the_odds_historical_odds = fake_historical
+            main.provider_layer.fetch_the_odds_odds = fail_live
+
+            result = main.cuotas(
+                mercados="h2h,team_totals,totals",
+                deporte="baloncesto",
+                historical_date="2026-08-01T10:00:00Z",
+            )
+        finally:
+            main.ODDS_PROVIDER = original_provider
+            main.provider_layer.fetch_the_odds_historical_odds = original_fetch_historical
+            main.provider_layer.fetch_the_odds_odds = original_fetch_live
+
+        self.assertEqual(result, [{"id": "hist_evt"}])
+        self.assertEqual(called["markets"], ["h2h", "totals"])
+        self.assertEqual(called["snapshot"], "2026-08-01T10:00:00Z")
 
     def test_lab_run_no_consulta_datos_si_no_se_ejecuta(self):
         import main

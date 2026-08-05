@@ -62,6 +62,7 @@ RESULT_TYPES_ES = {
     "away": "Visitante",
     "draw": "Empate",
     "totals": "Goles totales",
+    "spreads": "Handicap",
     "team_totals": "Goles por equipo",
     "alternate_team_totals_corners": "Corners por equipo",
     "alternate_totals": "Total de goles alternativo",
@@ -192,6 +193,13 @@ def apuesta_es(
     if mercado == "double_chance":
         return str(nombre).replace(" or ", " o ").replace("Draw", "Empate")
 
+    if mercado == "spreads":
+        if point is None:
+            return f"Handicap {equipo_es(nombre)}"
+        point_value = float(point)
+        point_text = f"{point_value:+g}".replace(".", ",")
+        return f"{equipo_es(nombre)} {point_text}"
+
     if mercado == "corners_1x2":
         return f"Más corners: {equipo_es(nombre)}"
 
@@ -208,6 +216,7 @@ def tipo_resultado_es(
 
     if _is_basketball_context(sport_key, sport_label):
         basketball_labels = {
+            "spreads": "Handicap",
             "totals": "Puntos totales",
             "team_totals": "Puntos por equipo",
             "alternate_totals": "Total de puntos alternativo",

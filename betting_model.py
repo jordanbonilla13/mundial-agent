@@ -22,7 +22,7 @@ TEAM_TOTAL_MARKETS = {
 NON_EXCLUSIVE_MARKETS = {"double_chance"}
 HIGH_RELIABILITY_BOOKMAKERS = {"pinnacle", "bet365", "betfair", "betfairsportsbook", "william hill"}
 MEDIUM_RELIABILITY_BOOKMAKERS = {"unibet", "1xbet", "bwin", "marathonbet"}
-HIGH_RELIABILITY_MARKETS = {"h2h", "totals"}
+HIGH_RELIABILITY_MARKETS = {"h2h", "spreads", "totals"}
 MEDIUM_RELIABILITY_MARKETS = {"alternate_totals", "btts", "team_totals", "double_chance"}
 TOP_SOCCER_LEAGUE_HINTS = (
     "fifa_world_cup",
