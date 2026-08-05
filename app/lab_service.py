@@ -172,7 +172,10 @@ def _resolve_pick_result_with_score(pick: dict[str, Any], evento: dict[str, Any]
 
 def _simulated_profit_loss(pick: dict[str, Any], result: str) -> float:
     amount = float(pick.get("importe_sugerido") or 0)
-    odds = float(pick.get("cuota") or pick.get("cuota_apuesta") or 0)
+    odds_raw = pick.get("cuota") or pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or 0
+    odds = float(odds_raw or 0)
+    if odds <= 1:
+        return 0.0
     if result == "win":
         return round(amount * (odds - 1), 2)
     if result == "loss":
@@ -413,6 +416,8 @@ def _lab_pick_snapshot(pick: dict[str, Any]) -> dict[str, Any]:
         "outcome_description": pick.get("outcome_description"),
         "casa": pick.get("casa"),
         "cuota": pick.get("cuota"),
+        "cuota_apuesta": pick.get("cuota_apuesta"),
+        "cuota_pinnacle": pick.get("cuota_pinnacle"),
         "stake": pick.get("stake"),
         "importe_sugerido": pick.get("importe_sugerido"),
         "recomendacion": pick.get("recomendacion"),

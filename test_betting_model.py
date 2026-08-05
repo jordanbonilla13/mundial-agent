@@ -4810,6 +4810,81 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(result["publishable_preview"][0]["historical_result"], "win")
         self.assertEqual(result["publishable_preview"][1]["historical_result"], "win")
 
+    def test_build_lab_run_historico_calcula_profit_con_cuota_apuesta(self):
+        result = build_lab_run(
+            runtime_settings=RuntimeSettings(environment="development", shadow_mode=False),
+            publication_guard=lambda: {"allow_live_publication": True, "mode": "live", "reasons": []},
+            run_forecast=lambda request: {
+                "sport_label": "Tenis",
+                "league_label": "ATP",
+                "proveedor_cuotas": "the_odds_api",
+                "historical_snapshot_at": "2026-08-04T10:00:00Z",
+                "total_analizadas": 1,
+                "total_recomendadas": 1,
+                "mejores_apuestas": [],
+                "descartadas": [],
+            },
+            build_prediction_payload=lambda **kwargs: {
+                "pronosticos": [
+                    {
+                        "event_id": "evt_hist_profit",
+                        "sport_key": "tennis_atp_canadian_open",
+                        "sport_label": "Tenis",
+                        "league_label": "ATP Canadian Open",
+                        "commence_time": "2026-08-04T12:00:00Z",
+                        "partido": "Player A vs Player B",
+                        "equipo": "Player A",
+                        "equipo_raw": "Player A",
+                        "mercado": "h2h",
+                        "tipo_resultado": "home",
+                        "tipo_resultado_raw": "home",
+                        "casa": "Betfair",
+                        "cuota_apuesta": 1.5,
+                        "stake": 1.27,
+                        "importe_sugerido": 2.29,
+                        "recomendacion": "Value",
+                        "motivo": "test",
+                    }
+                ]
+            },
+            ai_available=lambda: False,
+            select_picks_for_telegram=lambda *args, **kwargs: [],
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            format_pick_message=lambda pick: "pick",
+            format_summary_message=lambda **kwargs: "summary",
+            fetch_scores=lambda days_from, deporte=None: [
+                {
+                    "id": "evt_hist_profit",
+                    "completed": True,
+                    "home_team": "Player A",
+                    "away_team": "Player B",
+                    "scores": [
+                        {"name": "Player A", "score": "2"},
+                        {"name": "Player B", "score": "0"},
+                    ],
+                }
+            ],
+            perfil="agresivo",
+            modo="comparador",
+            mercados="todo",
+            partido="todos",
+            deporte="tenis",
+            bankroll=None,
+            solo_stakazos=False,
+            perfiles_stake={"agresivo"},
+            modos_informe={"comparador"},
+            perfil_label=lambda value: value or "agresivo",
+            modo_label=lambda value: value or "comparador",
+            simulation_mode="historical",
+            historical_snapshot_at="2026-08-04T10:00:00Z",
+        )
+
+        self.assertEqual(result["publishable_preview"][0]["historical_result"], "win")
+        self.assertEqual(result["publishable_preview"][0]["historical_profit_loss"], 1.15)
+        self.assertEqual(result["historical_evaluation"]["profit"], 1.15)
+        self.assertEqual(result["historical_evaluation"]["roi"], 50.22)
+
     def test_build_empty_lab_run_no_lanza_simulacion(self):
         result = build_empty_lab_run(
             runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
@@ -5115,6 +5190,33 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Lab en espera", response.body.decode("utf-8"))
+
+    def test_lab_run_acepta_bankroll_vacio_en_query(self):
+        import main
+
+        original_build_lab_run = main.build_lab_run
+
+        captured: dict[str, object] = {}
+
+        try:
+            def fake_build_lab_run(**kwargs):
+                captured["bankroll"] = kwargs.get("bankroll")
+                return build_empty_lab_run(
+                    runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
+                )
+
+            main.build_lab_run = fake_build_lab_run
+            response = main.lab_run(
+                bankroll="",
+                execute=True,
+                simulation_mode="historical",
+                snapshot_at="2026-08-04T00:00",
+            )
+        finally:
+            main.build_lab_run = original_build_lab_run
+
+        self.assertEqual(captured["bankroll"], None)
+        self.assertEqual(response.status_code, 200)
 
     def test_get_picks_for_date_usa_ventana_de_24_horas_y_no_dia_calendario(self):
         import app.audit as audit_module

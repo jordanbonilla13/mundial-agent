@@ -3404,7 +3404,7 @@ def pronosticos(
 
 @app.get("/lab/run", response_class=HTMLResponse)
 def lab_run(
-    bankroll: float | None = None,
+    bankroll: str | None = None,
     perfil: str = "moderado",
     modo: str = "comparador",
     mercados: str = "todo",
@@ -3416,6 +3416,14 @@ def lab_run(
     format: str = "html",
     execute: bool = False,
 ):
+    bankroll_value = None
+    bankroll_raw = str(bankroll or "").strip()
+    if bankroll_raw:
+        try:
+            bankroll_value = float(bankroll_raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Bankroll no valido") from exc
+
     simulation_mode = str(simulation_mode or "live").strip().lower()
     historical_mode = simulation_mode == "historical"
     snapshot_at_utc = None
@@ -3463,7 +3471,7 @@ def lab_run(
             mercados=mercados,
             partido=partido,
             deporte=deporte,
-            bankroll=bankroll,
+            bankroll=bankroll_value,
             solo_stakazos=solo_stakazos,
             simulation_mode=simulation_mode,
             historical_snapshot_at=snapshot_at_utc,
@@ -3481,7 +3489,7 @@ def lab_run(
     html = render_lab_run_html(
         lab_data,
         query_params={
-            "bankroll": bankroll if bankroll is not None else "",
+            "bankroll": bankroll_raw,
             "perfil": perfil,
             "modo": modo,
             "mercados": mercados,
