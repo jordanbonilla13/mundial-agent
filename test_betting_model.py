@@ -4705,6 +4705,87 @@ class BettingModelTests(unittest.TestCase):
         self.assertTrue(result["simulation_context"]["historical_mode"])
         self.assertEqual(result["simulation_context"]["snapshot_at"], "2026-08-01T10:00:00Z")
 
+    def test_build_lab_run_historico_filtra_publicables_por_rango(self):
+        result = build_lab_run(
+            runtime_settings=RuntimeSettings(environment="development", shadow_mode=False),
+            publication_guard=lambda: {"allow_live_publication": True, "mode": "live", "reasons": []},
+            run_forecast=lambda request: {
+                "sport_label": "Tenis",
+                "league_label": "ATP",
+                "proveedor_cuotas": "the_odds_api",
+                "historical_snapshot_at": "2026-08-01T10:00:00Z",
+                "total_analizadas": 3,
+                "total_recomendadas": 3,
+                "mejores_apuestas": [],
+                "descartadas": [],
+            },
+            build_prediction_payload=lambda **kwargs: {
+                "pronosticos": [
+                    {
+                        "event_id": "evt_in",
+                        "sport_key": "tennis_atp",
+                        "sport_label": "Tenis",
+                        "league_label": "ATP",
+                        "commence_time": "2026-08-02T12:00:00Z",
+                        "partido": "In Range",
+                        "equipo": "A",
+                        "equipo_raw": "A",
+                        "mercado": "h2h",
+                        "tipo_resultado": "home",
+                        "tipo_resultado_raw": "home",
+                        "cuota": 1.8,
+                        "importe_sugerido": 3.0,
+                        "recomendacion": "Value",
+                        "motivo": "test",
+                    },
+                    {
+                        "event_id": "evt_out",
+                        "sport_key": "tennis_atp",
+                        "sport_label": "Tenis",
+                        "league_label": "ATP",
+                        "commence_time": "2026-08-05T12:00:00Z",
+                        "partido": "Out Range",
+                        "equipo": "B",
+                        "equipo_raw": "B",
+                        "mercado": "h2h",
+                        "tipo_resultado": "home",
+                        "tipo_resultado_raw": "home",
+                        "cuota": 1.8,
+                        "importe_sugerido": 3.0,
+                        "recomendacion": "Value",
+                        "motivo": "test",
+                    },
+                ]
+            },
+            ai_available=lambda: False,
+            select_picks_for_telegram=lambda *args, **kwargs: [],
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            format_pick_message=lambda pick: "pick",
+            format_summary_message=lambda **kwargs: "summary",
+            fetch_scores=lambda days_from, deporte=None: [],
+            perfil="agresivo",
+            modo="comparador",
+            mercados="todo",
+            partido="todos",
+            deporte="tenis",
+            bankroll=None,
+            solo_stakazos=False,
+            perfiles_stake={"agresivo"},
+            modos_informe={"comparador"},
+            perfil_label=lambda value: value or "agresivo",
+            modo_label=lambda value: value or "comparador",
+            simulation_mode="historical",
+            historical_snapshot_at="2026-08-01T10:00:00Z",
+            historical_range_from="2026-08-02T00:00:00Z",
+            historical_range_to="2026-08-03T23:59:59Z",
+        )
+
+        self.assertEqual(len(result["publishable_preview"]), 1)
+        self.assertEqual(result["publishable_preview"][0]["event_id"], "evt_in")
+        self.assertEqual(result["simulation_context"]["range_from"], "2026-08-02T00:00:00Z")
+        self.assertEqual(result["simulation_context"]["range_to"], "2026-08-03T23:59:59Z")
+
     def test_build_lab_run_historico_autoevalua_publicables(self):
         result = build_lab_run(
             runtime_settings=RuntimeSettings(environment="development", shadow_mode=False),
@@ -5130,8 +5211,11 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertIn("Modo historico", html)
         self.assertIn("Snapshot: 2026-08-01T10:00:00Z", html)
+        self.assertIn("Rango: - -&gt;", html.replace("->", "-&gt;"))
         self.assertIn('name="simulation_mode"', html)
         self.assertIn('name="snapshot_at"', html)
+        self.assertIn('name="snapshot_from"', html)
+        self.assertIn('name="snapshot_to"', html)
         self.assertIn("Solo simulacion", html)
         self.assertIn("Backtest del snapshot", html)
         self.assertIn("Resultado simulado con marcador final del proveedor.", html)
@@ -5216,6 +5300,36 @@ class BettingModelTests(unittest.TestCase):
             main.build_lab_run = original_build_lab_run
 
         self.assertEqual(captured["bankroll"], None)
+        self.assertEqual(response.status_code, 200)
+
+    def test_lab_run_historico_usa_desde_como_snapshot_base(self):
+        import main
+
+        original_build_lab_run = main.build_lab_run
+        captured: dict[str, object] = {}
+
+        try:
+            def fake_build_lab_run(**kwargs):
+                captured["historical_snapshot_at"] = kwargs.get("historical_snapshot_at")
+                captured["historical_range_from"] = kwargs.get("historical_range_from")
+                captured["historical_range_to"] = kwargs.get("historical_range_to")
+                return build_empty_lab_run(
+                    runtime_settings=RuntimeSettings(environment="development", shadow_mode=True),
+                )
+
+            main.build_lab_run = fake_build_lab_run
+            response = main.lab_run(
+                execute=True,
+                simulation_mode="historical",
+                snapshot_from="2026-08-04T00:00",
+                snapshot_to="2026-08-04T23:59",
+            )
+        finally:
+            main.build_lab_run = original_build_lab_run
+
+        self.assertEqual(captured["historical_snapshot_at"], "2026-08-03T22:00:00Z")
+        self.assertEqual(captured["historical_range_from"], "2026-08-03T22:00:00Z")
+        self.assertEqual(captured["historical_range_to"], "2026-08-04T21:59:00Z")
         self.assertEqual(response.status_code, 200)
 
     def test_get_picks_for_date_usa_ventana_de_24_horas_y_no_dia_calendario(self):

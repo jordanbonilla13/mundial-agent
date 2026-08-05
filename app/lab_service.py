@@ -399,6 +399,26 @@ def _build_match_overview(
     return ordered
 
 
+def _pick_within_range(
+    pick: dict[str, Any],
+    *,
+    range_from: datetime | None,
+    range_to: datetime | None,
+) -> bool:
+    if range_from is None and range_to is None:
+        return True
+
+    commence_dt = _parse_event_datetime(pick.get("commence_time"))
+    if commence_dt is None:
+        return True
+
+    if range_from is not None and commence_dt < range_from:
+        return False
+    if range_to is not None and commence_dt > range_to:
+        return False
+    return True
+
+
 def _lab_pick_snapshot(pick: dict[str, Any]) -> dict[str, Any]:
     return {
         "event_id": pick.get("event_id"),
@@ -464,8 +484,12 @@ def build_lab_run(
     modo_label: Callable[[str | None], str],
     simulation_mode: str = "live",
     historical_snapshot_at: str | None = None,
+    historical_range_from: str | None = None,
+    historical_range_to: str | None = None,
 ) -> dict[str, Any]:
     historical_mode = str(simulation_mode or "live").strip().lower() == "historical"
+    range_from_dt = _parse_event_datetime(historical_range_from)
+    range_to_dt = _parse_event_datetime(historical_range_to)
     forecast = run_forecast(
         ForecastRequest(
             bankroll=bankroll,
@@ -514,6 +538,19 @@ def build_lab_run(
         _lab_pick_snapshot(pick)
         for pick in prediction_payload.get("pronosticos", [])
     ]
+    if historical_mode and (range_from_dt is not None or range_to_dt is not None):
+        blocked_recommended = [
+            pick for pick in blocked_recommended
+            if _pick_within_range(pick, range_from=range_from_dt, range_to=range_to_dt)
+        ]
+        blocked_discarded = [
+            pick for pick in blocked_discarded
+            if _pick_within_range(pick, range_from=range_from_dt, range_to=range_to_dt)
+        ]
+        publishable_preview = [
+            pick for pick in publishable_preview
+            if _pick_within_range(pick, range_from=range_from_dt, range_to=range_to_dt)
+        ]
     guard_reasons = list(guard.get("reasons") or [])
     would_publish_live = bool(guard.get("allow_live_publication", False)) and not runtime_settings.shadow_mode
     if historical_mode:
@@ -545,6 +582,8 @@ def build_lab_run(
             "mode": "historical" if historical_mode else "live",
             "historical_mode": historical_mode,
             "snapshot_at": forecast.get("historical_snapshot_at") or historical_snapshot_at,
+            "range_from": historical_range_from,
+            "range_to": historical_range_to,
             "market_notice": forecast.get("historical_market_notice"),
             "provider_name": forecast.get("proveedor_cuotas"),
             "snapshots_guardados": int(forecast.get("snapshots_guardados", 0) or 0),
@@ -589,6 +628,8 @@ def build_empty_lab_run(*, runtime_settings: RuntimeSettings) -> dict[str, Any]:
             "mode": "live",
             "historical_mode": False,
             "snapshot_at": None,
+            "range_from": None,
+            "range_to": None,
             "market_notice": None,
             "provider_name": None,
             "snapshots_guardados": 0,
@@ -735,6 +776,8 @@ def render_lab_run_html(
     runtime_mode = escape(str(lab.get("runtime_mode") or "shadow"))
     historical_mode = bool(simulation_context.get("historical_mode"))
     snapshot_at = escape(str(simulation_context.get("snapshot_at") or ""))
+    range_from_value = escape(str(simulation_context.get("range_from") or ""))
+    range_to_value = escape(str(simulation_context.get("range_to") or ""))
     market_notice = escape(str(simulation_context.get("market_notice") or ""))
     provider_name = escape(str(simulation_context.get("provider_name") or "the_odds_api"))
     snapshots_guardados = int(simulation_context.get("snapshots_guardados", 0) or 0)
@@ -820,6 +863,8 @@ def render_lab_run_html(
     solo_stakazos_checked = "checked" if str(query_params.get("solo_stakazos") or "false").lower() == "true" else ""
     simulation_mode_value = str(query_params.get("simulation_mode") or "live")
     snapshot_input_value = escape(str(query_params.get("snapshot_at") or ""), quote=True)
+    range_from_input_value = escape(str(query_params.get("snapshot_from") or ""), quote=True)
+    range_to_input_value = escape(str(query_params.get("snapshot_to") or ""), quote=True)
     profile_tags = _option_tags(profile_options, str(query_params.get("perfil") or "moderado"))
     mode_tags = _option_tags(mode_options, str(query_params.get("modo") or "comparador"))
     sport_tags = _option_tags(sport_options, str(query_params.get("deporte") or "todo"))
@@ -860,7 +905,7 @@ def render_lab_run_html(
         notice_html = (
             '<section class="card" style="margin-top: 18px; border-color: rgba(164,118,36,0.24);">'
             '<div class="badge badge-yellow">Fecha requerida</div>'
-            '<p class="muted">Para ejecutar el modo historico del lab tienes que indicar una fecha y hora de snapshot.</p>'
+            '<p class="muted">Para ejecutar el modo historico del lab tienes que indicar un snapshot o una fecha desde.</p>'
             '</section>'
         )
     elif not has_run:
@@ -1108,6 +1153,14 @@ def render_lab_run_html(
                         <label>Snapshot historico</label>
                         <input type="datetime-local" name="snapshot_at" value="{snapshot_input_value}">
                     </div>
+                    <div class="field" id="rangeFromField">
+                        <label>Desde</label>
+                        <input type="datetime-local" name="snapshot_from" value="{range_from_input_value}">
+                    </div>
+                    <div class="field" id="rangeToField">
+                        <label>Hasta</label>
+                        <input type="datetime-local" name="snapshot_to" value="{range_to_input_value}">
+                    </div>
                     <div class="field">
                         <label>Mercados</label>
                         <select name="mercados">{market_tags}</select>
@@ -1163,6 +1216,7 @@ def render_lab_run_html(
                         <h3>Contexto de simulacion</h3>
                         <p class="muted">Proveedor: {provider_name}</p>
                         <p class="muted">Snapshot: {snapshot_at or 'Tiempo real'}</p>
+                        <p class="muted">Rango: {range_from_value or '-'} -> {range_to_value or '-'}</p>
                         <p class="muted">{market_notice or ('El lab usa cuotas actuales y mantiene ventana operativa de proximidad.' if not historical_mode else 'Se usa snapshot historico y se limita a mercados featured compatibles.')}</p>
                     </section>
                     <section class="card">
@@ -1218,6 +1272,8 @@ def render_lab_run_html(
                 const steps = Array.from(document.querySelectorAll("#labLoadingSteps li"));
                 const simulationSelect = document.getElementById("simulation_mode");
                 const snapshotField = document.getElementById("snapshotField");
+                const rangeFromField = document.getElementById("rangeFromField");
+                const rangeToField = document.getElementById("rangeToField");
                 if (!form || !overlay || !message || steps.length === 0) {{
                     return;
                 }}
@@ -1237,10 +1293,13 @@ def render_lab_run_html(
 
                 let intervalId = null;
                 const toggleSnapshotField = () => {{
-                    if (!simulationSelect || !snapshotField) {{
+                    if (!simulationSelect || !snapshotField || !rangeFromField || !rangeToField) {{
                         return;
                     }}
-                    snapshotField.style.display = simulationSelect.value === "historical" ? "block" : "none";
+                    const historical = simulationSelect.value === "historical";
+                    snapshotField.style.display = historical ? "block" : "none";
+                    rangeFromField.style.display = historical ? "block" : "none";
+                    rangeToField.style.display = historical ? "block" : "none";
                 }};
                 toggleSnapshotField();
                 if (simulationSelect) {{

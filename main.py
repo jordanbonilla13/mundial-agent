@@ -3413,6 +3413,8 @@ def lab_run(
     solo_stakazos: bool = False,
     simulation_mode: str = "live",
     snapshot_at: str | None = None,
+    snapshot_from: str | None = None,
+    snapshot_to: str | None = None,
     format: str = "html",
     execute: bool = False,
 ):
@@ -3428,10 +3430,22 @@ def lab_run(
     historical_mode = simulation_mode == "historical"
     snapshot_at_utc = None
     snapshot_at_display = ""
+    snapshot_from_utc = None
+    snapshot_from_display = ""
+    snapshot_to_utc = None
+    snapshot_to_display = ""
     notice_code = ""
 
     if snapshot_at:
         snapshot_at_utc, snapshot_at_display = normalizar_snapshot_lab(snapshot_at)
+    if snapshot_from:
+        snapshot_from_utc, snapshot_from_display = normalizar_snapshot_lab(snapshot_from)
+    if snapshot_to:
+        snapshot_to_utc, snapshot_to_display = normalizar_snapshot_lab(snapshot_to)
+
+    if not snapshot_at_utc and snapshot_from_utc:
+        snapshot_at_utc = snapshot_from_utc
+        snapshot_at_display = snapshot_from_display
 
     if execute and historical_mode and not snapshot_at_utc:
         execute = False
@@ -3475,6 +3489,8 @@ def lab_run(
             solo_stakazos=solo_stakazos,
             simulation_mode=simulation_mode,
             historical_snapshot_at=snapshot_at_utc,
+            historical_range_from=snapshot_from_utc,
+            historical_range_to=snapshot_to_utc,
             perfiles_stake=PERFILES_STAKE,
             modos_informe=MODOS_INFORME,
             perfil_label=perfil_es,
@@ -3498,6 +3514,8 @@ def lab_run(
             "solo_stakazos": "true" if solo_stakazos else "false",
             "simulation_mode": simulation_mode,
             "snapshot_at": snapshot_at_display,
+            "snapshot_from": snapshot_from_display,
+            "snapshot_to": snapshot_to_display,
             "execute": "true" if execute else "",
             "lab_notice": notice_code,
         },
