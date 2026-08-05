@@ -19,6 +19,7 @@ from app.calibration import (
     CalibrationSnapshot,
     SegmentMetrics,
     _generate_model_adjustments,
+    build_training_dataset,
 )
 import app.calibrated_scoring as calibrated_scoring
 from app.forecasting import apply_market_regime_guard
@@ -4336,6 +4337,141 @@ class BettingModelTests(unittest.TestCase):
         self.assertGreater(adjustments["league_market_penalties"]["WNBA::totals"], 0)
         self.assertGreater(adjustments["league_market_thresholds"]["WNBA::totals"], 0)
 
+    def test_calibration_generates_sport_and_bookmaker_penalties(self):
+        bad_sport = SegmentMetrics(
+            segment_name="Baloncesto",
+            segment_type="deporte",
+            total_picks=18,
+            total_recommended=18,
+            picks_closed=18,
+            picks_won=4,
+            picks_lost=14,
+            picks_push=0,
+            total_staked=18.0,
+            total_profit=-7.0,
+            roi=-38.89,
+            hit_rate=22.22,
+            clv=-3.0,
+            clv_positive_count=3,
+            confidence_score=0.15,
+            last_pick_date="2026-07-16T12:00:00Z",
+            min_sample_warning=False,
+            trend="weak",
+            recommendation="penalizar",
+        )
+        bad_bookmaker = SegmentMetrics(
+            segment_name="BookieX",
+            segment_type="casa",
+            total_picks=16,
+            total_recommended=16,
+            picks_closed=16,
+            picks_won=5,
+            picks_lost=11,
+            picks_push=0,
+            total_staked=16.0,
+            total_profit=-4.2,
+            roi=-26.25,
+            hit_rate=31.25,
+            clv=-4.5,
+            clv_positive_count=2,
+            confidence_score=0.18,
+            last_pick_date="2026-07-16T12:00:00Z",
+            min_sample_warning=False,
+            trend="weak",
+            recommendation="penalizar",
+        )
+
+        adjustments = _generate_model_adjustments(
+            {
+                "deportes": {"Baloncesto": bad_sport},
+                "ligas": {},
+                "mercados": {},
+                "ligas_mercados": {},
+                "tiers": {},
+                "casas": {"BookieX": bad_bookmaker},
+            }
+        )
+
+        self.assertGreater(adjustments["sport_penalties"]["Baloncesto"], 0)
+        self.assertGreater(adjustments["bookmaker_penalties"]["BookieX"], 0)
+
+    def test_build_training_dataset_enlaza_snapshots_y_resultado(self):
+        recomendacion = {
+            "event_id": "train_evt_1",
+            "commence_time": "2026-07-30T20:00:00Z",
+            "sport_key": "basketball_wnba",
+            "sport_label": "Baloncesto",
+            "league_key": "wnba",
+            "league_label": "WNBA",
+            "partido": "Aces vs Liberty",
+            "equipo": "Under",
+            "equipo_raw": "Under",
+            "tipo_resultado": "totals",
+            "tipo_resultado_raw": "totals",
+            "casa": "Pinnacle",
+            "mercado": "totals",
+            "outcome_point": 166.5,
+            "cuota_apuesta": 1.95,
+            "importe_sugerido": 5.0,
+            "stake": 1.0,
+            "recomendacion": "Value",
+            "motivo": "Test",
+            "recommended_by_bot": True,
+        }
+        snapshot_event = {
+            "id": "train_evt_1",
+            "commence_time": "2026-07-30T20:00:00Z",
+            "sport_key": "basketball_wnba",
+            "sport_label": "Baloncesto",
+            "league_key": "wnba",
+            "league_label": "WNBA",
+            "home_team": "Aces",
+            "away_team": "Liberty",
+            "bookmakers": [
+                {
+                    "title": "Pinnacle",
+                    "markets": [
+                        {
+                            "key": "totals",
+                            "outcomes": [
+                                {"name": "Over", "price": 1.87, "point": 166.5},
+                                {"name": "Under", "price": 1.91, "point": 166.5},
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "title": "Bet365",
+                    "markets": [
+                        {
+                            "key": "totals",
+                            "outcomes": [
+                                {"name": "Over", "price": 1.88, "point": 166.5},
+                                {"name": "Under", "price": 1.90, "point": 166.5},
+                            ],
+                        }
+                    ],
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "tracker.sqlite3")
+            pick = guardar_recomendaciones_unicas([recomendacion], db_path=db_path)[0]
+            guardar_snapshot_cuotas([snapshot_event], db_path=db_path)
+            actualizar_resultado(pick["id"], "win", db_path=db_path)
+
+            dataset = build_training_dataset(db_path=db_path, limit=100)
+
+        self.assertEqual(len(dataset), 1)
+        self.assertEqual(dataset[0]["sport_label"], "Baloncesto")
+        self.assertEqual(dataset[0]["mercado"], "totals")
+        self.assertEqual(dataset[0]["casa"], "Pinnacle")
+        self.assertEqual(dataset[0]["resultado"], "win")
+        self.assertEqual(dataset[0]["snapshot_support_bookmakers"], 2)
+        self.assertEqual(dataset[0]["snapshot_rows"], 2)
+        self.assertAlmostEqual(float(dataset[0]["closing_odds"]), 1.91, places=2)
+
     def test_calibration_metadata_includes_league_market_adjustments(self):
         snapshot = CalibrationSnapshot(
             timestamp="2026-07-17T10:00:00Z",
@@ -4343,11 +4479,14 @@ class BettingModelTests(unittest.TestCase):
             segments_by_type={},
             model_adjustments={
                 "league_penalties": {},
+                "sport_penalties": {"Baloncesto": 0.12},
                 "market_thresholds": {"totals": 0.08},
                 "league_market_penalties": {"WNBA::totals": 0.22},
                 "league_market_thresholds": {"WNBA::totals": 0.18},
+                "bookmaker_penalties": {"Pinnacle": 0.06},
                 "tier_boosts": {},
                 "confidence_multipliers": {"model_general": 1.0},
+                "training_dataset": {"samples": 44},
             },
             alerts=[],
         )
@@ -4356,14 +4495,19 @@ class BettingModelTests(unittest.TestCase):
         with patch("app.calibrated_scoring.generate_calibration_snapshot", return_value=snapshot):
             metadata = calibrated_scoring.get_calibration_metadata(
                 {
+                    "sport_label": "Baloncesto",
                     "league_label": "WNBA",
                     "mercado": "totals",
+                    "casa": "Pinnacle",
                     "elite_tier": "premium",
                 }
             )
 
+        self.assertEqual(metadata["sport_penalty_factor"], 0.88)
         self.assertEqual(metadata["league_market_penalty_factor"], 0.78)
         self.assertEqual(metadata["league_market_threshold_adjustment"], 0.18)
+        self.assertEqual(metadata["bookmaker_penalty_factor"], 0.94)
+        self.assertEqual(metadata["training_samples"], 44)
 
     def test_publication_guard_en_shadow_mode_bloquea_publicacion_real(self):
         guard = publication_guard_state(

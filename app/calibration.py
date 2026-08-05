@@ -12,6 +12,7 @@ Este módulo es crítico para hacer el bot verdaderamente PREMIUM:
 convierte el histórico observado en inteligencia operativa.
 """
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -21,6 +22,9 @@ from tracking import (
     listar_picks,
     conectar,
     DB_PATH,
+    filtrar_registros_por_reset_deporte,
+    _raw_pick,
+    _snapshot_matches_pick,
 )
 
 
@@ -58,6 +62,146 @@ class CalibrationSnapshot:
     segments_by_type: dict[str, list[SegmentMetrics]]
     model_adjustments: dict[str, Any]
     alerts: list[str]
+
+
+@dataclass
+class TrainingSample:
+    pick_id: int
+    created_at: str
+    sport_label: str
+    league_label: str
+    market: str
+    bookmaker: str
+    outcome: str
+    result: str
+    stake: float
+    profit_loss: float
+    odds_taken: float | None
+    closing_odds: float | None
+    clv_pct: float | None
+    support_bookmakers: int
+    snapshot_rows: int
+    quality_score: int | None
+    reliability_score: int | None
+
+
+def _raw_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return json.loads(snapshot.get("raw_json") or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def build_training_dataset(
+    db_path: str = DB_PATH,
+    *,
+    limit: int = 5000,
+) -> list[dict[str, Any]]:
+    """
+    Construye dataset de entrenamiento enlazando picks cerradas con snapshots de cuotas.
+
+    La idea es que el modelo no aprenda solo del resultado final, sino tambien del
+    contexto de mercado observado alrededor de cada pick.
+    """
+    with conectar(db_path) as conn:
+        rows = conn.execute(
+            "SELECT * FROM picks WHERE estado = 'cerrada' ORDER BY id DESC LIMIT ?",
+            (max(1, min(limit, 20000)),),
+        ).fetchall()
+
+    closed_picks = filtrar_registros_por_reset_deporte(
+        [dict(row) for row in rows],
+        db_path=db_path,
+        sport_getter=lambda pick: _raw_pick(pick).get("sport_label") or pick.get("sport_label"),
+    )
+    if not closed_picks:
+        return []
+
+    event_ids = sorted({
+        str(pick.get("event_id") or "").strip()
+        for pick in closed_picks
+        if str(pick.get("event_id") or "").strip()
+    })
+    snapshots_by_event: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    if event_ids:
+        placeholders = ",".join("?" for _ in event_ids)
+        with conectar(db_path) as conn:
+            snapshot_rows = conn.execute(
+                f"SELECT * FROM odds_snapshots WHERE event_id IN ({placeholders}) ORDER BY created_at ASC, id ASC",
+                tuple(event_ids),
+            ).fetchall()
+        for row in snapshot_rows:
+            snapshot = dict(row)
+            snapshots_by_event[str(snapshot.get("event_id") or "")].append(snapshot)
+
+    dataset: list[dict[str, Any]] = []
+
+    for pick in closed_picks:
+        raw = _raw_pick(pick)
+        event_id = str(pick.get("event_id") or "").strip()
+        matching_snapshots = [
+            snapshot
+            for snapshot in snapshots_by_event.get(event_id, [])
+            if _snapshot_matches_pick(snapshot, pick)
+        ]
+
+        latest_snapshot_price = None
+        support_bookmakers = 0
+        if matching_snapshots:
+            latest_snapshot = matching_snapshots[-1]
+            try:
+                latest_snapshot_price = float(latest_snapshot.get("price"))
+            except (TypeError, ValueError):
+                latest_snapshot_price = None
+            support_bookmakers = len({
+                str(item.get("bookmaker") or "").strip().lower()
+                for item in matching_snapshots
+                if str(item.get("bookmaker") or "").strip()
+            })
+
+        odds_taken = pick.get("cuota")
+        closing_odds = pick.get("closing_odds", latest_snapshot_price)
+        try:
+            odds_taken_f = float(odds_taken) if odds_taken is not None else None
+        except (TypeError, ValueError):
+            odds_taken_f = None
+        try:
+            closing_odds_f = float(closing_odds) if closing_odds is not None else None
+        except (TypeError, ValueError):
+            closing_odds_f = None
+
+        clv_pct = None
+        if odds_taken_f and closing_odds_f and closing_odds_f > 0:
+            clv_pct = round(((odds_taken_f / closing_odds_f) - 1) * 100, 2)
+
+        dataset.append(
+            {
+                "id": int(pick.get("id") or 0),
+                "pick_id": int(pick.get("id") or 0),
+                "created_at": pick.get("created_at"),
+                "estado": "cerrada",
+                "resultado": pick.get("resultado"),
+                "importe_sugerido": float(pick.get("importe_sugerido") or 0),
+                "profit_loss": float(pick.get("profit_loss") or 0),
+                "cuota": odds_taken_f,
+                "closing_odds": closing_odds_f,
+                "clv_pct": clv_pct,
+                "sport_label": raw.get("sport_label") or pick.get("sport_label") or "Unknown",
+                "league_label": raw.get("league_label") or pick.get("league_label") or "Unknown",
+                "mercado": raw.get("mercado") or pick.get("mercado") or "Unknown",
+                "casa": raw.get("casa") or pick.get("casa") or "Unknown",
+                "equipo": raw.get("equipo") or pick.get("equipo") or "",
+                "quality_score": raw.get("quality_score", pick.get("quality_score")),
+                "reliability_score": raw.get("reliability_score"),
+                "recommended_by_bot": raw.get("recommended_by_bot", pick.get("recommended_by_bot", 1)),
+                "snapshot_support_bookmakers": support_bookmakers,
+                "snapshot_rows": len(matching_snapshots),
+                "snapshot_latest_price": latest_snapshot_price,
+            }
+        )
+
+    return dataset
 
 
 def calculate_segment_metrics(
@@ -189,7 +333,7 @@ def calculate_segment_metrics(
 
 def analyze_by_league(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     """Analiza rendimiento por liga."""
-    picks = listar_picks(limit=10000, db_path=db_path)
+    picks = build_training_dataset(db_path=db_path)
     
     picks_by_league: dict[str, list[dict]] = defaultdict(list)
     for pick in picks:
@@ -209,7 +353,7 @@ def analyze_by_league(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
 
 def analyze_by_market(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     """Analiza rendimiento por mercado."""
-    picks = listar_picks(limit=10000, db_path=db_path)
+    picks = build_training_dataset(db_path=db_path)
     
     picks_by_market: dict[str, list[dict]] = defaultdict(list)
     for pick in picks:
@@ -233,7 +377,7 @@ def _build_league_market_key(league: str, market: str) -> str:
 
 def analyze_by_league_market(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     """Analiza rendimiento por combinacion liga + mercado."""
-    picks = listar_picks(limit=10000, db_path=db_path)
+    picks = build_training_dataset(db_path=db_path)
 
     picks_by_combo: dict[str, list[dict]] = defaultdict(list)
     for pick in picks:
@@ -255,7 +399,7 @@ def analyze_by_league_market(db_path: str = DB_PATH) -> dict[str, SegmentMetrics
 
 def analyze_by_tier(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     """Analiza rendimiento por tier (elite, premium, standard)."""
-    picks = listar_picks(limit=10000, db_path=db_path)
+    picks = listar_picks(limit=500, db_path=db_path)
     
     picks_by_tier: dict[str, list[dict]] = defaultdict(list)
     for pick in picks:
@@ -275,7 +419,7 @@ def analyze_by_tier(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
 
 def analyze_by_bookmaker(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     """Analiza rendimiento por casa de apuestas."""
-    picks = listar_picks(limit=10000, db_path=db_path)
+    picks = build_training_dataset(db_path=db_path)
     
     picks_by_bookie: dict[str, list[dict]] = defaultdict(list)
     for pick in picks:
@@ -293,6 +437,26 @@ def analyze_by_bookmaker(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     return metrics
 
 
+def analyze_by_sport(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
+    """Analiza rendimiento por deporte."""
+    picks = build_training_dataset(db_path=db_path)
+
+    picks_by_sport: dict[str, list[dict]] = defaultdict(list)
+    for pick in picks:
+        sport = pick.get("sport_label") or "Unknown"
+        picks_by_sport[sport].append(pick)
+
+    metrics = {}
+    for sport, sport_picks in picks_by_sport.items():
+        metrics[sport] = calculate_segment_metrics(
+            segment_name=sport,
+            segment_type="deporte",
+            picks=sport_picks,
+        )
+
+    return metrics
+
+
 def generate_calibration_snapshot(db_path: str = DB_PATH) -> CalibrationSnapshot:
     """
     Genera un snapshot completo de calibración del modelo.
@@ -303,11 +467,11 @@ def generate_calibration_snapshot(db_path: str = DB_PATH) -> CalibrationSnapshot
     - Genera alertas y recomendaciones
     """
     
-    picks = listar_picks(limit=10000, db_path=db_path)
-    evaluations = listar_evaluaciones_picks(limit=10000, db_path=db_path)
-    total_evaluated = len(evaluations)
+    dataset = build_training_dataset(db_path=db_path)
+    total_evaluated = len(dataset)
     
     segments_by_type = {
+        "deportes": analyze_by_sport(db_path),
         "ligas": analyze_by_league(db_path),
         "mercados": analyze_by_market(db_path),
         "ligas_mercados": analyze_by_league_market(db_path),
@@ -319,6 +483,13 @@ def generate_calibration_snapshot(db_path: str = DB_PATH) -> CalibrationSnapshot
     alerts = []
     
     # Alerta de underperformance por liga
+    for sport, metrics in segments_by_type["deportes"].items():
+        if not metrics.min_sample_warning and metrics.roi < -5:
+            alerts.append(
+                f"Deporte en riesgo: {sport} con ROI {metrics.roi}% y hit_rate {metrics.hit_rate}%. "
+                f"Reducir exposicion hasta recalibrar."
+            )
+
     for league, metrics in segments_by_type["ligas"].items():
         if not metrics.min_sample_warning and metrics.roi < -5:
             alerts.append(
@@ -376,13 +547,30 @@ def _generate_model_adjustments(segments_by_type: dict[str, dict[str, SegmentMet
     """
     
     adjustments = {
+        "sport_penalties": {},
         "league_penalties": {},
         "market_thresholds": {},
         "league_market_penalties": {},
         "league_market_thresholds": {},
+        "bookmaker_penalties": {},
         "tier_boosts": {},
         "confidence_multipliers": {},
+        "training_dataset": {
+            "samples": sum(metric.picks_closed for metric in segments_by_type.get("deportes", {}).values()),
+            "sports": len(segments_by_type.get("deportes", {})),
+            "markets": len(segments_by_type.get("mercados", {})),
+            "bookmakers": len(segments_by_type.get("casas", {})),
+        },
     }
+
+    for sport, metrics in segments_by_type.get("deportes", {}).items():
+        if metrics.min_sample_warning:
+            continue
+        if metrics.roi < -6 or metrics.hit_rate < 44:
+            penalty = min(0.45, max(abs(metrics.roi) / 25, (48 - metrics.hit_rate) / 30))
+            adjustments["sport_penalties"][sport] = round(penalty, 3)
+        elif metrics.roi > 7 and metrics.hit_rate > 56:
+            adjustments["sport_penalties"][sport] = 0.0
     
     # Analizar ligas
     for league, metrics in segments_by_type["ligas"].items():
@@ -407,6 +595,19 @@ def _generate_model_adjustments(segments_by_type: dict[str, dict[str, SegmentMet
                 # Reducir threshold, es confiable
                 threshold_reduction = -0.05
                 adjustments["market_thresholds"][market] = round(threshold_reduction, 3)
+
+    for bookmaker, metrics in segments_by_type.get("casas", {}).items():
+        if metrics.min_sample_warning:
+            continue
+        penalty = 0.0
+        if metrics.roi < -6:
+            penalty = max(penalty, min(0.28, abs(metrics.roi) / 35))
+        if metrics.hit_rate < 45:
+            penalty = max(penalty, min(0.22, (50 - metrics.hit_rate) / 35))
+        if metrics.clv is not None and metrics.clv < -2.5:
+            penalty = max(penalty, min(0.18, abs(metrics.clv) / 25))
+        if penalty > 0:
+            adjustments["bookmaker_penalties"][bookmaker] = round(penalty, 3)
 
     # Analizar combinaciones liga + mercado
     for combo, metrics in segments_by_type.get("ligas_mercados", {}).items():
@@ -469,6 +670,15 @@ def get_penalty_factor_for_league(
     return 1.0 - penalty
 
 
+def get_penalty_factor_for_sport(
+    sport: str,
+    calibration: CalibrationSnapshot,
+) -> float:
+    penalties = calibration.model_adjustments.get("sport_penalties", {})
+    penalty = penalties.get(sport, 0)
+    return 1.0 - penalty
+
+
 def get_market_threshold_adjustment(
     market: str,
     calibration: CalibrationSnapshot,
@@ -495,6 +705,15 @@ def get_penalty_factor_for_league_market(
     penalties = calibration.model_adjustments.get("league_market_penalties", {})
     combo_key = _build_league_market_key(league, market)
     penalty = penalties.get(combo_key, 0)
+    return 1.0 - penalty
+
+
+def get_penalty_factor_for_bookmaker(
+    bookmaker: str,
+    calibration: CalibrationSnapshot,
+) -> float:
+    penalties = calibration.model_adjustments.get("bookmaker_penalties", {})
+    penalty = penalties.get(bookmaker, 0)
     return 1.0 - penalty
 
 

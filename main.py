@@ -2305,7 +2305,13 @@ def normalizar_snapshot_lab(value: str | None) -> tuple[str | None, str | None]:
 
 
 @app.get("/cuotas")
-def cuotas(mercados: str = "h2h,totals", deporte: str | None = None, historical_date: str | None = None):
+def cuotas(
+    mercados: str = "h2h,totals",
+    deporte: str | None = None,
+    historical_date: str | None = None,
+    historical_from: str | None = None,
+    historical_to: str | None = None,
+):
     mercados_lista = [m.strip() for m in mercados.split(",") if m.strip()]
     contexto = resolver_contexto_deporte(deporte)
 
@@ -2316,7 +2322,16 @@ def cuotas(mercados: str = "h2h,totals", deporte: str | None = None, historical_
                 detail="El modo historico del lab solo esta disponible con The Odds API como proveedor principal.",
             )
         mercados_historicos = [m for m in mercados_lista if m in FEATURED_MARKETS] or ["h2h"]
-        return provider_layer.fetch_the_odds_historical_odds(mercados_historicos, contexto, historical_date)
+        try:
+            return provider_layer.fetch_the_odds_historical_odds(
+                mercados_historicos,
+                contexto,
+                historical_date,
+                commence_time_from=historical_from,
+                commence_time_to=historical_to,
+            )
+        except TypeError:
+            return provider_layer.fetch_the_odds_historical_odds(mercados_historicos, contexto, historical_date)
 
     if ODDS_PROVIDER in {"sportsgameodds", "sports_game_odds", "sgo"}:
         return sports_layer.enriquecer_eventos_contexto(
@@ -2858,6 +2873,8 @@ def apuestas_hoy(
     solo_stakazos: bool = False,
     historical_mode: bool = False,
     historical_date: str | None = None,
+    historical_from: str | None = None,
+    historical_to: str | None = None,
 ):
     deps = ForecastDependencies(
         provider_name=ODDS_PROVIDER,
@@ -2923,6 +2940,8 @@ def apuestas_hoy(
             solo_stakazos=nested_request.solo_stakazos,
             historical_mode=nested_request.historical_mode,
             historical_date=nested_request.historical_date,
+            historical_from=nested_request.historical_from,
+            historical_to=nested_request.historical_to,
         ),
     )
     return run_forecast_request(
@@ -2938,6 +2957,8 @@ def apuestas_hoy(
             solo_stakazos=solo_stakazos,
             historical_mode=historical_mode,
             historical_date=historical_date,
+            historical_from=historical_from,
+            historical_to=historical_to,
         ),
         deps,
     )
@@ -3471,6 +3492,8 @@ def lab_run(
                 solo_stakazos=request.solo_stakazos,
                 historical_mode=request.historical_mode,
                 historical_date=request.historical_date,
+                historical_from=request.historical_from,
+                historical_to=request.historical_to,
             ),
             build_prediction_payload=build_prediction_payload,
             ai_available=openai_available,
@@ -3480,6 +3503,8 @@ def lab_run(
             format_pick_message=formatear_mensaje_telegram_pick,
             format_summary_message=format_summary_message,
             fetch_scores=scores,
+            load_learning_summary=aprendizaje,
+            load_calibration_snapshot=generate_calibration_snapshot,
             perfil=perfil,
             modo=modo,
             mercados=mercados,

@@ -16,6 +16,8 @@ class ForecastRequest:
     solo_stakazos: bool = False
     historical_mode: bool = False
     historical_date: str | None = None
+    historical_from: str | None = None
+    historical_to: str | None = None
 
 
 HISTORICAL_FEATURED_MARKETS = {"h2h", "spreads", "totals"}
@@ -182,6 +184,8 @@ class ForecastEngine:
                 solo_stakazos=request.solo_stakazos,
                 historical_mode=request.historical_mode,
                 historical_date=request.historical_date,
+                historical_from=request.historical_from,
+                historical_to=request.historical_to,
             )
             try:
                 if self.run_single_request is not None:
@@ -268,6 +272,8 @@ class ForecastEngine:
             "simulation_mode": "historical" if request.historical_mode else "live",
             "historical_mode": request.historical_mode,
             "historical_snapshot_at": request.historical_date,
+            "historical_range_from": request.historical_from,
+            "historical_range_to": request.historical_to,
             "source_strength": "mixed",
             "mercados": request.mercados,
             "filtro_mercados": request.mercados,
@@ -336,6 +342,8 @@ class ForecastEngine:
             "simulation_mode": "historical" if request.historical_mode else "live",
             "historical_mode": request.historical_mode,
             "historical_snapshot_at": request.historical_date,
+            "historical_range_from": request.historical_from,
+            "historical_range_to": request.historical_to,
             "historical_market_notice": historical_market_notice,
             "stake_maximo_por_pick": self.stake_limit_text(perfil),
         }
@@ -364,6 +372,8 @@ class ForecastEngine:
                 mercados=mercados,
                 deporte=deporte,
                 historical_date=request.historical_date if request.historical_mode else None,
+                historical_from=request.historical_from if request.historical_mode else None,
+                historical_to=request.historical_to if request.historical_mode else None,
             )
         except TypeError:
             data_completa = self.fetch_odds(mercados=mercados, deporte=deporte)

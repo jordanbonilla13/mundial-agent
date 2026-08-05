@@ -945,6 +945,9 @@ def fetch_the_odds_historical_odds(
     mercados_lista: list[str],
     contexto: dict,
     snapshot_date: str,
+    *,
+    commence_time_from: str | None = None,
+    commence_time_to: str | None = None,
 ) -> list[dict]:
     if not ODDS_API_KEY:
         raise HTTPException(
@@ -957,6 +960,10 @@ def fetch_the_odds_historical_odds(
     url = f"https://api.the-odds-api.com/v4/historical/sports/{sport_key}/odds"
     params = build_the_odds_query_params(contexto, mercados_base)
     params["date"] = snapshot_date
+    if commence_time_from:
+        params["commenceTimeFrom"] = commence_time_from
+    if commence_time_to:
+        params["commenceTimeTo"] = commence_time_to
 
     try:
         response = requests.get(url, params=params, timeout=20)

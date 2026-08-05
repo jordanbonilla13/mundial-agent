@@ -221,9 +221,11 @@ def _simulate_historical_lab(
                 events_by_id[event_id] = event
 
     now = datetime.now(UTC)
+    score_window_floor = now.replace(microsecond=0)
     won = lost = push = closed = 0
     staked = profit = 0.0
     coverage_missing = 0
+    oldest_missing_event: datetime | None = None
 
     for pick in picks:
         pick["historical_result"] = None
@@ -240,6 +242,8 @@ def _simulate_historical_lab(
         event = events_by_id.get(str(pick.get("event_id") or "").strip())
         if not event:
             coverage_missing += 1
+            if event_dt is not None and (oldest_missing_event is None or event_dt < oldest_missing_event):
+                oldest_missing_event = event_dt
             pick["historical_status_detail"] = "No he encontrado marcador final en la ventana reciente del proveedor."
             continue
 
@@ -271,10 +275,16 @@ def _simulate_historical_lab(
     pending = evaluated - closed
     coverage_note = None
     if coverage_missing:
-        coverage_note = (
-            f"{coverage_missing} pick(s) siguen sin marcador recuperable en esta simulacion. "
-            "The Odds API scores solo cubre ventana reciente."
-        )
+        if oldest_missing_event is not None and (now - oldest_missing_event).total_seconds() > 3 * 86400:
+            coverage_note = (
+                f"{coverage_missing} pick(s) siguen sin marcador recuperable. "
+                "The Odds API solo devuelve scores de partidos completados hasta 3 dias atras."
+            )
+        else:
+            coverage_note = (
+                f"{coverage_missing} pick(s) siguen sin marcador recuperable en esta simulacion. "
+                "The Odds API scores solo cubre ventana reciente."
+            )
 
     return {
         "enabled": True,
@@ -470,7 +480,9 @@ def build_lab_run(
     build_ai_summary: Callable[..., str | None],
     format_pick_message: Callable[[dict[str, Any]], str],
     format_summary_message: Callable[..., str],
-    fetch_scores: Callable[[int, str | None], list[dict[str, Any]]] | None,
+    fetch_scores: Callable[[int, str | None], list[dict[str, Any]]] | None = None,
+    load_learning_summary: Callable[[], dict[str, Any]] | None = None,
+    load_calibration_snapshot: Callable[[], Any] | None = None,
     perfil: str,
     modo: str,
     mercados: str,
@@ -573,6 +585,47 @@ def build_lab_run(
         picks=publishable_preview,
         fetch_scores=fetch_scores if historical_mode else None,
     )
+    learning_summary = {}
+    if load_learning_summary is not None:
+        try:
+            learning_summary = dict(load_learning_summary() or {})
+        except Exception:
+            learning_summary = {}
+
+    calibration_snapshot = None
+    if load_calibration_snapshot is not None:
+        try:
+            calibration_snapshot = load_calibration_snapshot()
+        except Exception:
+            calibration_snapshot = None
+
+    learning_panel = {
+        "training_samples": int(learning_summary.get("training_samples", 0) or 0),
+        "snapshots_guardados": int(learning_summary.get("snapshots_guardados", 0) or 0),
+        "picks_evaluadas": int(learning_summary.get("picks_evaluadas", 0) or 0),
+        "clv_positivo_pct": float(learning_summary.get("porcentaje_clv_positivo", 0) or 0),
+        "lectura": str(learning_summary.get("lectura") or ""),
+        "sport_penalties": [],
+        "market_thresholds": [],
+        "bookmaker_penalties": [],
+    }
+    if calibration_snapshot is not None:
+        adjustments = getattr(calibration_snapshot, "model_adjustments", {}) or {}
+        learning_panel["sport_penalties"] = sorted(
+            list((adjustments.get("sport_penalties") or {}).items()),
+            key=lambda item: float(item[1] or 0),
+            reverse=True,
+        )[:5]
+        learning_panel["market_thresholds"] = sorted(
+            list((adjustments.get("market_thresholds") or {}).items()),
+            key=lambda item: abs(float(item[1] or 0)),
+            reverse=True,
+        )[:5]
+        learning_panel["bookmaker_penalties"] = sorted(
+            list((adjustments.get("bookmaker_penalties") or {}).items()),
+            key=lambda item: float(item[1] or 0),
+            reverse=True,
+        )[:5]
     return {
         "runtime_mode": runtime_settings.publication_mode,
         "publication_guard": guard,
@@ -588,6 +641,7 @@ def build_lab_run(
             "provider_name": forecast.get("proveedor_cuotas"),
             "snapshots_guardados": int(forecast.get("snapshots_guardados", 0) or 0),
         },
+        "learning_panel": learning_panel,
         "historical_evaluation": historical_evaluation,
         "forecast_summary": {
             "sport_label": forecast.get("sport_label"),
@@ -657,6 +711,16 @@ def build_empty_lab_run(*, runtime_settings: RuntimeSettings) -> dict[str, Any]:
             "roi": 0.0,
             "hit_rate": 0.0,
             "coverage_note": None,
+        },
+        "learning_panel": {
+            "training_samples": 0,
+            "snapshots_guardados": 0,
+            "picks_evaluadas": 0,
+            "clv_positivo_pct": 0.0,
+            "lectura": "",
+            "sport_penalties": [],
+            "market_thresholds": [],
+            "bookmaker_penalties": [],
         },
         "publishable_preview": [],
         "blocked_picks": {
@@ -769,6 +833,7 @@ def render_lab_run_html(
     publishable_preview = lab.get("publishable_preview") or []
     blocked_picks = lab.get("blocked_picks") or {}
     historical_evaluation = lab.get("historical_evaluation") or {}
+    learning_panel = lab.get("learning_panel") or {}
     blocked_recommended = blocked_picks.get("recommended") or []
     blocked_discarded = blocked_picks.get("discarded") or []
     match_overview = lab.get("match_overview") or []
@@ -859,6 +924,18 @@ def render_lab_run_html(
                 {coverage_html}
             </section>
         """
+    sport_penalty_lines = "".join(
+        f"<li>{escape(str(name))}: penalizacion {float(value):.2f}</li>"
+        for name, value in (learning_panel.get("sport_penalties") or [])
+    ) or "<li>Sin penalizaciones de deporte destacadas.</li>"
+    market_adjustment_lines = "".join(
+        f"<li>{escape(str(name))}: ajuste {float(value):+.2f}</li>"
+        for name, value in (learning_panel.get("market_thresholds") or [])
+    ) or "<li>Sin ajustes de mercado destacados.</li>"
+    bookmaker_penalty_lines = "".join(
+        f"<li>{escape(str(name))}: penalizacion {float(value):.2f}</li>"
+        for name, value in (learning_panel.get("bookmaker_penalties") or [])
+    ) or "<li>Sin penalizaciones de casa destacadas.</li>"
     bankroll_value = "" if query_params.get("bankroll") in (None, "") else escape(str(query_params.get("bankroll")), quote=True)
     solo_stakazos_checked = "checked" if str(query_params.get("solo_stakazos") or "false").lower() == "true" else ""
     simulation_mode_value = str(query_params.get("simulation_mode") or "live")
@@ -1260,6 +1337,23 @@ def render_lab_run_html(
                     <section class="card">
                         <h3>Resumen Telegram</h3>
                         <div class="code-box">{summary_message}</div>
+                    </section>
+                    <section class="card">
+                        <div class="badge badge-yellow">Aprendizaje</div>
+                        <h3>Lo que el modelo va aprendiendo</h3>
+                        <p class="muted">{escape(str(learning_panel.get("lectura") or "Todavia sin lectura disponible."))}</p>
+                        <div class="summary">
+                            <span>Training samples: {int(learning_panel.get("training_samples", 0) or 0)}</span>
+                            <span>Evaluadas: {int(learning_panel.get("picks_evaluadas", 0) or 0)}</span>
+                            <span>Snapshots: {int(learning_panel.get("snapshots_guardados", 0) or 0)}</span>
+                            <span>CLV positivo: {float(learning_panel.get("clv_positivo_pct", 0) or 0):.2f}%</span>
+                        </div>
+                        <p class="muted"><strong>Deportes penalizados:</strong></p>
+                        <ul class="reasons-list">{sport_penalty_lines}</ul>
+                        <p class="muted"><strong>Mercados ajustados:</strong></p>
+                        <ul class="reasons-list">{market_adjustment_lines}</ul>
+                        <p class="muted"><strong>Casas penalizadas:</strong></p>
+                        <ul class="reasons-list">{bookmaker_penalty_lines}</ul>
                     </section>
                 </div>
             </div>

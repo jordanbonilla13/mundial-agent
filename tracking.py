@@ -2098,6 +2098,7 @@ def aprendizaje(db_path: str = DB_PATH) -> dict[str, Any]:
         "picks_pendientes": len(pendientes),
         "picks_cerrados": len(cerrados),
         "picks_evaluadas": len(evaluaciones),
+        "training_samples": len(evaluaciones),
         "picks_con_clv": len(con_clv),
         "porcentaje_clv_positivo": round((clv_positivo / len(con_clv)) * 100, 2) if con_clv else 0,
         "calibracion": resumen_calibracion_modelo(db_path=db_path),
