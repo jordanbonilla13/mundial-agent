@@ -2233,6 +2233,74 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(len([p for p in seleccionadas if p["league_label"] == "League 1"]), 2)
         self.assertNotIn("G vs H", [p["partido"] for p in seleccionadas])
 
+    def test_limitar_picks_todo_prefiere_eventos_cercanos_si_mantienen_calidad(self):
+        import main
+
+        picks = [
+            {
+                "partido": "Lejano premium",
+                "league_label": "League 1",
+                "sport_label": "Tenis",
+                "elite_tier": "elite",
+                "reliability_score": 80,
+                "quality_score": 82,
+                "puntuacion_confianza": 78,
+                "valor_esperado": 0.045,
+                "margen_cuota": 1.04,
+                "commence_time": "2026-08-08T20:00:00Z",
+            },
+            {
+                "partido": "Cercano fiable",
+                "league_label": "League 2",
+                "sport_label": "Futbol",
+                "elite_tier": "elite",
+                "reliability_score": 79,
+                "quality_score": 78,
+                "puntuacion_confianza": 76,
+                "valor_esperado": 0.042,
+                "margen_cuota": 1.04,
+                "commence_time": "2026-08-06T13:00:00Z",
+            },
+        ]
+
+        seleccionadas = main.limitar_picks_todo(picks, max_total=1)
+
+        self.assertEqual(seleccionadas[0]["partido"], "Cercano fiable")
+
+    def test_limitar_picks_todo_hace_fallback_si_lo_cercano_no_llega_al_minimo(self):
+        import main
+
+        picks = [
+            {
+                "partido": "Cercano flojo",
+                "league_label": "League 1",
+                "sport_label": "Baloncesto",
+                "elite_tier": "seguimiento",
+                "reliability_score": 44,
+                "quality_score": 46,
+                "puntuacion_confianza": 58,
+                "valor_esperado": 0.031,
+                "margen_cuota": 1.02,
+                "commence_time": "2026-08-06T12:30:00Z",
+            },
+            {
+                "partido": "Lejano solido",
+                "league_label": "League 2",
+                "sport_label": "Tenis",
+                "elite_tier": "elite",
+                "reliability_score": 81,
+                "quality_score": 79,
+                "puntuacion_confianza": 75,
+                "valor_esperado": 0.04,
+                "margen_cuota": 1.04,
+                "commence_time": "2026-08-07T18:00:00Z",
+            },
+        ]
+
+        seleccionadas = main.limitar_picks_todo(picks, max_total=1)
+
+        self.assertEqual(seleccionadas[0]["partido"], "Lejano solido")
+
     def test_telegram_config_exige_token_y_chat_id(self):
         import main
 

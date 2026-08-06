@@ -1512,25 +1512,36 @@ def parse_commence_time(value: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def proximity_score_for_pick(apuesta: dict) -> int:
+def hours_until_pick(apuesta: dict) -> float | None:
     commence = parse_commence_time(apuesta.get("commence_time"))
     if commence is None:
-        return -9999
+        return None
+    return (commence - datetime.now(timezone.utc)).total_seconds() / 3600
 
-    delta_hours = (commence - datetime.now(timezone.utc)).total_seconds() / 3600
+
+def proximity_score_for_pick(apuesta: dict) -> int:
+    delta_hours = hours_until_pick(apuesta)
+    if delta_hours is None:
+        return -9999
 
     if delta_hours < -3:
         return -500
-    if delta_hours <= 2:
-        return 40
+    if delta_hours <= 1:
+        return 56
+    if delta_hours <= 3:
+        return 48
     if delta_hours <= 6:
-        return 32
+        return 38
     if delta_hours <= 12:
-        return 24
+        return 28
+    if delta_hours <= 18:
+        return 20
     if delta_hours <= 24:
-        return 18
+        return 12
+    if delta_hours <= 36:
+        return 5
     if delta_hours <= 48:
-        return 10
+        return 1
     return 0
 
 
@@ -1553,22 +1564,40 @@ def limitar_picks_todo(recomendadas: list[dict], max_total: int = 6, operating_m
     seleccionadas: list[dict] = []
     por_liga: dict[str, int] = {}
     por_deporte: dict[str, int] = {}
+    ordered = sorted(recomendadas, key=prioridad_pick_todo, reverse=True)
 
-    for apuesta in sorted(recomendadas, key=prioridad_pick_todo, reverse=True):
-        if len(seleccionadas) >= max_total:
-            break
-
+    def try_append(apuesta: dict) -> bool:
         liga = str(apuesta.get("league_label") or "General")
         deporte = str(apuesta.get("sport_label") or "General")
-
         if por_liga.get(liga, 0) >= limits["max_per_league"]:
-            continue
+            return False
         if por_deporte.get(deporte, 0) >= limits["max_per_sport"]:
-            continue
-
+            return False
         seleccionadas.append(apuesta)
         por_liga[liga] = por_liga.get(liga, 0) + 1
         por_deporte[deporte] = por_deporte.get(deporte, 0) + 1
+        return True
+
+    # Primera pasada: prioriza picks cercanas si mantienen nivel minimo de calidad.
+    for apuesta in ordered:
+        if len(seleccionadas) >= max_total:
+            break
+        delta_hours = hours_until_pick(apuesta)
+        if delta_hours is None or delta_hours < -3 or delta_hours > 18:
+            continue
+        if int(apuesta.get("reliability_score") or 0) < 55:
+            continue
+        if int(apuesta.get("quality_score") or 0) < 50:
+            continue
+        try_append(apuesta)
+
+    # Segunda pasada: completa con el resto del ranking sin perder picks validas.
+    for apuesta in ordered:
+        if len(seleccionadas) >= max_total:
+            break
+        if apuesta in seleccionadas:
+            continue
+        try_append(apuesta)
 
     return seleccionadas
 
