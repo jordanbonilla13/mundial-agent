@@ -69,6 +69,71 @@ def diversified_telegram_picks(
     return selected[:max_items]
 
 
+def _promotable_discard_reason(reason: str) -> bool:
+    normalized = str(reason or "").strip().lower()
+    return any(
+        token in normalized
+        for token in (
+            "filtro de valor y margen superado",
+            "value positivo con exposicion controlada",
+            "value pequeño aceptado con riesgo mínimo",
+            "value pequeno aceptado con stake minimo",
+            "value controlado",
+            "value interesante",
+            "value moderado",
+            "value ligero",
+        )
+    )
+
+
+def _build_operational_fallback_picks(
+    data: dict[str, Any],
+    *,
+    bankroll: float | None,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    fallback: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    bankroll_value = float(bankroll or 200.0)
+
+    for pick in data.get("descartadas", []):
+        if len(fallback) >= max_items:
+            break
+        if bool(pick.get("risk_guard_blocked")) or bool(pick.get("performance_guard_blocked")) or bool(pick.get("market_guard_blocked")):
+            continue
+        if str(pick.get("recomendacion") or "").strip().lower() == "no apostar" and not _promotable_discard_reason(
+            str(pick.get("motivo_es") or pick.get("motivo") or "")
+        ):
+            continue
+        if float(pick.get("quality_score") or 0) < 58:
+            continue
+        if float(pick.get("reliability_score") or 0) < 60:
+            continue
+
+        promoted = dict(pick)
+        reason = str(promoted.get("motivo") or promoted.get("motivo_es") or "").strip()
+        promoted["stake"] = max(0.75, min(1.25, float(promoted.get("stake") or 0) or 0.75))
+        promoted["stake_pct_bankroll"] = round(max(0.0125, min(0.02, promoted["stake"] / 100.0)), 4)
+        promoted["importe_sugerido"] = round(
+            max(2.5, min(4.0, bankroll_value * promoted["stake_pct_bankroll"])),
+            2,
+        )
+        promoted["kelly_fraccional"] = max(0.001, float(promoted.get("kelly_fraccional") or 0) or 0.001)
+        promoted["recomendacion"] = "Value controlado"
+        promoted["motivo"] = (
+            f"{reason} | Rescatada por fallback operativo del canal."
+            if reason
+            else "Rescatada por fallback operativo del canal."
+        )
+        key = fingerprint_pick(promoted)
+        if key in seen:
+            continue
+        fallback.append(promoted)
+        seen.add(key)
+
+    return fallback
+
+
 def select_picks_for_telegram(
     data: dict[str, Any],
     *,
@@ -137,6 +202,7 @@ def _build_zero_picks_diagnostics(
         "partidos_disponibles": len(list(data.get("partidos_disponibles") or [])),
         "coverage_notice": str(data.get("aviso_cobertura") or "").strip(),
         "base_criteria": str(data.get("criterio") or "").strip(),
+        "blocked_summary": dict(data.get("blocked_summary") or {}),
     }
 
 
@@ -171,6 +237,7 @@ def publish_telegram_predictions(
     publication_type: str,
 ) -> dict[str, Any]:
     guard = publication_guard()
+    fallback_max_items = 5 if not solo_stakazos else 3
     data = pronosticos_fn(
         bankroll=bankroll,
         perfil=perfil,
@@ -194,12 +261,27 @@ def publish_telegram_predictions(
         )
         fallback_a_elite = True
 
+    picks_publicables = list(data.get("pronosticos", []))
+    operational_fallback_used = False
+    if not picks_publicables and not solo_stakazos:
+        fallback_candidates = _build_operational_fallback_picks(
+            data,
+            bankroll=bankroll,
+            max_items=fallback_max_items,
+        )
+        if fallback_candidates:
+            picks_publicables = fallback_candidates
+            operational_fallback_used = True
+            data = {
+                **data,
+                "pronosticos": fallback_candidates,
+            }
+
     zero_picks_diagnostics = _build_zero_picks_diagnostics(
         data,
         guard=guard,
         shadow_mode=runtime_settings.shadow_mode,
     )
-    picks_publicables = list(data.get("pronosticos", []))
     picks_guardados = save_unique_recommendations(picks_publicables)
     picks_por_fingerprint = {
         fingerprint_pick(item): item
@@ -231,7 +313,7 @@ def publish_telegram_predictions(
         modo_label=modo_label(modo if modo in modos_informe else "comparador"),
         total_elite=int(data.get("total_elite", 0) or 0),
         total_stakazos=int(data.get("total_stakazos", 0) or 0),
-        total_messages=len(data.get("pronosticos", [])),
+        total_messages=len(picks_publicables),
         solo_stakazos=solo_stakazos,
         fallback_a_elite=fallback_a_elite,
         ai_summary=ai_summary,
@@ -279,6 +361,7 @@ def publish_telegram_predictions(
             "publication_guard": guard,
             "shadow_messages": messages,
             "zero_picks_diagnostics": zero_picks_diagnostics,
+            "operational_fallback_used": operational_fallback_used,
         }
 
     for index, text in enumerate(messages):
@@ -331,4 +414,5 @@ def publish_telegram_predictions(
         "runtime_mode": runtime_settings.publication_mode,
         "publication_guard": guard,
         "zero_picks_diagnostics": zero_picks_diagnostics,
+        "operational_fallback_used": operational_fallback_used,
     }

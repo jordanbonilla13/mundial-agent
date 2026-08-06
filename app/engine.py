@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections import Counter
 from typing import Any, Callable
 
 
@@ -477,6 +478,18 @@ class ForecastEngine:
                 self.apply_performance_guard_to_pick(r, performance_guard)
                 for r in recomendaciones
             ]
+        blocked_by_risk = [r for r in recomendaciones if bool(r.get("risk_guard_blocked"))]
+        blocked_by_performance = [r for r in recomendaciones if bool(r.get("performance_guard_blocked"))]
+        risk_block_reasons = Counter(
+            str(r.get("motivo") or "").strip()
+            for r in blocked_by_risk
+            if str(r.get("motivo") or "").strip()
+        )
+        performance_block_reasons = Counter(
+            str(r.get("performance_guard_reason") or r.get("motivo") or "").strip()
+            for r in blocked_by_performance
+            if str(r.get("performance_guard_reason") or r.get("motivo") or "").strip()
+        )
         recomendadas = sorted([r for r in recomendaciones if r["stake"] > 0], key=self.sort_key_pick, reverse=True)
         elite = sorted([r for r in recomendadas if r.get("elite_pick")], key=self.sort_key_pick, reverse=True)
         stakazos = sorted(
@@ -528,4 +541,16 @@ class ForecastEngine:
             "mejores_apuestas": recomendadas[:limite_mejores],
             "picks_elite": stakazos[:10] if request.solo_stakazos else elite[:10],
             "descartadas": descartadas[:5],
+            "blocked_summary": {
+                "risk_count": len(blocked_by_risk),
+                "performance_count": len(blocked_by_performance),
+                "risk_reasons": [
+                    {"reason": reason, "count": count}
+                    for reason, count in risk_block_reasons.most_common(3)
+                ],
+                "performance_reasons": [
+                    {"reason": reason, "count": count}
+                    for reason, count in performance_block_reasons.most_common(3)
+                ],
+            },
         }

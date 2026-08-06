@@ -2952,6 +2952,70 @@ class BettingModelTests(unittest.TestCase):
         self.assertFalse(llamadas[1]["solo_stakazos"])
         self.assertEqual(resultado["mensajes_enviados"], 2)
 
+    def test_publish_telegram_predictions_rescata_descartada_aceptable_si_no_hay_publicables(self):
+        sent = []
+        result = publish_telegram_predictions(
+            runtime_settings=RuntimeSettings(environment="production", shadow_mode=False),
+            publication_guard=lambda: {"allow_live_publication": True, "mode": "live", "reasons": []},
+            pronosticos_fn=lambda **kwargs: {
+                "sport_label": "Todo",
+                "league_label": "Todas las ligas base",
+                "deporte": "Todo",
+                "liga": "Todas las ligas base",
+                "criterio": "Agregado multi-deporte sobre deportes base soportados",
+                "pronosticos": [],
+                "descartadas": [
+                    {
+                        "event_id": "evt_fb",
+                        "partido": "A vs B",
+                        "equipo": "A",
+                        "mercado": "h2h",
+                        "tipo_resultado": "home",
+                        "casa": "Betfair",
+                        "quality_score": 71,
+                        "reliability_score": 68,
+                        "recomendacion": "No apostar",
+                        "motivo": "Filtro de valor y margen superado",
+                        "stake": 0,
+                        "importe_sugerido": 0,
+                    }
+                ],
+                "total_elite": 0,
+                "total_stakazos": 0,
+                "total_analizadas": 12,
+                "total_recomendadas": 0,
+            },
+            save_unique_recommendations=lambda picks: [{"id": 99, **picks[0]}],
+            read_raw_pick=lambda pick: pick,
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            ai_available=lambda: False,
+            format_summary=lambda **kwargs: "Resumen",
+            format_pick_message=lambda pick: f"Pick {pick['event_id']}",
+            telegram_keyboard_for_pick=lambda pick_id: {"inline_keyboard": [[{"text": "Apostada", "callback_data": f"pick:{pick_id}:bet"}]]},
+            send_message=lambda text, token=None, chat_id=None, reply_markup=None: sent.append((text, reply_markup)) or {"ok": True, "result": {"message_id": len(sent)}},
+            register_publication=lambda publication_type, payload, items: {"id": 321, "items": items},
+            perfil_label=lambda value: value or "agresivo",
+            modo_label=lambda value: value or "comparador",
+            perfiles_stake={"agresivo"},
+            modos_informe={"comparador"},
+            bankroll=200.0,
+            perfil="agresivo",
+            modo="comparador",
+            mercados="h2h,spreads,totals",
+            partido="todos",
+            deporte="todo",
+            solo_stakazos=False,
+            token="token-test",
+            chat_id="chat-test",
+            publication_type="lab",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["operational_fallback_used"])
+        self.assertEqual(result["picks_guardados"], 1)
+        self.assertEqual(len(sent), 2)
+
     def test_pronosticos_completa_con_mejores_si_hay_pocas_elite(self):
         import main
 
@@ -3941,6 +4005,16 @@ class BettingModelTests(unittest.TestCase):
                         {"reason": "Bloqueado por guard de mercado", "count": 3},
                         {"reason": "Valor insuficiente", "count": 2},
                     ],
+                    "blocked_summary": {
+                        "risk_count": 7,
+                        "performance_count": 3,
+                        "risk_reasons": [
+                            {"reason": "Modo cautela: solo se permiten picks elite hasta mejorar el rendimiento.", "count": 4},
+                        ],
+                        "performance_reasons": [
+                            {"reason": "Deporte bloqueado por rendimiento historico: Futbol", "count": 3},
+                        ],
+                    },
                 },
             }
             main.threading.Thread = ImmediateThread
@@ -3964,6 +4038,9 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Snapshots: <b>144</b>", sent_messages[0])
         self.assertIn("Bloqueado por guard de mercado x3", sent_messages[0])
         self.assertIn("Valor insuficiente x2", sent_messages[0])
+        self.assertIn("Bloqueos: risk <b>7</b> | performance <b>3</b>", sent_messages[0])
+        self.assertIn("Risk top: Modo cautela: solo se permiten picks elite hasta mejorar el rendimiento. x4", sent_messages[0])
+        self.assertIn("Performance top: Deporte bloqueado por rendimiento historico: Futbol x3", sent_messages[0])
         self.assertIn("Consumo API: <b>66</b> creditos en <b>28</b> llamadas", sent_messages[0])
         self.assertIn("Build: <code>buildtest123</code>", sent_messages[0])
         self.assertNotIn("Guard activo:", sent_messages[0])

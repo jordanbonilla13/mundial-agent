@@ -1353,6 +1353,7 @@ def lanzar_apuestas_telegram_async() -> str:
                 discard_reasons = list(diagnostics.get("top_discard_reasons") or [])
                 coverage_notice = str(diagnostics.get("coverage_notice") or "").strip()
                 base_criteria = str(diagnostics.get("base_criteria") or "").strip()
+                blocked_summary = dict(diagnostics.get("blocked_summary") or {})
                 detail_lines = [
                     f"Analizadas: <b>{analyzed}</b>",
                     f"Recomendadas antes del corte: <b>{recommended}</b>",
@@ -1370,6 +1371,30 @@ def lanzar_apuestas_telegram_async() -> str:
                         + " | ".join(
                             f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
                             for item in discard_reasons
+                        )
+                    )
+                risk_count = int(blocked_summary.get("risk_count") or 0)
+                performance_count = int(blocked_summary.get("performance_count") or 0)
+                if risk_count or performance_count:
+                    detail_lines.append(
+                        f"Bloqueos: risk <b>{risk_count}</b> | performance <b>{performance_count}</b>"
+                    )
+                risk_reasons = list(blocked_summary.get("risk_reasons") or [])
+                if risk_reasons:
+                    detail_lines.append(
+                        "Risk top: "
+                        + " | ".join(
+                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                            for item in risk_reasons
+                        )
+                    )
+                performance_reasons = list(blocked_summary.get("performance_reasons") or [])
+                if performance_reasons:
+                    detail_lines.append(
+                        "Performance top: "
+                        + " | ".join(
+                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                            for item in performance_reasons
                         )
                     )
                 elif coverage_notice:
