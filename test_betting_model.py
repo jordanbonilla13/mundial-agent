@@ -25,6 +25,7 @@ import app.calibrated_scoring as calibrated_scoring
 from app.forecasting import apply_market_regime_guard
 from app.lab_service import _event_time_label, build_empty_lab_run, build_lab_run, render_lab_run_html
 from app.performance_guard_service import apply_performance_guard_to_pick, build_performance_guard
+from app.prediction_service import build_prediction_payload
 from app.publication_service import publish_telegram_predictions
 from app.recent_panel_service import build_recent_form_panel, format_recent_form_panel_telegram
 from app.risk_controls import apply_risk_policy_to_pick, build_risk_policy
@@ -5169,6 +5170,49 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(result["forecast_summary"]["total_bloqueadas_en_descartadas"], 1)
         self.assertEqual(result["publishable_preview"][0]["event_id"], "evt_ok")
         self.assertEqual(result["blocked_picks"]["discarded"][0]["event_id"], "evt_blocked")
+
+    def test_build_prediction_payload_preserva_campos_de_diagnostico(self):
+        payload = build_prediction_payload(
+            data={
+                "sport_label": "Todo",
+                "league_label": "Todas las ligas base",
+                "criterio": "Agregado multi-deporte sobre deportes base soportados",
+                "aviso_cobertura": "Solo hay eventos en tenis.",
+                "cobertura_deportes": [{"deporte": "tenis", "partidos": 2, "recomendadas": 1}],
+                "errores_cobertura": [{"deporte": "soccer_x", "detail": "error"}],
+                "total_elite": 0,
+                "total_stakazos": 0,
+                "total_analizadas": 9,
+                "total_recomendadas": 2,
+                "snapshots_guardados": 33,
+                "partidos_disponibles": [{"id": "evt_1", "label": "ATP | Partido 1"}],
+                "descartadas": [{"event_id": "evt_disc", "motivo": "Valor insuficiente"}],
+                "picks_elite": [],
+                "mejores_apuestas": [],
+            },
+            solo_stakazos=False,
+            ai_available=lambda: False,
+            select_picks_for_telegram=lambda data, solo_stakazos: [],
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            format_pick_message=lambda pick: "pick",
+            format_summary_message=lambda **kwargs: "summary",
+            perfil="agresivo",
+            modo="comparador",
+            perfiles_stake={"agresivo"},
+            modos_informe={"comparador"},
+            perfil_label=lambda value: value or "agresivo",
+            modo_label=lambda value: value or "comparador",
+        )
+
+        self.assertEqual(payload["total_analizadas"], 9)
+        self.assertEqual(payload["total_recomendadas"], 2)
+        self.assertEqual(payload["snapshots_guardados"], 33)
+        self.assertEqual(len(payload["partidos_disponibles"]), 1)
+        self.assertEqual(len(payload["descartadas"]), 1)
+        self.assertEqual(payload["aviso_cobertura"], "Solo hay eventos en tenis.")
+        self.assertEqual(payload["cobertura_deportes"][0]["deporte"], "tenis")
+        self.assertEqual(payload["errores_cobertura"][0]["deporte"], "soccer_x")
 
     def test_build_lab_run_historico_desactiva_publicacion(self):
         captured = {}
