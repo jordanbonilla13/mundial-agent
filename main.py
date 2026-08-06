@@ -537,6 +537,7 @@ def deportes_agregados_para_todo(provider: str | None = None) -> list[str]:
     disabled_sports = filtros["disabled_sports"]
     disabled_leagues = filtros["disabled_leagues"]
     candidatos: list[dict] = []
+    fallback_genericos: list[dict] = []
 
     for item in opciones_deporte_disponibles(provider=provider):
         valor = str(item.get("value") or "").strip().lower()
@@ -544,15 +545,25 @@ def deportes_agregados_para_todo(provider: str | None = None) -> list[str]:
             continue
         contexto = resolver_contexto_deporte(valor)
         catalog_key = str(contexto.get("catalog_key") or valor).strip().lower()
-        if catalog_key in disabled_leagues:
-            continue
         family = family_from_sport_key(contexto.get("sport_key", ""))
         if family not in TODO_LIMITS_BY_FAMILY:
             continue
         sport_bucket = str(SPORT_ALIASES.get(family, family)).strip().lower()
         if sport_bucket in disabled_sports:
             continue
+        if _is_generic_sport_alias(valor):
+            fallback_genericos.append(contexto)
+            continue
+        if catalog_key in disabled_leagues:
+            continue
         candidatos.append(contexto)
+
+    if not candidatos:
+        candidatos = [
+            contexto
+            for contexto in fallback_genericos
+            if str(contexto.get("catalog_key") or "").strip().lower() not in disabled_leagues
+        ]
 
     candidatos.sort(key=prioridad_contexto_todo)
     seleccionados: list[str] = []

@@ -1843,7 +1843,7 @@ class BettingModelTests(unittest.TestCase):
         self.assertLessEqual(data["total_recomendadas"], 6)
         self.assertEqual(data["total_stakazos"], 1)
         self.assertIn("league", data["partidos_disponibles"][0]["label"])
-        self.assertEqual(len(data["cobertura_deportes"]), 5)
+        self.assertEqual(len(data["cobertura_deportes"]), 2)
         self.assertIn(
             "basketball_nba_summer_league",
             [item["deporte"] for item in data["cobertura_deportes"]],
@@ -2112,6 +2112,33 @@ class BettingModelTests(unittest.TestCase):
         self.assertNotIn("basketball_wnba", seleccionados)
         self.assertNotIn("soccer_spain_la_liga", seleccionados)
         self.assertIn("tennis_atp_wimbledon", seleccionados)
+
+    def test_deportes_agregados_para_todo_no_reintroduce_liga_desactivada_por_alias_generico(self):
+        import main
+
+        original_opciones = main.opciones_deporte_disponibles
+        original_cargar_filtros = main.cargar_filtros_todo
+
+        try:
+            main.opciones_deporte_disponibles = lambda provider=None, selected=None: [
+                {"value": "todo", "label": "Todo"},
+                {"value": "baloncesto", "label": "Baloncesto"},
+                {"value": "basketball_wnba", "label": "Baloncesto - WNBA"},
+                {"value": "tennis_atp_canadian_open", "label": "Tenis - ATP Canadian Open"},
+            ]
+            main.cargar_filtros_todo = lambda: {
+                "disabled_sports": set(),
+                "disabled_leagues": {"basketball_wnba"},
+            }
+
+            seleccionados = main.deportes_agregados_para_todo()
+        finally:
+            main.opciones_deporte_disponibles = original_opciones
+            main.cargar_filtros_todo = original_cargar_filtros
+
+        self.assertNotIn("baloncesto", seleccionados)
+        self.assertNotIn("basketball_wnba", seleccionados)
+        self.assertIn("tennis_atp_canadian_open", seleccionados)
 
     def test_limitar_picks_todo_prioriza_fiabilidad_y_proximidad(self):
         import main
