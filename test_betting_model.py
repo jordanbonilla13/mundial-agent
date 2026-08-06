@@ -3820,6 +3820,7 @@ class BettingModelTests(unittest.TestCase):
         original_thread = main.threading.Thread
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
+        original_build_sha = main.APP_BUILD_SHA
 
         sent_messages: list[str] = []
         published_calls: list[dict[str, object]] = []
@@ -3897,6 +3898,7 @@ class BettingModelTests(unittest.TestCase):
         original_thread = main.threading.Thread
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
+        original_build_sha = main.APP_BUILD_SHA
 
         sent_messages: list[str] = []
 
@@ -3922,6 +3924,7 @@ class BettingModelTests(unittest.TestCase):
                 "calls": 28,
                 "last_remaining": 9122,
             }
+            main.APP_BUILD_SHA = "buildtest123"
             main.publicar_pronosticos_lab = lambda **kwargs: {
                 "ok": True,
                 "picks_guardados": 0,
@@ -3950,6 +3953,7 @@ class BettingModelTests(unittest.TestCase):
             main.threading.Thread = original_thread
             main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
             main.provider_layer.get_odds_api_usage_tracking = original_get_usage
+            main.APP_BUILD_SHA = original_build_sha
 
         self.assertEqual(len(sent_messages), 1)
         self.assertIn("/apuestas sin picks publicables", sent_messages[0])
@@ -3961,6 +3965,7 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Bloqueado por guard de mercado x3", sent_messages[0])
         self.assertIn("Valor insuficiente x2", sent_messages[0])
         self.assertIn("Consumo API: <b>66</b> creditos en <b>28</b> llamadas", sent_messages[0])
+        self.assertIn("Build: <code>buildtest123</code>", sent_messages[0])
         self.assertNotIn("Guard activo:", sent_messages[0])
 
     def test_resumen_telegram_muestra_publicado_hoy_con_picks_del_dia(self):

@@ -2,6 +2,7 @@ import base64
 import json
 import os
 import re
+import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -215,6 +216,26 @@ TELEGRAM_APUESTAS_DEFAULTS = {
     "deporte": "todo",
     "solo_stakazos": False,
 }
+
+
+def resolve_build_sha() -> str:
+    env_sha = str(os.getenv("APP_BUILD_SHA") or "").strip()
+    if env_sha:
+        return env_sha[:12]
+    try:
+        output = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        if output:
+            return output[:12]
+    except Exception:
+        pass
+    return "unknown"
+
+
+APP_BUILD_SHA = resolve_build_sha()
 
 
 def cargar_filtros_todo() -> dict[str, set[str]]:
@@ -1310,6 +1331,7 @@ def lanzar_apuestas_telegram_async() -> str:
                 f"Consumo API: <b>{credits_used}</b> creditos en <b>{calls}</b> llamadas"
                 + (f"\nRestantes: <b>{remaining}</b>" if remaining is not None else "")
             )
+            build_line = f"Build: <code>{telegram_text_service(APP_BUILD_SHA)}</code>"
             diagnostics = result.get("zero_picks_diagnostics") or {}
 
             if total_publicadas > 0:
@@ -1318,7 +1340,8 @@ def lanzar_apuestas_telegram_async() -> str:
                     f"Picks publicadas: <b>{total_publicadas}</b>\n"
                     f"Mensajes enviados: <b>{total_mensajes}</b>\n"
                     f"Publication ID: <code>{telegram_text_service(publication_id or '-')}</code>\n"
-                    f"{usage_line}"
+                    f"{usage_line}\n"
+                    f"{build_line}"
                 )
             else:
                 analyzed = int(diagnostics.get("analizadas") or 0)
@@ -1358,7 +1381,8 @@ def lanzar_apuestas_telegram_async() -> str:
                     "He ejecutado el preset del lab, pero en esta pasada no salio ninguna pick valida para publicar.\n"
                     + "\n".join(detail_lines)
                     + "\n"
-                    f"{usage_line}"
+                    f"{usage_line}\n"
+                    f"{build_line}"
                 )
         except Exception as exc:
             telegram_command_jobs[job_id] = {
