@@ -2581,7 +2581,17 @@ def deportes_disponibles(provider: str | None = None):
 
 def resolver_mercados(filtro: str, deporte: str | None = None) -> tuple[list[str], str | None]:
     config = config_mercados_deporte(deporte)
-    filtro_normalizado = filtro if filtro in config["allowed_filters"] else config["default_filter"]
+    filtro_raw = str(filtro or "").strip().lower()
+    mercados_explicitos = [
+        mercado.strip()
+        for mercado in filtro_raw.split(",")
+        if mercado.strip() in MERCADOS_DISPONIBLES
+    ]
+
+    if mercados_explicitos:
+        return mercados_explicitos, None
+
+    filtro_normalizado = filtro_raw if filtro_raw in config["allowed_filters"] else config["default_filter"]
     contexto = resolver_contexto_deporte(deporte)
     sport_key = str(contexto.get("sport_key") or "").lower()
 

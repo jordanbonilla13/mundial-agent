@@ -2301,6 +2301,14 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(seleccionadas[0]["partido"], "Lejano solido")
 
+    def test_resolver_mercados_acepta_lista_explicita_featured_sin_caer_a_todo(self):
+        import main
+
+        mercados, aviso = main.resolver_mercados("h2h,spreads,totals", deporte="futbol")
+
+        self.assertEqual(mercados, ["h2h", "spreads", "totals"])
+        self.assertIsNone(aviso)
+
     def test_telegram_config_exige_token_y_chat_id(self):
         import main
 
