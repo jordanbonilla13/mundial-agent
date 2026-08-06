@@ -483,6 +483,7 @@ def build_lab_run(
     fetch_scores: Callable[[int, str | None], list[dict[str, Any]]] | None = None,
     load_learning_summary: Callable[[], dict[str, Any]] | None = None,
     load_calibration_snapshot: Callable[[], Any] | None = None,
+    todo_toggle_panel: dict[str, Any] | None = None,
     perfil: str,
     modo: str,
     mercados: str,
@@ -642,6 +643,7 @@ def build_lab_run(
             "snapshots_guardados": int(forecast.get("snapshots_guardados", 0) or 0),
         },
         "learning_panel": learning_panel,
+        "todo_toggle_panel": todo_toggle_panel or {"sports": [], "leagues": [], "disabled_sports": set(), "disabled_leagues": set()},
         "historical_evaluation": historical_evaluation,
         "forecast_summary": {
             "sport_label": forecast.get("sport_label"),
@@ -663,7 +665,11 @@ def build_lab_run(
     }
 
 
-def build_empty_lab_run(*, runtime_settings: RuntimeSettings) -> dict[str, Any]:
+def build_empty_lab_run(
+    *,
+    runtime_settings: RuntimeSettings,
+    todo_toggle_panel: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "runtime_mode": runtime_settings.publication_mode,
         "publication_guard": {
@@ -721,6 +727,12 @@ def build_empty_lab_run(*, runtime_settings: RuntimeSettings) -> dict[str, Any]:
             "sport_penalties": [],
             "market_thresholds": [],
             "bookmaker_penalties": [],
+        },
+        "todo_toggle_panel": todo_toggle_panel or {
+            "sports": [],
+            "leagues": [],
+            "disabled_sports": set(),
+            "disabled_leagues": set(),
         },
         "publishable_preview": [],
         "blocked_picks": {
@@ -834,6 +846,7 @@ def render_lab_run_html(
     blocked_picks = lab.get("blocked_picks") or {}
     historical_evaluation = lab.get("historical_evaluation") or {}
     learning_panel = lab.get("learning_panel") or {}
+    todo_toggle_panel = lab.get("todo_toggle_panel") or {}
     blocked_recommended = blocked_picks.get("recommended") or []
     blocked_discarded = blocked_picks.get("discarded") or []
     match_overview = lab.get("match_overview") or []
@@ -985,6 +998,13 @@ def render_lab_run_html(
             '<p class="muted">Para ejecutar el modo historico del lab tienes que indicar un snapshot o una fecha desde.</p>'
             '</section>'
         )
+    elif notice_code == "toggles_saved":
+        notice_html = (
+            '<section class="card" style="margin-top: 18px; border-color: rgba(63,132,97,0.24);">'
+            '<div class="badge badge-green">Filtros guardados</div>'
+            '<p class="muted">Los deportes y ligas desactivados ya no se tendran en cuenta cuando uses <strong>deporte=todo</strong> ni cuando lances <strong>/apuestas</strong> desde Telegram.</p>'
+            '</section>'
+        )
     elif not has_run:
         notice_html = (
             '<section class="card" style="margin-top: 18px; border-color: rgba(46,108,171,0.24);">'
@@ -997,6 +1017,51 @@ def render_lab_run_html(
         for key, value in query_refresh.items()
         if key not in {"format", "lab_notice", "publication_id", "registered_picks", "sent_messages", "job_id", "execute"} and value not in (None, "")
     )
+    toggle_form_inputs = "".join(
+        f'<input type="hidden" name="{escape(str(key), quote=True)}" value="{escape(str(value), quote=True)}">'
+        for key, value in query_refresh.items()
+        if key not in {"format", "lab_notice", "publication_id", "registered_picks", "sent_messages", "job_id", "execute"} and value not in (None, "")
+    )
+    todo_sports = todo_toggle_panel.get("sports") or []
+    todo_leagues = todo_toggle_panel.get("leagues") or []
+    sport_toggle_cards = "".join(
+        (
+            '<form method="post" action="/lab/run/todo-filters" class="toggle-card">'
+            '<input type="hidden" name="scope" value="sport">'
+            f'<input type="hidden" name="key" value="{escape(str(item.get("key") or ""), quote=True)}">'
+            f'<input type="hidden" name="enabled" value="{"false" if item.get("enabled") else "true"}">'
+            f"{toggle_form_inputs}"
+            '<button type="submit" class="toggle-row">'
+            '<span class="toggle-copy">'
+            f'<strong>{escape(str(item.get("label") or item.get("key") or "Deporte"))}</strong>'
+            f'<small>{"Activo en deporte=todo y /apuestas" if item.get("enabled") else "Ignorado en deporte=todo y /apuestas"}</small>'
+            '</span>'
+            f'<span class="toggle-switch {"on" if item.get("enabled") else "off"}" aria-hidden="true"><span class="toggle-knob"></span></span>'
+            '</button>'
+            '</form>'
+        )
+        for item in todo_sports
+        if str(item.get("key") or "").strip()
+    ) or '<div class="card"><p class="muted">Todavia no hay deportes configurables para el modo todo.</p></div>'
+    league_toggle_cards = "".join(
+        (
+            '<form method="post" action="/lab/run/todo-filters" class="toggle-card">'
+            '<input type="hidden" name="scope" value="league">'
+            f'<input type="hidden" name="key" value="{escape(str(item.get("key") or ""), quote=True)}">'
+            f'<input type="hidden" name="enabled" value="{"false" if item.get("enabled") else "true"}">'
+            f"{toggle_form_inputs}"
+            '<button type="submit" class="toggle-row">'
+            '<span class="toggle-copy">'
+            f'<strong>{escape(str(item.get("label") or item.get("key") or "Liga"))}</strong>'
+            f'<small>{"Activa en deporte=todo y /apuestas" if item.get("enabled") else "Ignorada en deporte=todo y /apuestas"}</small>'
+            '</span>'
+            f'<span class="toggle-switch {"on" if item.get("enabled") else "off"}" aria-hidden="true"><span class="toggle-knob"></span></span>'
+            '</button>'
+            '</form>'
+        )
+        for item in todo_leagues
+        if str(item.get("key") or "").strip()
+    ) or '<div class="card"><p class="muted">Todavia no hay ligas detectadas para este proveedor.</p></div>'
     publish_action_html = ""
     if publishable_preview and not historical_mode:
         publish_action_html = (
@@ -1065,6 +1130,76 @@ def render_lab_run_html(
             .section-grid {{
                 display: grid;
                 gap: 16px;
+            }}
+            .toggle-panel {{
+                display: grid;
+                gap: 18px;
+            }}
+            .toggle-grid {{
+                display: grid;
+                gap: 12px;
+            }}
+            .toggle-card {{
+                margin: 0;
+            }}
+            .toggle-row {{
+                width: 100%;
+                border: 1px solid var(--line);
+                border-radius: 18px;
+                background: rgba(255,255,255,0.82);
+                padding: 14px 16px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 16px;
+                cursor: pointer;
+                transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+            }}
+            .toggle-row:hover {{
+                transform: translateY(-1px);
+                border-color: rgba(29, 52, 84, 0.18);
+                box-shadow: 0 12px 28px rgba(17, 31, 53, 0.08);
+            }}
+            .toggle-copy {{
+                display: grid;
+                gap: 6px;
+                text-align: left;
+            }}
+            .toggle-copy strong {{
+                color: var(--ink);
+                font-size: 18px;
+            }}
+            .toggle-copy small {{
+                color: var(--muted);
+                font-size: 13px;
+                line-height: 1.45;
+            }}
+            .toggle-switch {{
+                width: 62px;
+                height: 34px;
+                border-radius: 999px;
+                padding: 4px;
+                position: relative;
+                flex: 0 0 auto;
+                transition: background 0.18s ease;
+            }}
+            .toggle-switch.on {{
+                background: linear-gradient(135deg, #2d6ea8, #183357);
+            }}
+            .toggle-switch.off {{
+                background: rgba(18, 39, 66, 0.18);
+            }}
+            .toggle-knob {{
+                display: block;
+                width: 26px;
+                height: 26px;
+                border-radius: 999px;
+                background: #fffdf7;
+                box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+                transition: transform 0.18s ease;
+            }}
+            .toggle-switch.on .toggle-knob {{
+                transform: translateX(28px);
             }}
             .loading-overlay {{
                 position: fixed;
@@ -1256,6 +1391,20 @@ def render_lab_run_html(
                     </div>
                 </form>
                 <div class="summary">{current_filters}</div>
+            </section>
+            <section class="panel" style="padding: 18px; margin-top: 18px;">
+                <div class="eyebrow" style="color: var(--brand); margin-bottom: 12px;">Control de deportes y ligas para Todo</div>
+                <p class="lede">Este panel solo afecta cuando buscas con <strong>deporte=todo</strong>. Tambien lo usa el comando <strong>/apuestas</strong> de Telegram para ignorar deportes o ligas que quieras apagar temporalmente.</p>
+                <div class="toggle-panel">
+                    <div>
+                        <h3 style="margin-bottom: 12px;">Deportes base</h3>
+                        <div class="toggle-grid">{sport_toggle_cards}</div>
+                    </div>
+                    <div>
+                        <h3 style="margin-bottom: 12px;">Ligas detectadas</h3>
+                        <div class="toggle-grid">{league_toggle_cards}</div>
+                    </div>
+                </div>
             </section>
             {notice_html}
             {historical_summary_html}

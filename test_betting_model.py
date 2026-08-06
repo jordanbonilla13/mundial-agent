@@ -2050,6 +2050,7 @@ class BettingModelTests(unittest.TestCase):
         import main
 
         original_opciones = main.opciones_deporte_disponibles
+        original_cargar_filtros = main.cargar_filtros_todo
 
         try:
             main.opciones_deporte_disponibles = lambda provider=None, selected=None: [
@@ -2067,10 +2068,12 @@ class BettingModelTests(unittest.TestCase):
                 {"value": "tennis_wta_berlin", "label": "Tenis - WTA Berlin"},
                 {"value": "tennis_atp_bastad", "label": "Tenis - ATP Bastad"},
             ]
+            main.cargar_filtros_todo = lambda: {"disabled_sports": set(), "disabled_leagues": set()}
 
             seleccionados = main.deportes_agregados_para_todo()
         finally:
             main.opciones_deporte_disponibles = original_opciones
+            main.cargar_filtros_todo = original_cargar_filtros
 
         self.assertEqual(len(seleccionados), 8)
         self.assertIn("soccer_spain_la_liga", seleccionados)
@@ -2080,6 +2083,35 @@ class BettingModelTests(unittest.TestCase):
         self.assertNotIn("soccer_brazil_serie_b", seleccionados)
         self.assertNotIn("basketball_argentina_lnb", seleccionados)
         self.assertNotIn("tennis_atp_bastad", seleccionados)
+
+    def test_deportes_agregados_para_todo_respeta_desactivados(self):
+        import main
+
+        original_opciones = main.opciones_deporte_disponibles
+        original_cargar_filtros = main.cargar_filtros_todo
+
+        try:
+            main.opciones_deporte_disponibles = lambda provider=None, selected=None: [
+                {"value": "todo", "label": "Todo"},
+                {"value": "soccer_spain_la_liga", "label": "Futbol - La Liga"},
+                {"value": "basketball_nba", "label": "Baloncesto - NBA"},
+                {"value": "basketball_wnba", "label": "Baloncesto - WNBA"},
+                {"value": "tennis_atp_wimbledon", "label": "Tenis - ATP Wimbledon"},
+            ]
+            main.cargar_filtros_todo = lambda: {
+                "disabled_sports": {"baloncesto"},
+                "disabled_leagues": {"soccer_spain_la_liga"},
+            }
+
+            seleccionados = main.deportes_agregados_para_todo()
+        finally:
+            main.opciones_deporte_disponibles = original_opciones
+            main.cargar_filtros_todo = original_cargar_filtros
+
+        self.assertNotIn("basketball_nba", seleccionados)
+        self.assertNotIn("basketball_wnba", seleccionados)
+        self.assertNotIn("soccer_spain_la_liga", seleccionados)
+        self.assertIn("tennis_atp_wimbledon", seleccionados)
 
     def test_limitar_picks_todo_prioriza_fiabilidad_y_proximidad(self):
         import main
@@ -5195,6 +5227,15 @@ class BettingModelTests(unittest.TestCase):
                     }
                 ],
                 "telegram_preview": {"resumen_telegram": "Resumen de prueba"},
+                "todo_toggle_panel": {
+                    "sports": [
+                        {"key": "baloncesto", "label": "Baloncesto", "enabled": True},
+                        {"key": "tenis", "label": "Tenis", "enabled": False},
+                    ],
+                    "leagues": [
+                        {"key": "basketball_wnba", "label": "WNBA", "enabled": True},
+                    ],
+                },
             },
             query_params={
                 "perfil": "moderado",
@@ -5203,6 +5244,7 @@ class BettingModelTests(unittest.TestCase):
                 "partido": "todos",
                 "deporte": "todo",
                 "solo_stakazos": "false",
+                "simulation_mode": "live",
             },
             premium_css=lambda: ":root{}",
             profile_options=[
@@ -5242,6 +5284,11 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn('<option value="todo" selected>Todo - deportes base</option>', html)
         self.assertIn('name="deporte"', html)
         self.assertIn('name="partido"', html)
+        self.assertIn('Control de deportes y ligas para Todo', html)
+        self.assertIn('/lab/run/todo-filters', html)
+        self.assertIn('toggle-switch on', html)
+        self.assertIn('toggle-switch off', html)
+        self.assertIn('/apuestas', html)
 
     def test_render_lab_run_html_muestra_estado_en_espera_sin_execute(self):
         html = render_lab_run_html(

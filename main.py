@@ -113,6 +113,7 @@ audit_scheduler_stop = threading.Event()
 audit_scheduler_thread: threading.Thread | None = None
 lab_publication_jobs: dict[str, dict[str, Any]] = {}
 telegram_command_jobs: dict[str, dict[str, Any]] = {}
+TODO_FILTERS_SETTING = "lab_todo_filters"
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
@@ -214,6 +215,98 @@ TELEGRAM_APUESTAS_DEFAULTS = {
     "deporte": "todo",
     "solo_stakazos": False,
 }
+
+
+def cargar_filtros_todo() -> dict[str, set[str]]:
+    raw = obtener_setting(TODO_FILTERS_SETTING, "{}")
+    try:
+        data = json.loads(raw or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        data = {}
+    deportes = {
+        str(item).strip().lower()
+        for item in (data.get("disabled_sports") or [])
+        if str(item).strip()
+    }
+    ligas = {
+        str(item).strip().lower()
+        for item in (data.get("disabled_leagues") or [])
+        if str(item).strip()
+    }
+    return {
+        "disabled_sports": deportes,
+        "disabled_leagues": ligas,
+    }
+
+
+def guardar_filtros_todo(*, disabled_sports: set[str], disabled_leagues: set[str]) -> dict[str, set[str]]:
+    payload = {
+        "disabled_sports": sorted({str(item).strip().lower() for item in disabled_sports if str(item).strip()}),
+        "disabled_leagues": sorted({str(item).strip().lower() for item in disabled_leagues if str(item).strip()}),
+    }
+    guardar_setting(TODO_FILTERS_SETTING, json.dumps(payload, ensure_ascii=False))
+    return {
+        "disabled_sports": set(payload["disabled_sports"]),
+        "disabled_leagues": set(payload["disabled_leagues"]),
+    }
+
+
+def build_todo_toggle_groups(provider: str | None = None) -> dict[str, Any]:
+    filtros = cargar_filtros_todo()
+    disabled_sports = filtros["disabled_sports"]
+    disabled_leagues = filtros["disabled_leagues"]
+    sports_items = [
+        {"key": key, "label": info.get("sport_label", key), "enabled": key not in disabled_sports}
+        for key, info in SPORT_CATALOG.items()
+        if key in TODO_LIMITS_BY_FAMILY
+    ]
+    sports_items.sort(key=lambda item: item["label"])
+
+    league_items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in opciones_deporte_disponibles(provider=provider):
+        value = str(item.get("value") or "").strip().lower()
+        if not value or value == "todo" or value in SPORT_CATALOG or value in seen:
+            continue
+        seen.add(value)
+        league_items.append(
+            {
+                "key": value,
+                "label": str(item.get("label") or value),
+                "enabled": value not in disabled_leagues,
+            }
+        )
+    league_items.sort(key=lambda item: item["label"])
+    return {
+        "disabled_sports": disabled_sports,
+        "disabled_leagues": disabled_leagues,
+        "sports": sports_items,
+        "leagues": league_items,
+    }
+
+
+def _redirect_query_for_lab_filters(form: dict[str, Any]) -> dict[str, str]:
+    query: dict[str, str] = {}
+    fields = (
+        "bankroll",
+        "perfil",
+        "modo",
+        "mercados",
+        "partido",
+        "deporte",
+        "simulation_mode",
+        "snapshot_at",
+        "snapshot_from",
+        "snapshot_to",
+    )
+    for field in fields:
+        value = str(form.get(field) or "").strip()
+        if value:
+            query[field] = value
+
+    solo_stakazos = str(form.get("solo_stakazos") or "").strip().lower()
+    query["solo_stakazos"] = "true" if solo_stakazos == "true" else "false"
+    return query
 
 
 SPORT_CATALOG = {
@@ -440,6 +533,9 @@ def prioridad_contexto_todo(contexto: dict) -> tuple:
 
 
 def deportes_agregados_para_todo(provider: str | None = None) -> list[str]:
+    filtros = cargar_filtros_todo()
+    disabled_sports = filtros["disabled_sports"]
+    disabled_leagues = filtros["disabled_leagues"]
     candidatos: list[dict] = []
 
     for item in opciones_deporte_disponibles(provider=provider):
@@ -447,8 +543,14 @@ def deportes_agregados_para_todo(provider: str | None = None) -> list[str]:
         if not valor or valor == "todo":
             continue
         contexto = resolver_contexto_deporte(valor)
+        catalog_key = str(contexto.get("catalog_key") or valor).strip().lower()
+        if catalog_key in disabled_leagues:
+            continue
         family = family_from_sport_key(contexto.get("sport_key", ""))
         if family not in TODO_LIMITS_BY_FAMILY:
+            continue
+        sport_bucket = str(SPORT_ALIASES.get(family, family)).strip().lower()
+        if sport_bucket in disabled_sports:
             continue
         candidatos.append(contexto)
 
@@ -3505,6 +3607,7 @@ def lab_run(
             fetch_scores=scores,
             load_learning_summary=aprendizaje,
             load_calibration_snapshot=generate_calibration_snapshot,
+            todo_toggle_panel=build_todo_toggle_groups(),
             perfil=perfil,
             modo=modo,
             mercados=mercados,
@@ -3522,7 +3625,10 @@ def lab_run(
             modo_label=modo_es,
         )
     else:
-        lab_data = build_empty_lab_run(runtime_settings=RUNTIME_SETTINGS)
+        lab_data = build_empty_lab_run(
+            runtime_settings=RUNTIME_SETTINGS,
+            todo_toggle_panel=build_todo_toggle_groups(),
+        )
     if str(format or "html").strip().lower() == "json":
         return lab_data
 
@@ -3576,6 +3682,41 @@ def lab_run(
         ],
     )
     return HTMLResponse(content=html, media_type="text/html; charset=utf-8")
+
+
+@app.post("/lab/run/todo-filters")
+async def lab_run_todo_filters(request: Request):
+    form = await form_urlencoded(request)
+    scope = str(form.get("scope") or "").strip().lower()
+    key = str(form.get("key") or "").strip().lower()
+    enabled = str(form.get("enabled") or "").strip().lower() == "true"
+
+    if scope not in {"sport", "league"} or not key:
+        raise HTTPException(status_code=400, detail="Filtro no valido")
+
+    filtros = cargar_filtros_todo()
+    disabled_sports = set(filtros["disabled_sports"])
+    disabled_leagues = set(filtros["disabled_leagues"])
+
+    if scope == "sport":
+        if enabled:
+            disabled_sports.discard(key)
+        else:
+            disabled_sports.add(key)
+    else:
+        if enabled:
+            disabled_leagues.discard(key)
+        else:
+            disabled_leagues.add(key)
+
+    guardar_filtros_todo(
+        disabled_sports=disabled_sports,
+        disabled_leagues=disabled_leagues,
+    )
+
+    query = _redirect_query_for_lab_filters(form)
+    query["lab_notice"] = "toggles_saved"
+    return RedirectResponse(url="/lab/run?" + urlencode(query), status_code=303)
 
 
 @app.post("/lab/run/publicar")
