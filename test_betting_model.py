@@ -3672,6 +3672,8 @@ class BettingModelTests(unittest.TestCase):
         original_telegram_client = main.telegram_client
         original_publicar_pronosticos_lab = main.publicar_pronosticos_lab
         original_thread = main.threading.Thread
+        original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
+        original_get_usage = main.provider_layer.get_odds_api_usage_tracking
 
         sent_messages: list[str] = []
         published_calls: list[dict[str, object]] = []
@@ -3692,6 +3694,12 @@ class BettingModelTests(unittest.TestCase):
         try:
             main.telegram_config = lambda: ("token-test", "chat-test")
             main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main.provider_layer.reset_odds_api_usage_tracking = lambda: None
+            main.provider_layer.get_odds_api_usage_tracking = lambda: {
+                "credits_used": 27,
+                "calls": 5,
+                "last_remaining": 18250,
+            }
 
             def fake_publicar_pronosticos_lab(**kwargs):
                 published_calls.append(kwargs)
@@ -3711,6 +3719,8 @@ class BettingModelTests(unittest.TestCase):
             main.telegram_client = original_telegram_client
             main.publicar_pronosticos_lab = original_publicar_pronosticos_lab
             main.threading.Thread = original_thread
+            main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
+            main.provider_layer.get_odds_api_usage_tracking = original_get_usage
 
         self.assertTrue(job_id)
         self.assertEqual(len(published_calls), 1)
@@ -3720,7 +3730,7 @@ class BettingModelTests(unittest.TestCase):
                 "bankroll": 200.0,
                 "perfil": "agresivo",
                 "modo": "comparador",
-                "mercados": "todo",
+                "mercados": "resultado",
                 "partido": "todos",
                 "deporte": "todo",
                 "solo_stakazos": False,
@@ -3729,6 +3739,8 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(len(sent_messages), 1)
         self.assertIn("/apuestas completado", sent_messages[0])
         self.assertIn("Picks publicadas: <b>3</b>", sent_messages[0])
+        self.assertIn("Consumo API: <b>27</b> creditos en <b>5</b> llamadas", sent_messages[0])
+        self.assertIn("Restantes: <b>18250</b>", sent_messages[0])
 
     def test_resumen_telegram_muestra_publicado_hoy_con_picks_del_dia(self):
         report = {

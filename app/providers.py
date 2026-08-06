@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 from typing import Any
 
 import requests
@@ -36,6 +37,63 @@ SPORTSGAMEODDS_SPORT_ID = os.getenv("SPORTSGAMEODDS_SPORT_ID", "SOCCER")
 SPORTSGAMEODDS_LEAGUE_ID = os.getenv("SPORTSGAMEODDS_LEAGUE_ID", "")
 SPORTSGAMEODDS_BOOKMAKERS = os.getenv("SPORTSGAMEODDS_BOOKMAKERS", "")
 SPORTSGAMEODDS_MAX_EVENTS = int(os.getenv("SPORTSGAMEODDS_MAX_EVENTS", "25"))
+_odds_usage_state = threading.local()
+
+
+def _ensure_odds_usage_state() -> dict[str, Any]:
+    state = getattr(_odds_usage_state, "data", None)
+    if state is None:
+        state = {
+            "calls": 0,
+            "credits_used": 0,
+            "last_cost": 0,
+            "last_used_total": None,
+            "last_remaining": None,
+        }
+        _odds_usage_state.data = state
+    return state
+
+
+def reset_odds_api_usage_tracking() -> None:
+    _odds_usage_state.data = {
+        "calls": 0,
+        "credits_used": 0,
+        "last_cost": 0,
+        "last_used_total": None,
+        "last_remaining": None,
+    }
+
+
+def get_odds_api_usage_tracking() -> dict[str, Any]:
+    state = _ensure_odds_usage_state()
+    return dict(state)
+
+
+def _record_odds_api_usage(response: requests.Response) -> None:
+    state = _ensure_odds_usage_state()
+    state["calls"] = int(state.get("calls") or 0) + 1
+
+    header_last = response.headers.get("x-requests-last")
+    header_used = response.headers.get("x-requests-used")
+    header_remaining = response.headers.get("x-requests-remaining")
+
+    try:
+        last_cost = int(float(str(header_last or "0").strip() or "0"))
+    except ValueError:
+        last_cost = 0
+
+    state["credits_used"] = int(state.get("credits_used") or 0) + last_cost
+    state["last_cost"] = last_cost
+
+    try:
+        state["last_used_total"] = int(float(str(header_used).strip())) if header_used is not None else state.get("last_used_total")
+    except ValueError:
+        pass
+
+    try:
+        state["last_remaining"] = int(float(str(header_remaining).strip())) if header_remaining is not None else state.get("last_remaining")
+    except ValueError:
+        pass
 
 
 def odds_api_error_detail(exc: requests.RequestException) -> str:
@@ -164,6 +222,7 @@ def the_odds_api_sports() -> list[dict]:
             timeout=20,
         )
         response.raise_for_status()
+        _record_odds_api_usage(response)
     except requests.RequestException as exc:
         raise HTTPException(status_code=502, detail=odds_api_error_detail(exc)) from exc
 
@@ -903,6 +962,7 @@ def fetch_the_odds_odds(mercados_lista: list[str], contexto: dict) -> list[dict]
     try:
         response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()
+        _record_odds_api_usage(response)
     except requests.RequestException as exc:
         raise HTTPException(
             status_code=502,
@@ -930,6 +990,7 @@ def fetch_the_odds_odds(mercados_lista: list[str], contexto: dict) -> list[dict]
             try:
                 extra = requests.get(event_url, params=event_params, timeout=15)
                 extra.raise_for_status()
+                _record_odds_api_usage(extra)
             except requests.RequestException:
                 continue
 
@@ -968,6 +1029,7 @@ def fetch_the_odds_historical_odds(
     try:
         response = requests.get(url, params=params, timeout=20)
         response.raise_for_status()
+        _record_odds_api_usage(response)
     except requests.RequestException as exc:
         raise HTTPException(
             status_code=502,
@@ -1015,6 +1077,7 @@ def fetch_the_odds_scores(days_from: int, contexto: dict) -> list[dict]:
     try:
         response = requests.get(url, params=params, timeout=15)
         response.raise_for_status()
+        _record_odds_api_usage(response)
     except requests.RequestException as exc:
         raise HTTPException(
             status_code=502,

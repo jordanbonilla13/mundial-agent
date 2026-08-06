@@ -210,7 +210,7 @@ TELEGRAM_APUESTAS_DEFAULTS = {
     "bankroll": 200.0,
     "perfil": "agresivo",
     "modo": "comparador",
-    "mercados": "todo",
+    "mercados": "resultado",
     "partido": "todos",
     "deporte": "todo",
     "solo_stakazos": False,
@@ -1271,11 +1271,14 @@ def lanzar_apuestas_telegram_async() -> str:
     def _worker() -> None:
         try:
             telegram_command_jobs[job_id]["state"] = "running"
+            provider_layer.reset_odds_api_usage_tracking()
             result = publicar_pronosticos_lab(**TELEGRAM_APUESTAS_DEFAULTS)
+            usage = provider_layer.get_odds_api_usage_tracking()
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs[job_id],
                 "state": "completed",
                 "result": result,
+                "odds_api_usage": usage,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -1283,18 +1286,27 @@ def lanzar_apuestas_telegram_async() -> str:
             total_publicadas = int(result.get("picks_guardados") or 0)
             total_mensajes = int(result.get("mensajes_enviados") or 0)
             publication_id = result.get("publication_id")
+            credits_used = int(usage.get("credits_used") or 0)
+            calls = int(usage.get("calls") or 0)
+            remaining = usage.get("last_remaining")
+            usage_line = (
+                f"Consumo API: <b>{credits_used}</b> creditos en <b>{calls}</b> llamadas"
+                + (f"\nRestantes: <b>{remaining}</b>" if remaining is not None else "")
+            )
 
             if total_publicadas > 0:
                 client.send_message(
                     "✅ <b>/apuestas completado</b>\n"
                     f"Picks publicadas: <b>{total_publicadas}</b>\n"
                     f"Mensajes enviados: <b>{total_mensajes}</b>\n"
-                    f"Publication ID: <code>{telegram_text_service(publication_id or '-')}</code>"
+                    f"Publication ID: <code>{telegram_text_service(publication_id or '-')}</code>\n"
+                    f"{usage_line}"
                 )
             else:
                 client.send_message(
                     "ℹ️ <b>/apuestas sin picks publicables</b>\n"
-                    "He ejecutado el preset del lab, pero en esta pasada no salio ninguna pick valida para publicar."
+                    "He ejecutado el preset barato del lab, pero en esta pasada no salio ninguna pick valida para publicar.\n"
+                    f"{usage_line}"
                 )
         except Exception as exc:
             telegram_command_jobs[job_id] = {
