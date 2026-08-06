@@ -210,7 +210,7 @@ TELEGRAM_APUESTAS_DEFAULTS = {
     "bankroll": 200.0,
     "perfil": "agresivo",
     "modo": "comparador",
-    "mercados": "resultado",
+    "mercados": "h2h,spreads,totals",
     "partido": "todos",
     "deporte": "todo",
     "solo_stakazos": False,
