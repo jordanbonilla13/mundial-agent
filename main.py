@@ -532,7 +532,12 @@ def prioridad_contexto_todo(contexto: dict) -> tuple:
     return sports_layer.prioridad_contexto_todo(contexto)
 
 
-def deportes_agregados_para_todo(provider: str | None = None) -> list[str]:
+def deportes_agregados_para_todo(
+    provider: str | None = None,
+    *,
+    max_total: int | None = TODO_MAX_TOTAL_LEAGUES,
+    strict_family_limits: bool = True,
+) -> list[str]:
     filtros = cargar_filtros_todo()
     disabled_sports = filtros["disabled_sports"]
     disabled_leagues = filtros["disabled_leagues"]
@@ -569,15 +574,28 @@ def deportes_agregados_para_todo(provider: str | None = None) -> list[str]:
     seleccionados: list[str] = []
     por_familia: dict[str, int] = {}
 
+    max_items = max_total if max_total is not None else len(candidatos)
+
     for contexto in candidatos:
-        if len(seleccionados) >= TODO_MAX_TOTAL_LEAGUES:
+        if len(seleccionados) >= max_items:
             break
         family = family_from_sport_key(contexto.get("sport_key", ""))
         limite = TODO_LIMITS_BY_FAMILY.get(family, 0)
-        if por_familia.get(family, 0) >= limite:
+        if strict_family_limits and por_familia.get(family, 0) >= limite:
             continue
         seleccionados.append(str(contexto.get("catalog_key") or "").strip().lower())
         por_familia[family] = por_familia.get(family, 0) + 1
+
+    if not strict_family_limits and len(seleccionados) < max_items:
+        seen = set(seleccionados)
+        for contexto in candidatos:
+            if len(seleccionados) >= max_items:
+                break
+            catalog_key = str(contexto.get("catalog_key") or "").strip().lower()
+            if not catalog_key or catalog_key in seen:
+                continue
+            seleccionados.append(catalog_key)
+            seen.add(catalog_key)
 
     return seleccionados
 
@@ -2999,7 +3017,10 @@ def apuestas_hoy(
         resolve_context=resolver_contexto_deporte,
         resolve_markets=resolver_mercados,
         list_sport_options=lambda: opciones_deporte_disponibles(),
-        aggregate_sports=deportes_agregados_para_todo,
+        aggregate_sports=lambda: deportes_agregados_para_todo(
+            max_total=24,
+            strict_family_limits=False,
+        ),
         fetch_odds=cuotas,
         list_matches=partidos_disponibles,
         save_snapshots=guardar_snapshot_cuotas,

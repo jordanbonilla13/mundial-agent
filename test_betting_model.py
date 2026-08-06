@@ -2140,6 +2140,39 @@ class BettingModelTests(unittest.TestCase):
         self.assertNotIn("basketball_wnba", seleccionados)
         self.assertIn("tennis_atp_canadian_open", seleccionados)
 
+    def test_deportes_agregados_para_todo_amplia_busqueda_si_no_hay_limite_por_familia(self):
+        import main
+
+        original_opciones = main.opciones_deporte_disponibles
+        original_cargar_filtros = main.cargar_filtros_todo
+
+        try:
+            main.opciones_deporte_disponibles = lambda provider=None, selected=None: [
+                {"value": "todo", "label": "Todo"},
+                {"value": "soccer_spain_la_liga", "label": "Futbol - La Liga"},
+                {"value": "soccer_england_premier_league", "label": "Futbol - Premier League"},
+                {"value": "soccer_germany_bundesliga", "label": "Futbol - Bundesliga"},
+                {"value": "soccer_italy_serie_a", "label": "Futbol - Serie A"},
+                {"value": "soccer_france_ligue_one", "label": "Futbol - Ligue 1"},
+                {"value": "soccer_usa_mls", "label": "Futbol - MLS"},
+            ]
+            main.cargar_filtros_todo = lambda: {
+                "disabled_sports": set(),
+                "disabled_leagues": set(),
+            }
+
+            seleccionados = main.deportes_agregados_para_todo(
+                max_total=6,
+                strict_family_limits=False,
+            )
+        finally:
+            main.opciones_deporte_disponibles = original_opciones
+            main.cargar_filtros_todo = original_cargar_filtros
+
+        self.assertEqual(len(seleccionados), 6)
+        self.assertIn("soccer_france_ligue_one", seleccionados)
+        self.assertIn("soccer_usa_mls", seleccionados)
+
     def test_limitar_picks_todo_prioriza_fiabilidad_y_proximidad(self):
         import main
 
