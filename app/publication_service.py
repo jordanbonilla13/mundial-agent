@@ -1,3 +1,4 @@
+from collections import Counter
 from typing import Any, Callable
 
 from app.runtime_settings import RuntimeSettings
@@ -102,6 +103,39 @@ def select_picks_for_telegram(
     return selected
 
 
+def _build_zero_picks_diagnostics(
+    data: dict[str, Any],
+    *,
+    guard: dict[str, Any],
+    shadow_mode: bool,
+) -> dict[str, Any]:
+    descartadas = list(data.get("descartadas", []))
+    blocked_reasons = [
+        str(reason).strip()
+        for reason in (guard.get("reasons") or [])
+        if str(reason).strip()
+    ]
+    discard_reasons = Counter()
+
+    for pick in descartadas:
+        reason = str(pick.get("motivo_es") or pick.get("motivo") or "").strip()
+        if reason:
+            discard_reasons[reason] += 1
+
+    return {
+        "analizadas": int(data.get("total_analizadas") or 0),
+        "recomendadas": int(data.get("total_recomendadas") or 0),
+        "descartadas_preview": len(descartadas),
+        "shadow_mode": bool(shadow_mode),
+        "guard_blocking": not guard.get("allow_live_publication", False),
+        "guard_reasons": blocked_reasons[:3],
+        "top_discard_reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in discard_reasons.most_common(3)
+        ],
+    }
+
+
 def publish_telegram_predictions(
     *,
     runtime_settings: RuntimeSettings,
@@ -156,6 +190,11 @@ def publish_telegram_predictions(
         )
         fallback_a_elite = True
 
+    zero_picks_diagnostics = _build_zero_picks_diagnostics(
+        data,
+        guard=guard,
+        shadow_mode=runtime_settings.shadow_mode,
+    )
     picks_publicables = list(data.get("pronosticos", []))
     picks_guardados = save_unique_recommendations(picks_publicables)
     picks_por_fingerprint = {
@@ -235,6 +274,7 @@ def publish_telegram_predictions(
             "runtime_mode": runtime_settings.publication_mode if runtime_settings.shadow_mode else "blocked",
             "publication_guard": guard,
             "shadow_messages": messages,
+            "zero_picks_diagnostics": zero_picks_diagnostics,
         }
 
     for index, text in enumerate(messages):
@@ -286,4 +326,5 @@ def publish_telegram_predictions(
         "publication_id": publicacion.get("id"),
         "runtime_mode": runtime_settings.publication_mode,
         "publication_guard": guard,
+        "zero_picks_diagnostics": zero_picks_diagnostics,
     }

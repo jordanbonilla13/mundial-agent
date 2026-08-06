@@ -3867,6 +3867,77 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Consumo API: <b>27</b> creditos en <b>5</b> llamadas", sent_messages[0])
         self.assertIn("Restantes: <b>18250</b>", sent_messages[0])
 
+    def test_lanzar_apuestas_async_muestra_diagnostico_si_no_hay_publicables(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_publicar_pronosticos_lab = main.publicar_pronosticos_lab
+        original_thread = main.threading.Thread
+        original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
+        original_get_usage = main.provider_layer.get_odds_api_usage_tracking
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        class ImmediateThread:
+            def __init__(self, target=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                if self._target is not None:
+                    self._target()
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main.provider_layer.reset_odds_api_usage_tracking = lambda: None
+            main.provider_layer.get_odds_api_usage_tracking = lambda: {
+                "credits_used": 66,
+                "calls": 28,
+                "last_remaining": 9122,
+            }
+            main.publicar_pronosticos_lab = lambda **kwargs: {
+                "ok": True,
+                "picks_guardados": 0,
+                "mensajes_enviados": 0,
+                "publication_id": None,
+                "zero_picks_diagnostics": {
+                    "analizadas": 42,
+                    "recomendadas": 2,
+                    "descartadas_preview": 5,
+                    "guard_reasons": ["shadow_mode_activo"],
+                    "top_discard_reasons": [
+                        {"reason": "Bloqueado por guard de mercado", "count": 3},
+                        {"reason": "Valor insuficiente", "count": 2},
+                    ],
+                },
+            }
+            main.threading.Thread = ImmediateThread
+
+            main.lanzar_apuestas_telegram_async()
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main.publicar_pronosticos_lab = original_publicar_pronosticos_lab
+            main.threading.Thread = original_thread
+            main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
+            main.provider_layer.get_odds_api_usage_tracking = original_get_usage
+
+        self.assertEqual(len(sent_messages), 1)
+        self.assertIn("/apuestas sin picks publicables", sent_messages[0])
+        self.assertIn("Analizadas: <b>42</b>", sent_messages[0])
+        self.assertIn("Recomendadas antes del corte: <b>2</b>", sent_messages[0])
+        self.assertIn("Descartadas visibles: <b>5</b>", sent_messages[0])
+        self.assertIn("Guard activo: shadow_mode_activo", sent_messages[0])
+        self.assertIn("Bloqueado por guard de mercado x3", sent_messages[0])
+        self.assertIn("Valor insuficiente x2", sent_messages[0])
+        self.assertIn("Consumo API: <b>66</b> creditos en <b>28</b> llamadas", sent_messages[0])
+
     def test_resumen_telegram_muestra_publicado_hoy_con_picks_del_dia(self):
         report = {
             "date": "2026-07-30",

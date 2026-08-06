@@ -1310,6 +1310,7 @@ def lanzar_apuestas_telegram_async() -> str:
                 f"Consumo API: <b>{credits_used}</b> creditos en <b>{calls}</b> llamadas"
                 + (f"\nRestantes: <b>{remaining}</b>" if remaining is not None else "")
             )
+            diagnostics = result.get("zero_picks_diagnostics") or {}
 
             if total_publicadas > 0:
                 client.send_message(
@@ -1320,9 +1321,33 @@ def lanzar_apuestas_telegram_async() -> str:
                     f"{usage_line}"
                 )
             else:
+                analyzed = int(diagnostics.get("analizadas") or 0)
+                recommended = int(diagnostics.get("recomendadas") or 0)
+                discarded = int(diagnostics.get("descartadas_preview") or 0)
+                guard_reasons = list(diagnostics.get("guard_reasons") or [])
+                discard_reasons = list(diagnostics.get("top_discard_reasons") or [])
+                detail_lines = [
+                    f"Analizadas: <b>{analyzed}</b>",
+                    f"Recomendadas antes del corte: <b>{recommended}</b>",
+                    f"Descartadas visibles: <b>{discarded}</b>",
+                ]
+                if guard_reasons:
+                    detail_lines.append(
+                        "Guard activo: " + " | ".join(telegram_text_service(str(reason)) for reason in guard_reasons)
+                    )
+                if discard_reasons:
+                    detail_lines.append(
+                        "Motivos top: "
+                        + " | ".join(
+                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                            for item in discard_reasons
+                        )
+                    )
                 client.send_message(
                     "ℹ️ <b>/apuestas sin picks publicables</b>\n"
-                    "He ejecutado el preset barato del lab, pero en esta pasada no salio ninguna pick valida para publicar.\n"
+                    "He ejecutado el preset del lab, pero en esta pasada no salio ninguna pick valida para publicar.\n"
+                    + "\n".join(detail_lines)
+                    + "\n"
                     f"{usage_line}"
                 )
         except Exception as exc:
