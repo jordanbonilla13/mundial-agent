@@ -2236,6 +2236,7 @@ class BettingModelTests(unittest.TestCase):
     def test_limitar_picks_todo_prefiere_eventos_cercanos_si_mantienen_calidad(self):
         import main
 
+        original_hours_until = main.hours_until_pick
         picks = [
             {
                 "partido": "Lejano premium",
@@ -2247,7 +2248,7 @@ class BettingModelTests(unittest.TestCase):
                 "puntuacion_confianza": 78,
                 "valor_esperado": 0.045,
                 "margen_cuota": 1.04,
-                "commence_time": "2026-08-08T20:00:00Z",
+                "commence_time": "2026-08-10T20:00:00Z",
             },
             {
                 "partido": "Cercano fiable",
@@ -2259,17 +2260,22 @@ class BettingModelTests(unittest.TestCase):
                 "puntuacion_confianza": 76,
                 "valor_esperado": 0.042,
                 "margen_cuota": 1.04,
-                "commence_time": "2026-08-06T13:00:00Z",
+                "commence_time": "2026-08-07T13:00:00Z",
             },
         ]
 
-        seleccionadas = main.limitar_picks_todo(picks, max_total=1)
+        try:
+            main.hours_until_pick = lambda apuesta: 30 if apuesta["partido"] == "Lejano premium" else 4
+            seleccionadas = main.limitar_picks_todo(picks, max_total=1)
+        finally:
+            main.hours_until_pick = original_hours_until
 
         self.assertEqual(seleccionadas[0]["partido"], "Cercano fiable")
 
     def test_limitar_picks_todo_hace_fallback_si_lo_cercano_no_llega_al_minimo(self):
         import main
 
+        original_hours_until = main.hours_until_pick
         picks = [
             {
                 "partido": "Cercano flojo",
@@ -2281,7 +2287,7 @@ class BettingModelTests(unittest.TestCase):
                 "puntuacion_confianza": 58,
                 "valor_esperado": 0.031,
                 "margen_cuota": 1.02,
-                "commence_time": "2026-08-06T12:30:00Z",
+                "commence_time": "2026-08-07T12:30:00Z",
             },
             {
                 "partido": "Lejano solido",
@@ -2293,11 +2299,15 @@ class BettingModelTests(unittest.TestCase):
                 "puntuacion_confianza": 75,
                 "valor_esperado": 0.04,
                 "margen_cuota": 1.04,
-                "commence_time": "2026-08-07T18:00:00Z",
+                "commence_time": "2026-08-09T18:00:00Z",
             },
         ]
 
-        seleccionadas = main.limitar_picks_todo(picks, max_total=1)
+        try:
+            main.hours_until_pick = lambda apuesta: 3 if apuesta["partido"] == "Cercano flojo" else 40
+            seleccionadas = main.limitar_picks_todo(picks, max_total=1)
+        finally:
+            main.hours_until_pick = original_hours_until
 
         self.assertEqual(seleccionadas[0]["partido"], "Lejano solido")
 
@@ -3511,6 +3521,7 @@ class BettingModelTests(unittest.TestCase):
         original_telegram_config = main.telegram_config
         original_telegram_client = main.telegram_client
         original_real_bets_pending = main._real_bets_pending
+        original_published_pending_bets = main._published_pending_bets
 
         sent_messages: list[dict[str, object]] = []
 
@@ -3522,6 +3533,7 @@ class BettingModelTests(unittest.TestCase):
         try:
             main.telegram_config = lambda: ("token-test", "chat-test")
             main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main._published_pending_bets = lambda limit=10: []
             main._real_bets_pending = lambda limit=10: [
                 {
                     "id": 101,
@@ -3541,6 +3553,7 @@ class BettingModelTests(unittest.TestCase):
             main.telegram_config = original_telegram_config
             main.telegram_client = original_telegram_client
             main._real_bets_pending = original_real_bets_pending
+            main._published_pending_bets = original_published_pending_bets
 
         self.assertEqual(len(sent_messages), 2)
         self.assertIn("Apuestas pendientes", str(sent_messages[0]["text"]))
@@ -3552,6 +3565,54 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("loss", str(keyboard))
         self.assertIn("push", str(keyboard))
         self.assertIn("Pendientes enviado. 1 apuestas.", response)
+
+    def test_procesar_comando_pendientes_hace_fallback_a_publicadas_si_no_hay_reales(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_real_bets_pending = main._real_bets_pending
+        original_published_pending_bets = main._published_pending_bets
+
+        sent_messages: list[dict[str, object]] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append({"text": text, "reply_markup": reply_markup})
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main._real_bets_pending = lambda limit=10: []
+            main._published_pending_bets = lambda limit=10: [
+                {
+                    "id": 161,
+                    "partido": "New York City FC vs Santos Laguna",
+                    "equipo": "Menos de 3 goles",
+                    "league_label": "Leagues Cup",
+                    "mercado": "totals",
+                    "cuota": 1.93,
+                    "stake": 1.7,
+                    "importe_sugerido": 4.72,
+                    "estado": "pendiente",
+                }
+            ]
+
+            response = procesar_comando_telegram("/pendientes")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main._real_bets_pending = original_real_bets_pending
+            main._published_pending_bets = original_published_pending_bets
+
+        self.assertEqual(len(sent_messages), 2)
+        self.assertIn("Pendientes del modelo", str(sent_messages[0]["text"]))
+        self.assertIn("New York City FC vs Santos Laguna", str(sent_messages[1]["text"]))
+        keyboard = sent_messages[1]["reply_markup"]
+        self.assertIsInstance(keyboard, dict)
+        self.assertIn("inline_keyboard", keyboard)
+        self.assertIn("Pendientes enviado. 1 apuestas del modelo.", response)
 
     def test_procesar_comando_ganadas_envia_historico_reciente(self):
         import main

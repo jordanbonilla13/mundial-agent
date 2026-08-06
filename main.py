@@ -837,6 +837,10 @@ def _real_bets_pending(limit: int = 10) -> list[dict[str, Any]]:
     return listar_picks(limit=limit, estado="pendiente", apuesta_real=True)
 
 
+def _published_pending_bets(limit: int = 10) -> list[dict[str, Any]]:
+    return listar_picks(limit=limit, estado="pendiente", publicada_telegram=True)
+
+
 def _real_bets_by_result(result: str, *, limit: int = 10) -> list[dict[str, Any]]:
     return [
         pick
@@ -914,8 +918,21 @@ def procesar_comando_telegram(command_text: str) -> str:
         client = telegram_client(token=token, chat_id=chat_id)
         picks = _real_bets_pending(limit=10)
         if not picks:
-            client.send_message("📭 <b>/pendientes</b>\nNo tienes apuestas reales pendientes ahora mismo.")
-            return "Pendientes enviado. 0 apuestas."
+            fallback_picks = _published_pending_bets(limit=10)
+            if not fallback_picks:
+                client.send_message("📭 <b>/pendientes</b>\nNo tienes apuestas reales pendientes ahora mismo.")
+                return "Pendientes enviado. 0 apuestas."
+
+            client.send_message(
+                f"📋 <b>Pendientes del modelo</b>\n"
+                f"No he encontrado apuestas reales pendientes, asi que te muestro las {len(fallback_picks)} picks pendientes publicadas mas recientes."
+            )
+            for pick in fallback_picks:
+                client.send_message(
+                    _format_real_pick_compact(pick, include_result=False),
+                    reply_markup=telegram_resolution_keyboard_for_pick(int(pick["id"])),
+                )
+            return f"Pendientes enviado. {len(fallback_picks)} apuestas del modelo."
 
         client.send_message(
             f"📋 <b>Apuestas pendientes</b>\n"
