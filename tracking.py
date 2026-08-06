@@ -958,13 +958,12 @@ def listar_picks(
     with conectar(db_path) as conn:
         if estado:
             rows = conn.execute(
-                "SELECT * FROM picks WHERE estado = ? ORDER BY id DESC LIMIT ?",
-                (estado, limit),
+                "SELECT * FROM picks WHERE estado = ? ORDER BY id DESC",
+                (estado,),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM picks WHERE estado <> 'archivada' ORDER BY id DESC LIMIT ?",
-                (limit,),
+                "SELECT * FROM picks WHERE estado <> 'archivada' ORDER BY id DESC",
             ).fetchall()
 
     picks = [dict(row) for row in rows]

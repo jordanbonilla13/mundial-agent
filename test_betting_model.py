@@ -2549,6 +2549,62 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(apostadas[0]["id"], pick["id"])
         self.assertEqual(len(no_apostadas), 0)
 
+    def test_listar_picks_apuesta_real_no_recorta_antes_de_filtrar(self):
+        base = {
+            "commence_time": "2026-07-15T20:00:00Z",
+            "sport_key": "soccer_spain_la_liga",
+            "sport_label": "Futbol",
+            "league_key": "la_liga",
+            "league_label": "La Liga",
+            "casa": "Pinnacle",
+            "mercado": "h2h",
+            "cuota_apuesta": 2.0,
+            "importe_sugerido": 5.0,
+            "stake": 1.0,
+            "recomendacion": "Value",
+            "motivo": "Test",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "tracker.sqlite3")
+
+            for idx in range(12):
+                guardar_recomendaciones_unicas(
+                    [
+                        {
+                            **base,
+                            "event_id": f"evt_model_{idx}",
+                            "partido": f"Partido modelo {idx}",
+                            "equipo": f"Equipo modelo {idx}",
+                            "equipo_raw": f"Equipo modelo {idx}",
+                            "tipo_resultado": "home",
+                            "tipo_resultado_raw": "home",
+                        }
+                    ],
+                    db_path=db_path,
+                )
+
+            real_pick = guardar_recomendaciones_unicas(
+                [
+                    {
+                        **base,
+                        "event_id": "evt_real_old",
+                        "partido": "Partido real antiguo",
+                        "equipo": "Equipo real antiguo",
+                        "equipo_raw": "Equipo real antiguo",
+                        "tipo_resultado": "away",
+                        "tipo_resultado_raw": "away",
+                    }
+                ],
+                db_path=db_path,
+            )[0]
+
+            marcar_apuesta_real_pick(real_pick["id"], db_path=db_path)
+            apostadas = listar_picks(limit=10, estado="pendiente", apuesta_real=True, db_path=db_path)
+
+        self.assertEqual(len(apostadas), 1)
+        self.assertEqual(apostadas[0]["id"], real_pick["id"])
+
     def test_archivar_picks_pendientes_las_saca_de_pendientes_y_listados(self):
         recomendacion = {
             "event_id": "evt_archive",
