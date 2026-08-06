@@ -10,6 +10,7 @@ from betting_model import (
     calcular_fiabilidad_pick,
     clasificar_pick_elite,
     calcular_kelly_fraccional,
+    decidir_stake,
     market_consensus_snapshot,
     normalizar_probabilidades,
     rescatar_casi_value,
@@ -213,6 +214,25 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(belgium["recomendacion"], "Value ELO especulativo")
         self.assertGreater(belgium["stake"], 0)
+
+    def test_agresivo_soft_entry_acepta_casi_value_con_stake_controlado(self):
+        stake_pct, importe, unidades, recomendacion, motivo = decidir_stake(
+            200,
+            0.50,
+            0.50,
+            2.0,
+            1.006,
+            0.52,
+            0.006,
+            "agresivo",
+            "tennis_model",
+        )
+
+        self.assertGreater(stake_pct, 0)
+        self.assertEqual(importe, 2.5)
+        self.assertGreater(unidades, 0)
+        self.assertEqual(recomendacion, "Value controlado")
+        self.assertIn("Entrada agresiva controlada", motivo)
 
     def test_perfiles_cambian_numero_de_recomendadas(self):
         partidos = [

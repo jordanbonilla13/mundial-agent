@@ -100,12 +100,17 @@ STAKE_PROFILES = {
         "max_stake_pct": 0.08,
         "stake_pct_especulativo": 0.04,
         "min_importe": 1.00,
-        "min_margen_cuota": 1.01,
-        "min_valor_esperado": 0.01,
+        "min_margen_cuota": 1.008,
+        "min_valor_esperado": 0.008,
         "permite_elo_especulativo": True,
         "min_edge_elo_especulativo": 0.06,
         "min_margen_especulativo": 0.96,
         "min_valor_especulativo": -0.03,
+        "soft_entry_margin_gap": 0.008,
+        "soft_entry_value_gap": 0.008,
+        "soft_entry_max_odds": 2.55,
+        "soft_entry_stake_pct": 0.006,
+        "soft_entry_importe": 2.50,
     },
     "alto_riesgo": {
         "fraccion_kelly": 1.00,
@@ -953,6 +958,44 @@ def decidir_stake(
 ) -> tuple[float, float, float, str, str]:
     perfil_stake = obtener_perfil_stake(perfil)
 
+    def aggressive_soft_entry(reason: str) -> tuple[float, float, float, str, str] | None:
+        if not _aggressive_profile(perfil):
+            return None
+        if source_strength == "market_only":
+            return None
+        if cuota > float(perfil_stake.get("soft_entry_max_odds", 2.55)):
+            return None
+
+        margin_gap = max(0.0, perfil_stake["min_margen_cuota"] - margen_cuota)
+        value_gap = max(0.0, perfil_stake["min_valor_esperado"] - valor)
+        if margin_gap > float(perfil_stake.get("soft_entry_margin_gap", 0.008)):
+            return None
+        if value_gap > float(perfil_stake.get("soft_entry_value_gap", 0.008)):
+            return None
+
+        stake_pct, importe = aplicar_importe_minimo(
+            float(perfil_stake.get("soft_entry_stake_pct", 0.006)),
+            bankroll,
+            perfil_stake["min_importe"],
+            perfil_stake["max_stake_pct"],
+        )
+        stake_pct, importe = aplicar_importe_objetivo(
+            stake_pct,
+            bankroll,
+            float(perfil_stake.get("soft_entry_importe", 2.50)),
+            perfil_stake["max_stake_pct"],
+        )
+        unidades = stake_en_unidades(stake_pct)
+        if stake_pct <= 0 or importe <= 0:
+            return None
+        return (
+            stake_pct,
+            importe,
+            unidades,
+            "Value controlado",
+            f"Entrada agresiva controlada: {reason}",
+        )
+
     if bankroll <= 0:
         return 0, 0, 0, "No apostar", "Bankroll no valido"
 
@@ -977,8 +1020,14 @@ def decidir_stake(
         if cuota > 2.85:
             return 0, 0, 0, "No apostar", "En tenis solo buscamos favoritos o cuotas medias muy justificadas"
         if margen_cuota < min_margin:
+            soft = aggressive_soft_entry("margen ligeramente por debajo del minimo en tenis")
+            if soft is not None:
+                return soft
             return 0, 0, 0, "No apostar", "En tenis exigimos margen claro frente al precio de mercado"
         if valor < min_value:
+            soft = aggressive_soft_entry("value algo justo pero todavia util en tenis")
+            if soft is not None:
+                return soft
             return 0, 0, 0, "No apostar", "En tenis exigimos value positivo y estable"
     elif source_strength == "basketball_model":
         min_margin = max(perfil_stake["min_margen_cuota"], 1.015 if _aggressive_profile(perfil) else 1.02)
@@ -986,8 +1035,14 @@ def decidir_stake(
         if cuota > 2.80:
             return 0, 0, 0, "No apostar", "En baloncesto evitamos cuotas largas en esta fase"
         if margen_cuota < min_margin:
+            soft = aggressive_soft_entry("margen ligeramente por debajo del minimo en baloncesto")
+            if soft is not None:
+                return soft
             return 0, 0, 0, "No apostar", "En baloncesto exigimos margen suficiente frente al mercado"
         if valor < min_value:
+            soft = aggressive_soft_entry("value algo justo pero util en baloncesto")
+            if soft is not None:
+                return soft
             return 0, 0, 0, "No apostar", "En baloncesto exigimos value claramente positivo"
 
     edge_elo = (probabilidad_elo - probabilidad_mercado) if probabilidad_elo is not None else 0
@@ -1022,6 +1077,10 @@ def decidir_stake(
                 "El ELO supera claramente al mercado, pero la cuota aun queda justa",
             )
 
+        soft = aggressive_soft_entry("margen justo aceptado con stake minimo")
+        if soft is not None:
+            return soft
+
         return 0, 0, 0, "No apostar", "Margen insuficiente frente a la cuota minima"
 
     if valor < perfil_stake["min_valor_esperado"]:
@@ -1045,6 +1104,10 @@ def decidir_stake(
                 "Value ELO especulativo",
                 "El ELO supera claramente al mercado, pero el value combinado es pequeno",
             )
+
+        soft = aggressive_soft_entry("value justo aceptado con stake minimo")
+        if soft is not None:
+            return soft
 
         return 0, 0, 0, "No apostar", "Valor esperado por debajo del filtro minimo"
 
