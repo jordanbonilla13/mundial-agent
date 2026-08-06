@@ -128,11 +128,15 @@ def _build_zero_picks_diagnostics(
         "descartadas_preview": len(descartadas),
         "shadow_mode": bool(shadow_mode),
         "guard_blocking": not guard.get("allow_live_publication", False),
-        "guard_reasons": blocked_reasons[:3],
+        "guard_reasons": blocked_reasons[:3] if not guard.get("allow_live_publication", False) else [],
         "top_discard_reasons": [
             {"reason": reason, "count": count}
             for reason, count in discard_reasons.most_common(3)
         ],
+        "snapshots_guardados": int(data.get("snapshots_guardados") or 0),
+        "partidos_disponibles": len(list(data.get("partidos_disponibles") or [])),
+        "coverage_notice": str(data.get("aviso_cobertura") or "").strip(),
+        "base_criteria": str(data.get("criterio") or "").strip(),
     }
 
 

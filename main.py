@@ -1324,12 +1324,18 @@ def lanzar_apuestas_telegram_async() -> str:
                 analyzed = int(diagnostics.get("analizadas") or 0)
                 recommended = int(diagnostics.get("recomendadas") or 0)
                 discarded = int(diagnostics.get("descartadas_preview") or 0)
+                available_matches = int(diagnostics.get("partidos_disponibles") or 0)
+                snapshots = int(diagnostics.get("snapshots_guardados") or 0)
                 guard_reasons = list(diagnostics.get("guard_reasons") or [])
                 discard_reasons = list(diagnostics.get("top_discard_reasons") or [])
+                coverage_notice = str(diagnostics.get("coverage_notice") or "").strip()
+                base_criteria = str(diagnostics.get("base_criteria") or "").strip()
                 detail_lines = [
                     f"Analizadas: <b>{analyzed}</b>",
                     f"Recomendadas antes del corte: <b>{recommended}</b>",
                     f"Descartadas visibles: <b>{discarded}</b>",
+                    f"Partidos disponibles: <b>{available_matches}</b>",
+                    f"Snapshots: <b>{snapshots}</b>",
                 ]
                 if guard_reasons:
                     detail_lines.append(
@@ -1343,6 +1349,10 @@ def lanzar_apuestas_telegram_async() -> str:
                             for item in discard_reasons
                         )
                     )
+                elif coverage_notice:
+                    detail_lines.append("Cobertura: " + telegram_text_service(coverage_notice))
+                elif analyzed == 0 and base_criteria:
+                    detail_lines.append("Contexto: " + telegram_text_service(base_criteria))
                 client.send_message(
                     "ℹ️ <b>/apuestas sin picks publicables</b>\n"
                     "He ejecutado el preset del lab, pero en esta pasada no salio ninguna pick valida para publicar.\n"

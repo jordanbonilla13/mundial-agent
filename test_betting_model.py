@@ -3910,7 +3910,9 @@ class BettingModelTests(unittest.TestCase):
                     "analizadas": 42,
                     "recomendadas": 2,
                     "descartadas_preview": 5,
-                    "guard_reasons": ["shadow_mode_activo"],
+                    "partidos_disponibles": 18,
+                    "snapshots_guardados": 144,
+                    "guard_reasons": [],
                     "top_discard_reasons": [
                         {"reason": "Bloqueado por guard de mercado", "count": 3},
                         {"reason": "Valor insuficiente", "count": 2},
@@ -3933,10 +3935,12 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Analizadas: <b>42</b>", sent_messages[0])
         self.assertIn("Recomendadas antes del corte: <b>2</b>", sent_messages[0])
         self.assertIn("Descartadas visibles: <b>5</b>", sent_messages[0])
-        self.assertIn("Guard activo: shadow_mode_activo", sent_messages[0])
+        self.assertIn("Partidos disponibles: <b>18</b>", sent_messages[0])
+        self.assertIn("Snapshots: <b>144</b>", sent_messages[0])
         self.assertIn("Bloqueado por guard de mercado x3", sent_messages[0])
         self.assertIn("Valor insuficiente x2", sent_messages[0])
         self.assertIn("Consumo API: <b>66</b> creditos en <b>28</b> llamadas", sent_messages[0])
+        self.assertNotIn("Guard activo:", sent_messages[0])
 
     def test_resumen_telegram_muestra_publicado_hoy_con_picks_del_dia(self):
         report = {
