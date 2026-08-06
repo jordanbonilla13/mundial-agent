@@ -82,6 +82,7 @@ def _promotable_discard_reason(reason: str) -> bool:
             "value interesante",
             "value moderado",
             "value ligero",
+            "cuota mejor que pinnacle, pero sin margen suficiente para apostar",
         )
     )
 
@@ -101,17 +102,25 @@ def _build_operational_fallback_picks(
             break
         if bool(pick.get("risk_guard_blocked")) or bool(pick.get("performance_guard_blocked")) or bool(pick.get("market_guard_blocked")):
             continue
-        if str(pick.get("recomendacion") or "").strip().lower() == "no apostar" and not _promotable_discard_reason(
-            str(pick.get("motivo_es") or pick.get("motivo") or "")
-        ):
+        reason_text = str(pick.get("motivo_es") or pick.get("motivo") or "").strip()
+        promotable_reason = _promotable_discard_reason(reason_text)
+        if str(pick.get("recomendacion") or "").strip().lower() == "no apostar" and not promotable_reason:
             continue
-        if float(pick.get("quality_score") or 0) < 58:
+        reliability = float(pick.get("reliability_score") or 0)
+        value_pct = float(pick.get("valor_esperado") or 0) * 100
+        margin = float(pick.get("margen_cuota") or 0)
+        quality = float(pick.get("quality_score") or 0)
+
+        if reliability < 60:
             continue
-        if float(pick.get("reliability_score") or 0) < 60:
+        if promotable_reason:
+            if value_pct < 2.0 and margin < 1.02:
+                continue
+        elif quality < 58 or value_pct < 2.5 or margin < 1.025:
             continue
 
         promoted = dict(pick)
-        reason = str(promoted.get("motivo") or promoted.get("motivo_es") or "").strip()
+        reason = reason_text
         promoted["stake"] = max(0.75, min(1.25, float(promoted.get("stake") or 0) or 0.75))
         promoted["stake_pct_bankroll"] = round(max(0.0125, min(0.02, promoted["stake"] / 100.0)), 4)
         promoted["importe_sugerido"] = round(
