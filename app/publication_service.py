@@ -258,6 +258,7 @@ def _build_last_resort_picks(
     fallback: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
     bankroll_value = float(bankroll or 200.0)
+    now = datetime.now(timezone.utc)
     fallback_source = list(data.get("descartadas_operativas") or data.get("descartadas") or [])
 
     for pick in fallback_source:
@@ -268,6 +269,23 @@ def _build_last_resort_picks(
 
         reason_text = str(pick.get("motivo_es") or pick.get("motivo") or "").strip()
         if not (_promotable_discard_reason(reason_text) or _promotable_discard_reason_loose(reason_text)):
+            continue
+        if "sin margen suficiente" in reason_text.lower():
+            continue
+
+        cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or 0)
+        if cuota <= 0 or cuota > 2.4:
+            continue
+
+        commence = _parse_commence_time(pick.get("commence_time"))
+        if commence is not None:
+            delta_hours = (commence - now).total_seconds() / 3600
+            if delta_hours < -2 or delta_hours > 24:
+                continue
+
+        reliability = float(pick.get("reliability_score") or 0)
+        quality = float(pick.get("quality_score") or 0)
+        if quality < 55 and reliability < 68:
             continue
 
         promoted = dict(pick)

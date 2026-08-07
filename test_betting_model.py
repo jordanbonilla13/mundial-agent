@@ -3189,13 +3189,14 @@ class BettingModelTests(unittest.TestCase):
                 "descartadas_operativas": [
                     {
                         "event_id": "evt_es",
+                        "commence_time": "2026-08-08T10:00:00Z",
                         "partido": "A vs B",
                         "equipo": "Menos de 3 goles",
                         "mercado": "totals",
                         "tipo_resultado": "under",
                         "casa": "Betfair",
-                        "quality_score": 41,
-                        "reliability_score": 44,
+                        "quality_score": 56,
+                        "reliability_score": 68,
                         "recomendacion": "No apostar",
                         "motivo_es": "Valor positivo con exposición controlada",
                         "valor_esperado": 0.006,
@@ -3240,6 +3241,76 @@ class BettingModelTests(unittest.TestCase):
         self.assertTrue(result["emergency_fallback_used"])
         self.assertEqual(result["picks_guardados"], 1)
         self.assertEqual(len(sent), 2)
+
+    def test_publish_telegram_predictions_no_rescata_cuota_larga_sin_margen(self):
+        sent = []
+        result = publish_telegram_predictions(
+            runtime_settings=RuntimeSettings(environment="production", shadow_mode=False),
+            publication_guard=lambda: {"allow_live_publication": True, "mode": "live", "reasons": []},
+            pronosticos_fn=lambda **kwargs: {
+                "sport_label": "Todo",
+                "league_label": "Todas las ligas base",
+                "deporte": "Todo",
+                "liga": "Todas las ligas base",
+                "criterio": "Agregado multi-deporte sobre deportes base soportados",
+                "pronosticos": [],
+                "descartadas": [],
+                "descartadas_operativas": [
+                    {
+                        "event_id": "evt_bad_longshot",
+                        "commence_time": "2026-08-07T19:45:00Z",
+                        "partido": "Fav vs Dog",
+                        "equipo": "Dog",
+                        "mercado": "h2h",
+                        "tipo_resultado": "away",
+                        "casa": "Betfair",
+                        "quality_score": 0,
+                        "reliability_score": 72,
+                        "recomendacion": "No apostar",
+                        "motivo": "Cuota mejor que Pinnacle, pero sin margen suficiente para apostar",
+                        "valor_esperado": 0.28,
+                        "margen_cuota": 1.01,
+                        "cuota_apuesta": 16.0,
+                        "stake": 0,
+                        "importe_sugerido": 0,
+                    }
+                ],
+                "total_elite": 0,
+                "total_stakazos": 0,
+                "total_analizadas": 40,
+                "total_recomendadas": 0,
+            },
+            save_unique_recommendations=lambda picks: [{"id": 499, **picks[0]}] if picks else [],
+            read_raw_pick=lambda pick: pick,
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            ai_available=lambda: False,
+            format_summary=lambda **kwargs: "Resumen",
+            format_pick_message=lambda pick: f"Pick {pick['event_id']} {pick['recomendacion']}",
+            telegram_keyboard_for_pick=lambda pick_id: {"inline_keyboard": [[{"text": "Apostada", "callback_data": f"pick:{pick_id}:bet"}]]},
+            send_message=lambda text, token=None, chat_id=None, reply_markup=None: sent.append((text, reply_markup)) or {"ok": True, "result": {"message_id": len(sent)}},
+            register_publication=lambda publication_type, payload, items: {"id": 657, "items": items},
+            perfil_label=lambda value: value or "agresivo",
+            modo_label=lambda value: value or "comparador",
+            perfiles_stake={"agresivo"},
+            modos_informe={"comparador"},
+            bankroll=200.0,
+            perfil="agresivo",
+            modo="comparador",
+            mercados="h2h,spreads,totals",
+            partido="todos",
+            deporte="todo",
+            solo_stakazos=False,
+            token="token-test",
+            chat_id="chat-test",
+            publication_type="lab",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["operational_fallback_used"])
+        self.assertFalse(result["emergency_fallback_used"])
+        self.assertEqual(result["picks_guardados"], 0)
+        self.assertEqual(len(sent), 1)
 
     def test_pronosticos_completa_con_mejores_si_hay_pocas_elite(self):
         import main
