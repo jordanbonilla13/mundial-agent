@@ -65,6 +65,7 @@ def build_prediction_payload(
         "snapshots_guardados": int(data.get("snapshots_guardados", 0) or 0),
         "partidos_disponibles": list(data.get("partidos_disponibles") or []),
         "descartadas": list(data.get("descartadas") or []),
+        "descartadas_operativas": list(data.get("descartadas_operativas") or []),
         "blocked_summary": dict(data.get("blocked_summary") or {}),
         "solo_stakazos": solo_stakazos,
         "pronosticos": picks_telegram,

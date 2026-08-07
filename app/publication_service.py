@@ -96,8 +96,9 @@ def _build_operational_fallback_picks(
     fallback: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
     bankroll_value = float(bankroll or 200.0)
+    fallback_source = list(data.get("descartadas_operativas") or data.get("descartadas") or [])
 
-    for pick in data.get("descartadas", []):
+    for pick in fallback_source:
         if len(fallback) >= max_items:
             break
         if bool(pick.get("risk_guard_blocked")) or bool(pick.get("performance_guard_blocked")) or bool(pick.get("market_guard_blocked")):
@@ -110,13 +111,19 @@ def _build_operational_fallback_picks(
         value_pct = float(pick.get("valor_esperado") or 0) * 100
         margin = float(pick.get("margen_cuota") or 0)
         quality = float(pick.get("quality_score") or 0)
+        cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or 0)
 
-        if reliability < 60:
+        if reliability < 57:
             continue
         if promotable_reason:
-            if value_pct < 2.0 and margin < 1.02:
+            if value_pct < 1.2 and margin < 1.008:
                 continue
-        elif quality < 58 or value_pct < 2.5 or margin < 1.025:
+        elif quality < 52 and reliability < 64:
+            continue
+        elif value_pct < 1.6 and margin < 1.012:
+            continue
+
+        if cuota and cuota > 3.35:
             continue
 
         promoted = dict(pick)

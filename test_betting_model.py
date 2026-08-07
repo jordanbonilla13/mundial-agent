@@ -3018,6 +3018,91 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(result["picks_guardados"], 1)
         self.assertEqual(len(sent), 2)
 
+    def test_publish_telegram_predictions_rescata_desde_descartadas_operativas(self):
+        sent = []
+        result = publish_telegram_predictions(
+            runtime_settings=RuntimeSettings(environment="production", shadow_mode=False),
+            publication_guard=lambda: {"allow_live_publication": True, "mode": "live", "reasons": []},
+            pronosticos_fn=lambda **kwargs: {
+                "sport_label": "Todo",
+                "league_label": "Todas las ligas base",
+                "deporte": "Todo",
+                "liga": "Todas las ligas base",
+                "criterio": "Agregado multi-deporte sobre deportes base soportados",
+                "pronosticos": [],
+                "descartadas": [
+                    {
+                        "event_id": "evt_bad",
+                        "partido": "Bad vs Bad",
+                        "equipo": "Bad",
+                        "mercado": "h2h",
+                        "tipo_resultado": "home",
+                        "casa": "Betfair",
+                        "quality_score": 10,
+                        "reliability_score": 30,
+                        "recomendacion": "No apostar",
+                        "motivo": "Sin valor real",
+                        "valor_esperado": 0.001,
+                        "margen_cuota": 1.001,
+                        "stake": 0,
+                        "importe_sugerido": 0,
+                    }
+                ],
+                "descartadas_operativas": [
+                    {
+                        "event_id": "evt_good",
+                        "partido": "A vs B",
+                        "equipo": "A",
+                        "mercado": "totals",
+                        "tipo_resultado": "under",
+                        "casa": "Pinnacle",
+                        "quality_score": 0,
+                        "reliability_score": 61,
+                        "recomendacion": "No apostar",
+                        "motivo": "Filtro de valor y margen superado",
+                        "valor_esperado": 0.019,
+                        "margen_cuota": 1.009,
+                        "cuota_apuesta": 1.97,
+                        "stake": 0,
+                        "importe_sugerido": 0,
+                    }
+                ],
+                "total_elite": 0,
+                "total_stakazos": 0,
+                "total_analizadas": 25,
+                "total_recomendadas": 0,
+            },
+            save_unique_recommendations=lambda picks: [{"id": 199, **picks[0]}],
+            read_raw_pick=lambda pick: pick,
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            ai_available=lambda: False,
+            format_summary=lambda **kwargs: "Resumen",
+            format_pick_message=lambda pick: f"Pick {pick['event_id']}",
+            telegram_keyboard_for_pick=lambda pick_id: {"inline_keyboard": [[{"text": "Apostada", "callback_data": f"pick:{pick_id}:bet"}]]},
+            send_message=lambda text, token=None, chat_id=None, reply_markup=None: sent.append((text, reply_markup)) or {"ok": True, "result": {"message_id": len(sent)}},
+            register_publication=lambda publication_type, payload, items: {"id": 654, "items": items},
+            perfil_label=lambda value: value or "agresivo",
+            modo_label=lambda value: value or "comparador",
+            perfiles_stake={"agresivo"},
+            modos_informe={"comparador"},
+            bankroll=200.0,
+            perfil="agresivo",
+            modo="comparador",
+            mercados="h2h,spreads,totals",
+            partido="todos",
+            deporte="todo",
+            solo_stakazos=False,
+            token="token-test",
+            chat_id="chat-test",
+            publication_type="lab",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["operational_fallback_used"])
+        self.assertEqual(result["picks_guardados"], 1)
+        self.assertEqual(len(sent), 2)
+
     def test_pronosticos_completa_con_mejores_si_hay_pocas_elite(self):
         import main
 

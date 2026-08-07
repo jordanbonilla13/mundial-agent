@@ -297,6 +297,7 @@ class ForecastEngine:
             "mejores_apuestas": recomendadas[:todo_limit],
             "picks_elite": stakazos[:10] if request.solo_stakazos else elite[:10],
             "descartadas": sorted(descartadas_total, key=self.sort_key_pick, reverse=True)[:5],
+            "descartadas_operativas": sorted(descartadas_total, key=self.sort_key_pick, reverse=True)[:25],
         }
 
     def _run_single_sport(self, request: ForecastRequest) -> dict[str, Any]:
@@ -541,6 +542,7 @@ class ForecastEngine:
             "mejores_apuestas": recomendadas[:limite_mejores],
             "picks_elite": stakazos[:10] if request.solo_stakazos else elite[:10],
             "descartadas": descartadas[:5],
+            "descartadas_operativas": descartadas[:25],
             "blocked_summary": {
                 "risk_count": len(blocked_by_risk),
                 "performance_count": len(blocked_by_performance),
