@@ -4176,7 +4176,8 @@ class BettingModelTests(unittest.TestCase):
 
         original_telegram_config = main.telegram_config
         original_telegram_client = main.telegram_client
-        original_publicar_pronosticos_lab = main.publicar_pronosticos_lab
+        original_construir_publicacion_apuestas_lab = main.construir_publicacion_apuestas_lab
+        original_publicar_payload_preparado_lab = main.publicar_payload_preparado_lab
         original_thread = main.threading.Thread
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
@@ -4208,8 +4209,19 @@ class BettingModelTests(unittest.TestCase):
                 "last_remaining": 18250,
             }
 
-            def fake_publicar_pronosticos_lab(**kwargs):
+            def fake_construir_publicacion_apuestas_lab(**kwargs):
                 published_calls.append(kwargs)
+                return {
+                    "payload": {
+                        "resumen_telegram": "Resumen",
+                        "pronosticos": [{"event_id": "1"}, {"event_id": "2"}, {"event_id": "3"}],
+                        "mensajes_telegram": ["a", "b", "c"],
+                    },
+                    "zero_picks_diagnostics": {},
+                }
+
+            def fake_publicar_payload_preparado_lab(payload):
+                self.assertEqual(len(list(payload.get("pronosticos") or [])), 3)
                 return {
                     "ok": True,
                     "picks_guardados": 3,
@@ -4217,14 +4229,16 @@ class BettingModelTests(unittest.TestCase):
                     "publication_id": 77,
                 }
 
-            main.publicar_pronosticos_lab = fake_publicar_pronosticos_lab
+            main.construir_publicacion_apuestas_lab = fake_construir_publicacion_apuestas_lab
+            main.publicar_payload_preparado_lab = fake_publicar_payload_preparado_lab
             main.threading.Thread = ImmediateThread
 
             job_id = main.lanzar_apuestas_telegram_async()
         finally:
             main.telegram_config = original_telegram_config
             main.telegram_client = original_telegram_client
-            main.publicar_pronosticos_lab = original_publicar_pronosticos_lab
+            main.construir_publicacion_apuestas_lab = original_construir_publicacion_apuestas_lab
+            main.publicar_payload_preparado_lab = original_publicar_payload_preparado_lab
             main.threading.Thread = original_thread
             main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
             main.provider_layer.get_odds_api_usage_tracking = original_get_usage
@@ -4254,7 +4268,7 @@ class BettingModelTests(unittest.TestCase):
 
         original_telegram_config = main.telegram_config
         original_telegram_client = main.telegram_client
-        original_publicar_pronosticos_lab = main.publicar_pronosticos_lab
+        original_construir_publicacion_apuestas_lab = main.construir_publicacion_apuestas_lab
         original_thread = main.threading.Thread
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
@@ -4285,11 +4299,12 @@ class BettingModelTests(unittest.TestCase):
                 "last_remaining": 9122,
             }
             main.APP_BUILD_SHA = "buildtest123"
-            main.publicar_pronosticos_lab = lambda **kwargs: {
-                "ok": True,
-                "picks_guardados": 0,
-                "mensajes_enviados": 0,
-                "publication_id": None,
+            main.construir_publicacion_apuestas_lab = lambda **kwargs: {
+                "payload": {
+                    "resumen_telegram": "Resumen",
+                    "pronosticos": [],
+                    "mensajes_telegram": [],
+                },
                 "zero_picks_diagnostics": {
                     "analizadas": 42,
                     "recomendadas": 2,
@@ -4319,7 +4334,7 @@ class BettingModelTests(unittest.TestCase):
         finally:
             main.telegram_config = original_telegram_config
             main.telegram_client = original_telegram_client
-            main.publicar_pronosticos_lab = original_publicar_pronosticos_lab
+            main.construir_publicacion_apuestas_lab = original_construir_publicacion_apuestas_lab
             main.threading.Thread = original_thread
             main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
             main.provider_layer.get_odds_api_usage_tracking = original_get_usage

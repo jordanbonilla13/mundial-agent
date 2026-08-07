@@ -1248,6 +1248,143 @@ def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _parse_apuestas_compact_commence(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        normalized = f"{text[:-1]}+00:00" if text.endswith("Z") else text
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def seleccionar_picks_para_apuestas_lab(
+    data: dict[str, Any],
+    solo_stakazos: bool = False,
+) -> list[dict[str, Any]]:
+    base = seleccionar_picks_para_telegram(
+        data,
+        solo_stakazos=solo_stakazos,
+        max_items=6 if not solo_stakazos else 4,
+    )
+    if solo_stakazos:
+        return base[:4]
+
+    now = datetime.now(timezone.utc)
+
+    def _is_reasonable_pick(pick: dict[str, Any]) -> bool:
+        cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or pick.get("cuota") or 0)
+        quality = float(pick.get("quality_score") or 0)
+        reliability = float(pick.get("reliability_score") or 0)
+        if cuota <= 0 or cuota > 3.4:
+            return False
+        return quality >= 55 or reliability >= 68
+
+    def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, float, float, float]:
+        commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
+        if commence is None:
+            return (3, 9999.0, -float(pick.get("quality_score") or 0), -float(pick.get("reliability_score") or 0))
+        delta_hours = (commence - now).total_seconds() / 3600
+        if delta_hours < -2:
+            bucket = 4
+        elif delta_hours <= 12:
+            bucket = 0
+        elif delta_hours <= 24:
+            bucket = 1
+        elif delta_hours <= 36:
+            bucket = 2
+        else:
+            bucket = 3
+        return (bucket, max(delta_hours, 0.0), -float(pick.get("quality_score") or 0), -float(pick.get("reliability_score") or 0))
+
+    reasonable = [pick for pick in base if _is_reasonable_pick(pick)]
+    if not reasonable:
+        return []
+    reasonable.sort(key=_pick_sort_key)
+    return reasonable[:3]
+
+
+def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[str, Any]:
+    forecast_summary = dict(lab_data.get("forecast_summary") or {})
+    forecast = dict(lab_data.get("forecast") or {})
+    descartadas = list(forecast.get("descartadas") or [])
+    reason_counter: dict[str, int] = {}
+    for pick in descartadas:
+        reason = str(pick.get("motivo_es") or pick.get("motivo") or "").strip()
+        if not reason:
+            continue
+        reason_counter[reason] = reason_counter.get(reason, 0) + 1
+    top_reasons = sorted(reason_counter.items(), key=lambda item: item[1], reverse=True)[:3]
+    return {
+        "analizadas": int(forecast_summary.get("total_analizadas") or 0),
+        "recomendadas": int(forecast_summary.get("total_recomendadas") or 0),
+        "descartadas_preview": int(forecast_summary.get("total_descartadas_preview") or 0),
+        "partidos_disponibles": len(list(forecast.get("partidos_disponibles") or [])),
+        "snapshots_guardados": int(forecast.get("snapshots_guardados") or 0),
+        "coverage_notice": str(forecast.get("aviso_cobertura") or "").strip(),
+        "base_criteria": str(forecast.get("criterio") or "").strip(),
+        "blocked_summary": dict(forecast.get("blocked_summary") or {}),
+        "top_discard_reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in top_reasons
+        ],
+    }
+
+
+def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
+    lab_data = build_lab_run(
+        runtime_settings=RUNTIME_SETTINGS,
+        publication_guard=system_publication_guard,
+        run_forecast=lambda request: apuestas_hoy(
+            bankroll=request.bankroll,
+            perfil=request.perfil,
+            modo=request.modo,
+            mercados=request.mercados,
+            partido=request.partido,
+            guardar=request.guardar,
+            deporte=request.deporte,
+            solo_elite=request.solo_elite,
+            solo_stakazos=request.solo_stakazos,
+            historical_mode=request.historical_mode,
+            historical_date=request.historical_date,
+            historical_from=request.historical_from,
+            historical_to=request.historical_to,
+        ),
+        build_prediction_payload=build_prediction_payload,
+        ai_available=lambda: False,
+        select_picks_for_telegram=seleccionar_picks_para_apuestas_lab,
+        enrich_with_ai=lambda picks: picks,
+        build_ai_summary=lambda *args, **kwargs: None,
+        format_pick_message=formatear_mensaje_telegram_pick,
+        format_summary_message=format_summary_message,
+        perfil=kwargs["perfil"],
+        modo=kwargs["modo"],
+        mercados=kwargs["mercados"],
+        partido=kwargs["partido"],
+        deporte=kwargs["deporte"],
+        bankroll=kwargs["bankroll"],
+        solo_stakazos=kwargs["solo_stakazos"],
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
+        simulation_mode="live",
+    )
+    payload = dict(lab_data.get("telegram_preview") or {})
+    payload["pronosticos"] = list(payload.get("pronosticos") or [])
+    payload["mensajes_telegram"] = list(payload.get("mensajes_telegram") or [])
+    diagnostics = _build_apuestas_zero_diagnostics_from_lab(lab_data)
+    return {
+        "lab_data": lab_data,
+        "payload": payload,
+        "zero_picks_diagnostics": diagnostics,
+    }
+
+
 def iniciar_publicacion_lab_async(
     *,
     payload: dict[str, Any] | None,
@@ -1310,7 +1447,18 @@ def lanzar_apuestas_telegram_async() -> str:
         try:
             telegram_command_jobs[job_id]["state"] = "running"
             provider_layer.reset_odds_api_usage_tracking()
-            result = publicar_pronosticos_lab(**TELEGRAM_APUESTAS_DEFAULTS)
+            publication_plan = construir_publicacion_apuestas_lab(**TELEGRAM_APUESTAS_DEFAULTS)
+            payload = dict(publication_plan.get("payload") or {})
+            if list(payload.get("pronosticos") or []):
+                result = publicar_payload_preparado_lab(payload)
+            else:
+                result = {
+                    "ok": True,
+                    "picks_guardados": 0,
+                    "mensajes_enviados": 0,
+                    "publication_id": None,
+                    "zero_picks_diagnostics": publication_plan.get("zero_picks_diagnostics") or {},
+                }
             usage = provider_layer.get_odds_api_usage_tracking()
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs[job_id],
