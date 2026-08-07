@@ -1608,6 +1608,7 @@ def system_publication_guard():
 def system_performance_guard():
     return build_performance_guard(
         load_dashboard=dashboard_data,
+        operating_mode=RISK_OPERATING_MODE,
     )
 
 
@@ -3353,6 +3354,7 @@ def apuestas_hoy(
         ),
         build_performance_guard=lambda: build_performance_guard(
             load_dashboard=dashboard_data,
+            operating_mode=RISK_OPERATING_MODE,
         ),
         apply_performance_guard_to_pick=apply_performance_guard_to_pick,
         apply_exposure_limits=lambda picks, max_total=None: apply_exposure_limits(

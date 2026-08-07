@@ -5485,6 +5485,71 @@ class BettingModelTests(unittest.TestCase):
         self.assertFalse(adjusted["performance_guard_blocked"])
         self.assertEqual(adjusted["stake"], 2)
 
+    def test_build_performance_guard_agresivo_no_bloquea_por_historico(self):
+        guard = build_performance_guard(
+            load_dashboard=lambda: {
+                "por_deporte": [
+                    {
+                        "nombre": "Tenis",
+                        "cerradas": 20,
+                        "roi": -12.0,
+                        "hit_rate": 31.0,
+                        "clv_positivo_pct": 28.0,
+                    }
+                ],
+                "por_liga": [
+                    {
+                        "nombre": "Wta Canadian Open",
+                        "cerradas": 20,
+                        "roi": -12.0,
+                        "hit_rate": 31.0,
+                        "clv_positivo_pct": 28.0,
+                    }
+                ],
+            },
+            operating_mode="agresivo",
+        )
+
+        adjusted = apply_performance_guard_to_pick(
+            {
+                "league_label": "Wta Canadian Open",
+                "sport_label": "Tenis",
+                "stake": 2,
+                "importe_sugerido": 5,
+                "stake_pct_bankroll": 1.5,
+                "kelly_fraccional": 0.01,
+                "recomendacion": "Value",
+                "motivo": "test",
+            },
+            guard,
+        )
+
+        self.assertEqual(guard["blocked_sports"], {})
+        self.assertEqual(guard["blocked_leagues"], {})
+        self.assertTrue(guard["overrides"]["performance_guard_disabled"])
+        self.assertFalse(adjusted["performance_guard_blocked"])
+        self.assertEqual(adjusted["stake"], 2)
+
+    def test_build_performance_guard_alto_riesgo_no_bloquea_por_historico(self):
+        guard = build_performance_guard(
+            load_dashboard=lambda: {
+                "por_deporte": [
+                    {
+                        "nombre": "Tenis",
+                        "cerradas": 20,
+                        "roi": -12.0,
+                        "hit_rate": 31.0,
+                        "clv_positivo_pct": 28.0,
+                    }
+                ],
+                "por_liga": [],
+            },
+            operating_mode="alto_riesgo",
+        )
+
+        self.assertEqual(guard["blocked_sports"], {})
+        self.assertTrue(guard["overrides"]["performance_guard_disabled"])
+
     def test_resolver_contexto_deporte_generico_prefiere_liga_activa(self):
         import main
 

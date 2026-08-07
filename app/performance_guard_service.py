@@ -2,6 +2,10 @@ import os
 from typing import Any, Callable
 
 
+def _aggressive_performance_mode(mode: str | None) -> bool:
+    return str(mode or "").strip().lower() in {"agresivo", "alto_riesgo"}
+
+
 def _csv_env(name: str) -> set[str]:
     raw = os.getenv(name, "")
     return {
@@ -34,8 +38,10 @@ def _int_env(name: str, default: int) -> int:
 def build_performance_guard(
     *,
     load_dashboard: Callable[[], dict[str, Any]],
+    operating_mode: str = "equilibrado",
 ) -> dict[str, Any]:
     dashboard = load_dashboard()
+    mode = str(operating_mode or "equilibrado").strip().lower()
     min_sample = _int_env("PERF_GUARD_MIN_SAMPLE", 12)
     min_roi = _float_env("PERF_GUARD_MIN_ROI", -2.0)
     min_hit_rate = _float_env("PERF_GUARD_MIN_HIT_RATE", 42.0)
@@ -95,7 +101,12 @@ def build_performance_guard(
     for key in unblocked_leagues:
         blocked_leagues.pop(key, None)
 
+    if _aggressive_performance_mode(mode):
+        blocked_sports = {}
+        blocked_leagues = {}
+
     return {
+        "operating_mode": mode,
         "blocked_sports": blocked_sports,
         "blocked_leagues": blocked_leagues,
         "overrides": {
@@ -103,6 +114,7 @@ def build_performance_guard(
             "allowed_leagues": sorted(allowed_leagues),
             "unblocked_sports": unblocked_sports,
             "unblocked_leagues": unblocked_leagues,
+            "performance_guard_disabled": _aggressive_performance_mode(mode),
         },
         "thresholds": {
             "min_sample": min_sample,
