@@ -105,7 +105,7 @@ def _build_operational_fallback_picks(
         if bool(pick.get("risk_guard_blocked")) or bool(pick.get("performance_guard_blocked")) or bool(pick.get("market_guard_blocked")):
             continue
         reason_text = str(pick.get("motivo_es") or pick.get("motivo") or "").strip()
-        promotable_reason = _promotable_discard_reason(reason_text)
+        promotable_reason = _promotable_discard_reason(reason_text) or _promotable_discard_reason_loose(reason_text)
         if str(pick.get("recomendacion") or "").strip().lower() == "no apostar" and not promotable_reason:
             continue
         reliability = float(pick.get("reliability_score") or 0)
@@ -185,7 +185,7 @@ def _build_emergency_fallback_picks(
             continue
 
         reason_text = str(pick.get("motivo_es") or pick.get("motivo") or "").strip()
-        if not _promotable_discard_reason(reason_text):
+        if not (_promotable_discard_reason(reason_text) or _promotable_discard_reason_loose(reason_text)):
             continue
 
         cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or 0)
@@ -218,6 +218,68 @@ def _build_emergency_fallback_picks(
             f"{reason_text} | Rescatada por fallback de emergencia para no dejar el canal vacio."
             if reason_text
             else "Rescatada por fallback de emergencia para no dejar el canal vacio."
+        )
+        key = fingerprint_pick(promoted)
+        if key in seen:
+            continue
+        fallback.append(promoted)
+        seen.add(key)
+
+    return fallback
+
+
+def _promotable_discard_reason_loose(reason: str) -> bool:
+    normalized = str(reason or "").strip().lower()
+    return any(
+        token in normalized
+        for token in (
+            "filtro de valor y margen superado",
+            "valor positivo",
+            "valor pequeno",
+            "valor pequeño",
+            "value positivo",
+            "value pequeno",
+            "value peque",
+            "valor controlado",
+            "valor interesante",
+            "valor moderado",
+            "valor ligero",
+            "cuota mejor que pinnacle",
+        )
+    )
+
+
+def _build_last_resort_picks(
+    data: dict[str, Any],
+    *,
+    bankroll: float | None,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    fallback: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    bankroll_value = float(bankroll or 200.0)
+    fallback_source = list(data.get("descartadas_operativas") or data.get("descartadas") or [])
+
+    for pick in fallback_source:
+        if len(fallback) >= max_items:
+            break
+        if bool(pick.get("risk_guard_blocked")) or bool(pick.get("performance_guard_blocked")) or bool(pick.get("market_guard_blocked")):
+            continue
+
+        reason_text = str(pick.get("motivo_es") or pick.get("motivo") or "").strip()
+        if not (_promotable_discard_reason(reason_text) or _promotable_discard_reason_loose(reason_text)):
+            continue
+
+        promoted = dict(pick)
+        promoted["stake"] = 0.5
+        promoted["stake_pct_bankroll"] = 0.01
+        promoted["importe_sugerido"] = round(max(2.0, bankroll_value * 0.01), 2)
+        promoted["kelly_fraccional"] = max(0.0001, float(promoted.get("kelly_fraccional") or 0) or 0.0001)
+        promoted["recomendacion"] = "Value frontera"
+        promoted["motivo"] = (
+            f"{reason_text} | Seleccion de ultima reserva para evitar informe vacio."
+            if reason_text
+            else "Seleccion de ultima reserva para evitar informe vacio."
         )
         key = fingerprint_pick(promoted)
         if key in seen:
@@ -384,6 +446,19 @@ def publish_telegram_predictions(
                     **data,
                     "pronosticos": emergency_candidates,
                 }
+            else:
+                last_resort_candidates = _build_last_resort_picks(
+                    data,
+                    bankroll=bankroll,
+                    max_items=min(2, fallback_max_items),
+                )
+                if last_resort_candidates:
+                    picks_publicables = last_resort_candidates
+                    emergency_fallback_used = True
+                    data = {
+                        **data,
+                        "pronosticos": last_resort_candidates,
+                    }
 
     zero_picks_diagnostics = _build_zero_picks_diagnostics(
         data,
