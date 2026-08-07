@@ -2947,6 +2947,8 @@ def titulo_card_apuesta(apuesta: dict) -> str:
 
     if sport_key.startswith("tennis_") and mercado == "h2h":
         return f"Apostar a que {equipo} gana el partido"
+    if sport_key.startswith("tennis_") and mercado in {"totals", "alternate_totals"}:
+        return f"Apostar al total de juegos: {equipo.replace('goles', 'juegos')}"
 
     if sport_key.startswith("basketball_"):
         if mercado == "h2h":
@@ -2990,6 +2992,11 @@ def que_tiene_que_pasar(apuesta: dict) -> str:
 
     if sport_key.startswith("tennis_") and mercado == "h2h":
         return f"{equipo} debe ganar el partido completo segun las reglas de la casa."
+    if sport_key.startswith("tennis_") and mercado in {"totals", "alternate_totals"}:
+        if equipo_raw == "Over":
+            return f"El partido debe superar la linea total de juegos de {point:g}." if point is not None else "El partido debe superar la linea total de juegos."
+        if equipo_raw == "Under":
+            return f"El partido debe quedar por debajo de la linea total de juegos de {point:g}." if point is not None else "El partido debe quedar por debajo de la linea total de juegos."
 
     if sport_key.startswith("basketball_"):
         if mercado == "h2h":
@@ -3075,6 +3082,10 @@ def etiqueta_tipo_apuesta(apuesta: dict) -> tuple[str, str]:
 
     if mercado == "h2h":
         return "Resultado elegido", apuesta.get("tipo_resultado_es", "")
+
+    if sport_key.startswith("tennis_") and mercado in {"totals", "alternate_totals", "team_totals"}:
+        tipo = str(apuesta.get("tipo_resultado_es") or "")
+        return "Mercado", tipo.replace("Goles", "Juegos").replace("goles", "juegos")
 
     if sport_key.startswith("basketball_") and mercado in {"totals", "alternate_totals", "team_totals", "totals_h1", "totals_h2"}:
         return "Mercado", apuesta.get("tipo_resultado_es", "")

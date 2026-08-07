@@ -131,6 +131,15 @@ def _is_basketball_context(
     return sport_key_text.startswith("basketball_") or sport_label_text == "baloncesto"
 
 
+def _is_tennis_context(
+    sport_key: str | None = None,
+    sport_label: str | None = None,
+) -> bool:
+    sport_key_text = str(sport_key or "").strip().lower()
+    sport_label_text = str(sport_label or "").strip().lower()
+    return sport_key_text.startswith("tennis_") or sport_label_text == "tenis"
+
+
 def apuesta_es(
     nombre: str | None,
     mercado: str | None = None,
@@ -141,11 +150,16 @@ def apuesta_es(
 ) -> str:
     descripcion = equipo_es(description)
     basketball = _is_basketball_context(sport_key, sport_label)
+    tennis = _is_tennis_context(sport_key, sport_label)
 
     if mercado in {"totals", "alternate_totals"}:
         if nombre == "Over":
+            if tennis:
+                return f"Mas de {point:g} juegos" if point is not None else "Mas juegos"
             return f"Más de {point:g} puntos" if basketball and point is not None else f"Más de {point:g} goles" if point is not None else "Más puntos" if basketball else "Más goles"
         if nombre == "Under":
+            if tennis:
+                return f"Menos de {point:g} juegos" if point is not None else "Menos juegos"
             return f"Menos de {point:g} puntos" if basketball and point is not None else f"Menos de {point:g} goles" if point is not None else "Menos puntos" if basketball else "Menos goles"
 
     if mercado == "totals_h1":
@@ -162,8 +176,12 @@ def apuesta_es(
 
     if mercado == "team_totals":
         if nombre == "Over":
+            if tennis:
+                return f"{descripcion}: mas de {point:g} juegos" if point is not None else f"{descripcion}: mas juegos"
             return f"{descripcion}: más de {point:g} puntos" if basketball and point is not None else f"{descripcion}: más de {point:g} goles" if point is not None else f"{descripcion}: más puntos" if basketball else f"{descripcion}: más goles"
         if nombre == "Under":
+            if tennis:
+                return f"{descripcion}: menos de {point:g} juegos" if point is not None else f"{descripcion}: menos juegos"
             return f"{descripcion}: menos de {point:g} puntos" if basketball and point is not None else f"{descripcion}: menos de {point:g} goles" if point is not None else f"{descripcion}: menos puntos" if basketball else f"{descripcion}: menos goles"
 
     if mercado == "alternate_team_totals_corners":
