@@ -2,7 +2,7 @@ from typing import Any
 
 
 def aggressive_mode_enabled(operating_mode: str | None) -> bool:
-    return str(operating_mode or "").strip().lower() == "agresivo"
+    return str(operating_mode or "").strip().lower() in {"agresivo", "alto_riesgo"}
 
 
 def single_sport_pick_limit(operating_mode: str | None, partido: str | None) -> int:

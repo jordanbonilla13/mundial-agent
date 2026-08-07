@@ -1,6 +1,10 @@
 from typing import Any
 
 
+def _aggressive_risk_mode(mode: str | None) -> bool:
+    return str(mode or "").strip().lower() in {"agresivo", "alto_riesgo"}
+
+
 def build_risk_policy(
     *,
     total_closed: int,
@@ -29,7 +33,7 @@ def build_risk_policy(
         "reason": "normal",
     }
 
-    if mode == "agresivo":
+    if _aggressive_risk_mode(mode):
         policy["stake_multiplier"] = 1.15
         policy["max_stake_units"] = 5.0
     elif mode == "estricto":
@@ -38,7 +42,7 @@ def build_risk_policy(
         policy["block_fragile_markets"] = True
 
     if total_closed < 12:
-        if mode == "agresivo":
+        if _aggressive_risk_mode(mode):
             policy["stake_multiplier"] = 0.85
             policy["max_stake_units"] = 2.5
             policy["block_fragile_markets"] = False
@@ -54,7 +58,7 @@ def build_risk_policy(
         return policy
 
     if total_closed < 30:
-        if mode == "agresivo":
+        if _aggressive_risk_mode(mode):
             policy["stake_multiplier"] = min(policy["stake_multiplier"], 0.95)
             policy["max_stake_units"] = min(policy["max_stake_units"], 3.5)
             policy["block_fragile_markets"] = False
@@ -69,37 +73,45 @@ def build_risk_policy(
         policy["reason"] = "muestra_en_construccion"
 
     if total_closed >= 20 and roi < 0:
-        roi_stake_cap = 0.80 if mode == "agresivo" else 0.65 if mode == "equilibrado" else 0.55
-        roi_units_cap = 3.0 if mode == "agresivo" else 2.0 if mode == "equilibrado" else 1.5
+        roi_stake_cap = 0.80 if _aggressive_risk_mode(mode) else 0.65 if mode == "equilibrado" else 0.55
+        roi_units_cap = 3.0 if _aggressive_risk_mode(mode) else 2.0 if mode == "equilibrado" else 1.5
         policy["stake_multiplier"] = min(policy["stake_multiplier"], roi_stake_cap)
         policy["max_stake_units"] = min(policy["max_stake_units"], roi_units_cap)
         policy["only_elite_when_cautious"] = True
         policy["reason"] = "roi_negativo"
 
     if clv_medio is not None and total_closed >= 20 and float(clv_medio) < 0:
-        clv_stake_cap = 0.72 if mode == "agresivo" else 0.60 if mode == "equilibrado" else 0.50
-        clv_units_cap = 2.5 if mode == "agresivo" else 2.0 if mode == "equilibrado" else 1.5
+        clv_stake_cap = 0.72 if _aggressive_risk_mode(mode) else 0.60 if mode == "equilibrado" else 0.50
+        clv_units_cap = 2.5 if _aggressive_risk_mode(mode) else 2.0 if mode == "equilibrado" else 1.5
         policy["stake_multiplier"] = min(policy["stake_multiplier"], clv_stake_cap)
         policy["max_stake_units"] = min(policy["max_stake_units"], clv_units_cap)
-        policy["block_fragile_markets"] = mode != "agresivo"
+        policy["block_fragile_markets"] = not _aggressive_risk_mode(mode)
         policy["only_elite_when_cautious"] = True
         policy["reason"] = "clv_negativo"
 
     if clv_positive_pct is not None and total_closed >= 20 and float(clv_positive_pct) < 45:
-        clv_pos_stake_cap = 0.72 if mode == "agresivo" else 0.60 if mode == "equilibrado" else 0.50
-        clv_pos_units_cap = 2.5 if mode == "agresivo" else 2.0 if mode == "equilibrado" else 1.5
+        clv_pos_stake_cap = 0.72 if _aggressive_risk_mode(mode) else 0.60 if mode == "equilibrado" else 0.50
+        clv_pos_units_cap = 2.5 if _aggressive_risk_mode(mode) else 2.0 if mode == "equilibrado" else 1.5
         policy["stake_multiplier"] = min(policy["stake_multiplier"], clv_pos_stake_cap)
         policy["max_stake_units"] = min(policy["max_stake_units"], clv_pos_units_cap)
-        policy["block_fragile_markets"] = mode != "agresivo"
+        policy["block_fragile_markets"] = not _aggressive_risk_mode(mode)
         policy["reason"] = "poco_clv_positivo"
 
     if total_closed >= 40 and (roi <= -8 or (clv_medio is not None and float(clv_medio) <= -3)):
-        policy["block_new_picks"] = True
-        policy["stake_multiplier"] = 0.0
-        policy["max_stake_units"] = 0.0
-        policy["block_fragile_markets"] = True
-        policy["only_elite_when_cautious"] = True
-        policy["reason"] = "kill_switch_rendimiento"
+        if _aggressive_risk_mode(mode):
+            policy["block_new_picks"] = False
+            policy["stake_multiplier"] = min(policy["stake_multiplier"], 0.55)
+            policy["max_stake_units"] = min(policy["max_stake_units"], 1.5)
+            policy["block_fragile_markets"] = False
+            policy["only_elite_when_cautious"] = False
+            policy["reason"] = "kill_switch_omitido_agresivo"
+        else:
+            policy["block_new_picks"] = True
+            policy["stake_multiplier"] = 0.0
+            policy["max_stake_units"] = 0.0
+            policy["block_fragile_markets"] = True
+            policy["only_elite_when_cautious"] = True
+            policy["reason"] = "kill_switch_rendimiento"
 
     return policy
 

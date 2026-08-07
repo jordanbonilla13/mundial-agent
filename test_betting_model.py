@@ -458,6 +458,32 @@ class BettingModelTests(unittest.TestCase):
         self.assertTrue(policy["block_new_picks"])
         self.assertEqual(policy["reason"], "kill_switch_rendimiento")
 
+    def test_build_risk_policy_agresivo_no_activa_kill_switch_con_historico_malo(self):
+        policy = build_risk_policy(
+            total_closed=45,
+            roi=-9,
+            clv_medio=-3.5,
+            clv_positive_pct=38,
+            operating_mode="agresivo",
+        )
+
+        self.assertFalse(policy["block_new_picks"])
+        self.assertEqual(policy["reason"], "kill_switch_omitido_agresivo")
+        self.assertLessEqual(policy["stake_multiplier"], 0.55)
+        self.assertLessEqual(policy["max_stake_units"], 1.5)
+
+    def test_build_risk_policy_alto_riesgo_no_activa_kill_switch_con_historico_malo(self):
+        policy = build_risk_policy(
+            total_closed=45,
+            roi=-9,
+            clv_medio=-3.5,
+            clv_positive_pct=38,
+            operating_mode="alto_riesgo",
+        )
+
+        self.assertFalse(policy["block_new_picks"])
+        self.assertEqual(policy["reason"], "kill_switch_omitido_agresivo")
+
     def test_apply_risk_policy_bloquea_mercado_fragil(self):
         pick = {
             "stake": 2,
