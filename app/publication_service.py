@@ -1,4 +1,5 @@
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app.runtime_settings import RuntimeSettings
@@ -150,6 +151,83 @@ def _build_operational_fallback_picks(
     return fallback
 
 
+def _parse_commence_time(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _build_emergency_fallback_picks(
+    data: dict[str, Any],
+    *,
+    bankroll: float | None,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    fallback: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str, str]] = set()
+    bankroll_value = float(bankroll or 200.0)
+    now = datetime.now(timezone.utc)
+    fallback_source = list(data.get("descartadas_operativas") or data.get("descartadas") or [])
+
+    for pick in fallback_source:
+        if len(fallback) >= max_items:
+            break
+        if bool(pick.get("risk_guard_blocked")) or bool(pick.get("performance_guard_blocked")) or bool(pick.get("market_guard_blocked")):
+            continue
+
+        reason_text = str(pick.get("motivo_es") or pick.get("motivo") or "").strip()
+        if not _promotable_discard_reason(reason_text):
+            continue
+
+        cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or 0)
+        if cuota <= 0 or cuota > 2.35:
+            continue
+
+        commence = _parse_commence_time(pick.get("commence_time"))
+        if commence is not None:
+            delta_hours = (commence - now).total_seconds() / 3600
+            if delta_hours < -2 or delta_hours > 48:
+                continue
+
+        reliability = float(pick.get("reliability_score") or 0)
+        quality = float(pick.get("quality_score") or 0)
+        value_pct = float(pick.get("valor_esperado") or 0) * 100
+        margin = float(pick.get("margen_cuota") or 0)
+        if reliability < 45 and quality < 45 and value_pct < 0.8 and margin < 1.002:
+            continue
+
+        promoted = dict(pick)
+        promoted["stake"] = max(0.5, min(0.75, float(promoted.get("stake") or 0) or 0.5))
+        promoted["stake_pct_bankroll"] = round(max(0.01, min(0.015, promoted["stake"] / 100.0)), 4)
+        promoted["importe_sugerido"] = round(
+            max(2.0, min(3.0, bankroll_value * promoted["stake_pct_bankroll"])),
+            2,
+        )
+        promoted["kelly_fraccional"] = max(0.0005, float(promoted.get("kelly_fraccional") or 0) or 0.0005)
+        promoted["recomendacion"] = "Value frontera"
+        promoted["motivo"] = (
+            f"{reason_text} | Rescatada por fallback de emergencia para no dejar el canal vacio."
+            if reason_text
+            else "Rescatada por fallback de emergencia para no dejar el canal vacio."
+        )
+        key = fingerprint_pick(promoted)
+        if key in seen:
+            continue
+        fallback.append(promoted)
+        seen.add(key)
+
+    return fallback
+
+
 def select_picks_for_telegram(
     data: dict[str, Any],
     *,
@@ -279,6 +357,7 @@ def publish_telegram_predictions(
 
     picks_publicables = list(data.get("pronosticos", []))
     operational_fallback_used = False
+    emergency_fallback_used = False
     if not picks_publicables and not solo_stakazos:
         fallback_candidates = _build_operational_fallback_picks(
             data,
@@ -292,6 +371,19 @@ def publish_telegram_predictions(
                 **data,
                 "pronosticos": fallback_candidates,
             }
+        else:
+            emergency_candidates = _build_emergency_fallback_picks(
+                data,
+                bankroll=bankroll,
+                max_items=min(3, fallback_max_items),
+            )
+            if emergency_candidates:
+                picks_publicables = emergency_candidates
+                emergency_fallback_used = True
+                data = {
+                    **data,
+                    "pronosticos": emergency_candidates,
+                }
 
     zero_picks_diagnostics = _build_zero_picks_diagnostics(
         data,
@@ -378,6 +470,7 @@ def publish_telegram_predictions(
             "shadow_messages": messages,
             "zero_picks_diagnostics": zero_picks_diagnostics,
             "operational_fallback_used": operational_fallback_used,
+            "emergency_fallback_used": emergency_fallback_used,
         }
 
     for index, text in enumerate(messages):
@@ -431,4 +524,5 @@ def publish_telegram_predictions(
         "publication_guard": guard,
         "zero_picks_diagnostics": zero_picks_diagnostics,
         "operational_fallback_used": operational_fallback_used,
+        "emergency_fallback_used": emergency_fallback_used,
     }
