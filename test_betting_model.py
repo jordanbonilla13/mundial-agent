@@ -4232,6 +4232,7 @@ class BettingModelTests(unittest.TestCase):
         original_telegram_client = main.telegram_client
         original_generate = main.generate_bet_slip_opinion_from_image
         original_openai_available = main.openai_available
+        original_find_event = main._find_real_event_for_opinion
 
         sent_messages: list[str] = []
 
@@ -4254,6 +4255,7 @@ class BettingModelTests(unittest.TestCase):
             main.telegram_client = lambda token=None, chat_id=None: dummy_client
             main.openai_available = lambda: True
             main.generate_bet_slip_opinion_from_image = lambda image_bytes, mime_type="image/jpeg", user_notes=None: (
+                "Partido: Flamengo vs Vitoria\n"
                 "Apuesta detectada: combinada doble\n"
                 "Valor: medio\n"
                 "Fiabilidad: media\n"
@@ -4262,6 +4264,11 @@ class BettingModelTests(unittest.TestCase):
                 "Stake sugerido: 0.5/5\n"
                 "Lectura: demasiado justa."
             )
+            main._find_real_event_for_opinion = lambda analysis, sport_hint=None: {
+                "partido": "Flamengo vs Vitoria",
+                "liga": "Brazil Campeonato",
+                "commence_time": "2026-08-09T22:30:00Z",
+            }
 
             main.procesar_update_telegram(
                 {
@@ -4277,12 +4284,15 @@ class BettingModelTests(unittest.TestCase):
             main.telegram_client = original_telegram_client
             main.generate_bet_slip_opinion_from_image = original_generate
             main.openai_available = original_openai_available
+            main._find_real_event_for_opinion = original_find_event
 
         self.assertEqual(getattr(dummy_client, "file_id", None), "big")
         self.assertEqual(len(sent_messages), 2)
         self.assertIn("/opinion en marcha", sent_messages[0])
         self.assertIn("Opinion IA de la apuesta", sent_messages[1])
         self.assertIn("Apuesta detectada", sent_messages[1])
+        self.assertIn("Contexto real detectado", sent_messages[1])
+        self.assertIn("Brazil Campeonato", sent_messages[1])
 
     def test_procesar_update_telegram_opinion_admite_reply_a_foto(self):
         import main
@@ -4334,6 +4344,35 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(getattr(dummy_client, "file_id", None), "reply-photo")
         self.assertEqual(len(sent_messages), 2)
         self.assertIn("Opinion IA de la apuesta", sent_messages[1])
+
+    def test_extract_matchup_from_opinion_text_detecta_partido(self):
+        import main
+
+        matchup = main._extract_matchup_from_opinion_text(
+            "Partido: Flamengo vs Vitoria\n"
+            "Apuesta detectada: Flamengo gana + Menos de 5 goles"
+        )
+
+        self.assertEqual(matchup, ("Flamengo", "Vitoria"))
+
+    def test_extract_opinion_sport_hint_detecta_deporte(self):
+        import main
+
+        self.assertEqual(main._extract_opinion_sport_hint("/opinion futbol"), "futbol")
+        self.assertEqual(main._extract_opinion_sport_hint("/opinion tenis cuota justa"), "tenis")
+        self.assertEqual(main._extract_opinion_sport_hint("/opinion nba"), "baloncesto")
+
+    def test_extract_opinion_user_notes_omite_pista_deporte(self):
+        import main
+
+        self.assertEqual(
+            main._extract_opinion_user_notes("/opinion futbol la ves buena para hoy"),
+            "la ves buena para hoy",
+        )
+        self.assertEqual(
+            main._extract_opinion_user_notes("/opinion tenis"),
+            "",
+        )
 
     def test_lanzar_apuestas_async_usa_preset_lab_y_envia_resumen_final(self):
         import main

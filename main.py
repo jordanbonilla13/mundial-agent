@@ -5,7 +5,7 @@ import re
 import subprocess
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any
 from urllib.parse import parse_qs, urlencode
@@ -79,6 +79,7 @@ from app.telegram_service import (
     format_pick_message,
     format_summary_message,
     telegram_keyboard_for_pick as telegram_keyboard_for_pick_service,
+    telegram_kickoff_label,
     telegram_text as telegram_text_service,
     telegram_tier_label as telegram_tier_label_service,
 )
@@ -120,6 +121,7 @@ audit_scheduler_thread: threading.Thread | None = None
 lab_publication_jobs: dict[str, dict[str, Any]] = {}
 telegram_command_jobs: dict[str, dict[str, Any]] = {}
 TODO_FILTERS_SETTING = "lab_todo_filters"
+_opinion_catalog_cache: dict[str, Any] = {"expires_at": None, "sports": []}
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
@@ -1085,7 +1087,192 @@ def _extract_opinion_user_notes(command_text: str) -> str:
     if not text:
         return ""
     cleaned = re.sub(r"(?i)^/opinion(?:@\w+)?", "", text, count=1).strip()
-    return cleaned
+    tokens = cleaned.split()
+    if not tokens:
+        return ""
+    sport_hint = _extract_opinion_sport_hint(command_text)
+    if sport_hint and tokens and sports_layer.SPORT_ALIASES.get(tokens[0].strip().lower()) == sport_hint:
+        tokens = tokens[1:]
+    return " ".join(tokens).strip()
+
+
+def _extract_opinion_sport_hint(command_text: str) -> str | None:
+    text = str(command_text or "").strip()
+    if not text:
+        return None
+    cleaned = re.sub(r"(?i)^/opinion(?:@\w+)?", "", text, count=1).strip().lower()
+    if not cleaned:
+        return None
+    first_token = cleaned.split()[0].strip()
+    if not first_token:
+        return None
+    mapped = sports_layer.SPORT_ALIASES.get(first_token)
+    return str(mapped or "").strip().lower() or None
+
+
+def _normalize_name_for_match(value: str) -> str:
+    text = str(value or "").strip().lower()
+    replacements = {
+        "á": "a",
+        "à": "a",
+        "ä": "a",
+        "â": "a",
+        "ã": "a",
+        "é": "e",
+        "è": "e",
+        "ë": "e",
+        "ê": "e",
+        "í": "i",
+        "ì": "i",
+        "ï": "i",
+        "î": "i",
+        "ó": "o",
+        "ò": "o",
+        "ö": "o",
+        "ô": "o",
+        "õ": "o",
+        "ú": "u",
+        "ù": "u",
+        "ü": "u",
+        "û": "u",
+        "ñ": "n",
+        "ç": "c",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    text = re.sub(r"\b(fc|cf|sc|ac|cd|club|clube|esporte clube)\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_matchup_from_opinion_text(text: str) -> tuple[str, str] | None:
+    content = str(text or "").strip()
+    if not content:
+        return None
+
+    match = re.search(r"(?im)^Partido:\s*(.+)$", content)
+    if not match:
+        match = re.search(r"(?im)^Apuesta detectada:\s*(.+?)\s*(?:,| cuota|$)", content)
+        if not match:
+            return None
+
+    value = match.group(1).strip()
+    for pattern in (r"\s+vs\s+", r"\s+v\s+", r"\s+-\s+"):
+        parts = re.split(pattern, value, flags=re.IGNORECASE, maxsplit=1)
+        if len(parts) == 2:
+            left = parts[0].strip(" :,-")
+            right = parts[1].strip(" :,-")
+            if left and right:
+                return left, right
+    return None
+
+
+def _opinion_candidate_contexts(sport_hint: str | None = None) -> list[dict[str, Any]]:
+    now = datetime.now(timezone.utc)
+    cache_key = str(sport_hint or "auto").strip().lower() or "auto"
+    cache_store = _opinion_catalog_cache.setdefault("by_hint", {})
+    cache_entry = cache_store.get(cache_key) or {}
+    expires_at = cache_entry.get("expires_at")
+    cached = list(cache_entry.get("sports") or [])
+    if isinstance(expires_at, datetime) and expires_at > now and cached:
+        return cached
+
+    try:
+        catalog = provider_layer.discover_available_catalog(provider="the_odds_api")
+    except Exception:
+        return cached
+
+    sports = []
+    for item in list(catalog.get("sports") or []):
+        sport_key = str(item.get("sport_key") or "")
+        family = sports_layer.family_from_sport_key(sport_key)
+        if sport_hint:
+            mapped_hint = sports_layer.SPORT_ALIASES.get(sport_hint, sport_hint)
+            target_family = {
+                "futbol": "soccer",
+                "tenis": "tennis",
+                "baloncesto": "basketball",
+                "basket": "basketball",
+                "basketball": "basketball",
+                "esports": "esports",
+            }.get(mapped_hint, mapped_hint)
+            if family != target_family:
+                continue
+        elif family not in {"soccer", "tennis", "basketball", "esports"}:
+            continue
+        if bool(item.get("has_outrights")):
+            continue
+        sports.append(item)
+
+    sports.sort(key=sports_layer.prioridad_contexto_todo)
+    limit_default = 6 if not sport_hint else 8
+    limited = sports[: max(1, int(os.getenv("OPINION_ODDS_CONTEXTS_MAX", str(limit_default))))]
+    cache_store[cache_key] = {
+        "sports": limited,
+        "expires_at": now + timedelta(hours=3),
+    }
+    return limited
+
+
+def _find_real_event_for_opinion(analysis_text: str, sport_hint: str | None = None) -> dict[str, Any] | None:
+    matchup = _extract_matchup_from_opinion_text(analysis_text)
+    if not matchup:
+        return None
+
+    left_target = _normalize_name_for_match(matchup[0])
+    right_target = _normalize_name_for_match(matchup[1])
+    if not left_target or not right_target:
+        return None
+
+    contexts = _opinion_candidate_contexts(sport_hint=sport_hint)
+    for context in contexts:
+        try:
+            events = provider_layer.fetch_the_odds_odds(["h2h"], context)
+        except Exception:
+            continue
+
+        for event in events:
+            home = str(event.get("home_team") or "").strip()
+            away = str(event.get("away_team") or "").strip()
+            home_norm = _normalize_name_for_match(home)
+            away_norm = _normalize_name_for_match(away)
+            if not home_norm or not away_norm:
+                continue
+
+            direct_match = left_target == home_norm and right_target == away_norm
+            reverse_match = left_target == away_norm and right_target == home_norm
+            soft_match = (
+                (left_target in home_norm or home_norm in left_target)
+                and (right_target in away_norm or away_norm in right_target)
+            ) or (
+                (left_target in away_norm or away_norm in left_target)
+                and (right_target in home_norm or home_norm in right_target)
+            )
+            if not (direct_match or reverse_match or soft_match):
+                continue
+
+            return {
+                "partido": f"{home} vs {away}",
+                "liga": event.get("league_label") or context.get("league_label") or context.get("title") or "General",
+                "deporte": event.get("sport_label") or context.get("sport_label") or "General",
+                "commence_time": event.get("commence_time"),
+            }
+    return None
+
+
+def _format_opinion_provider_context(event: dict[str, Any] | None) -> str:
+    if not event:
+        return ""
+    kickoff = telegram_kickoff_label(event.get("commence_time"))
+    lines = [
+        "",
+        "Contexto real detectado:",
+        f"- Partido: {event.get('partido')}",
+        f"- Liga: {event.get('liga')}",
+    ]
+    if kickoff:
+        lines.append(f"- Hora: {kickoff}")
+    return "\n".join(lines)
 
 
 def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> bool:
@@ -1116,6 +1303,7 @@ def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> boo
         return True
 
     notes = _extract_opinion_user_notes(command_text)
+    sport_hint = _extract_opinion_sport_hint(command_text)
     client.send_message(
         "🧠 <b>/opinion en marcha</b>\n"
         "Estoy leyendo la captura y te doy una valoracion profesional en unos segundos."
@@ -1127,6 +1315,7 @@ def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> boo
             mime_type=mime_type or "image/jpeg",
             user_notes=notes,
         )
+        opinion_event = _find_real_event_for_opinion(analysis or "", sport_hint=sport_hint)
     except HTTPException as exc:
         client.send_message(
             "🤖 <b>/opinion</b>\n"
@@ -1149,7 +1338,7 @@ def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> boo
 
     client.send_message(
         "🤖 <b>Opinion IA de la apuesta</b>\n"
-        f"{telegram_text_service(analysis)}"
+        f"{telegram_text_service((analysis or '') + _format_opinion_provider_context(opinion_event))}"
     )
     return True
 
