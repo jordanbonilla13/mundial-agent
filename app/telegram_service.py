@@ -219,6 +219,23 @@ class TelegramClient:
 
         return self.api_request("sendMessage", payload=payload)
 
+    def get_file_path(self, file_id: str) -> str:
+        data = self.api_request("getFile", payload={"file_id": file_id})
+        file_path = str((data.get("result") or {}).get("file_path") or "").strip()
+        if not file_path:
+            raise HTTPException(status_code=502, detail="Telegram no devolvio la ruta del archivo adjunto.")
+        return file_path
+
+    def download_file_bytes(self, file_id: str, timeout: int = 25) -> bytes:
+        file_path = self.get_file_path(file_id)
+        url = f"https://api.telegram.org/file/bot{self.config.token}/{file_path}"
+        try:
+            response = requests.get(url, timeout=timeout)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"No pude descargar la imagen de Telegram: {exc}") from exc
+        return response.content
+
     def answer_callback_query(self, callback_query_id: str, text: str) -> dict:
         return self.api_request(
             "answerCallbackQuery",

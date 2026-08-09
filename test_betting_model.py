@@ -3945,7 +3945,35 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("/ganadas", sent_messages[0])
         self.assertIn("/perdidas", sent_messages[0])
         self.assertIn("/apuestas", sent_messages[0])
+        self.assertIn("/opinion", sent_messages[0])
         self.assertIn("Ayuda enviada", response)
+
+    def test_procesar_comando_opinion_envia_instrucciones(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+
+            response = procesar_comando_telegram("/opinion")
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+
+        self.assertEqual(len(sent_messages), 1)
+        self.assertIn("/opinion", sent_messages[0])
+        self.assertIn("captura", sent_messages[0].lower())
+        self.assertIn("Instrucciones de /opinion", response)
 
     def test_procesar_comando_panel_envia_panel_reciente(self):
         import main
@@ -4196,6 +4224,116 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("/apuestas en marcha", sent_messages[0])
         self.assertIn("job123abc", sent_messages[0])
         self.assertIn("/apuestas lanzado", response)
+
+    def test_procesar_update_telegram_opinion_con_caption_y_foto(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_generate = main.generate_bet_slip_opinion_from_image
+        original_openai_available = main.openai_available
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+            def download_file_bytes(self, file_id):
+                self.file_id = file_id
+                return b"fake-image"
+
+            def process_update(self, update, action_handler, command_handler=None):
+                raise AssertionError("No deberia pasar por el flujo normal si /opinion ya se ha manejado.")
+
+        dummy_client = DummyClient()
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: dummy_client
+            main.openai_available = lambda: True
+            main.generate_bet_slip_opinion_from_image = lambda image_bytes, mime_type="image/jpeg", user_notes=None: (
+                "Apuesta detectada: combinada doble\n"
+                "Valor: medio\n"
+                "Fiabilidad: media\n"
+                "Riesgo principal: cuota ajustada\n"
+                "Veredicto: yo no la jugaria tal cual\n"
+                "Stake sugerido: 0.5/5\n"
+                "Lectura: demasiado justa."
+            )
+
+            main.procesar_update_telegram(
+                {
+                    "message": {
+                        "caption": "/opinion la ves apostable?",
+                        "photo": [{"file_id": "small"}, {"file_id": "big"}],
+                    }
+                },
+                "token-test",
+            )
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main.generate_bet_slip_opinion_from_image = original_generate
+            main.openai_available = original_openai_available
+
+        self.assertEqual(getattr(dummy_client, "file_id", None), "big")
+        self.assertEqual(len(sent_messages), 2)
+        self.assertIn("/opinion en marcha", sent_messages[0])
+        self.assertIn("Opinion IA de la apuesta", sent_messages[1])
+        self.assertIn("Apuesta detectada", sent_messages[1])
+
+    def test_procesar_update_telegram_opinion_admite_reply_a_foto(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_generate = main.generate_bet_slip_opinion_from_image
+        original_openai_available = main.openai_available
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+            def download_file_bytes(self, file_id):
+                self.file_id = file_id
+                return b"reply-image"
+
+            def process_update(self, update, action_handler, command_handler=None):
+                raise AssertionError("No deberia pasar por el flujo normal si /opinion ya se ha manejado.")
+
+        dummy_client = DummyClient()
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: dummy_client
+            main.openai_available = lambda: True
+            main.generate_bet_slip_opinion_from_image = lambda image_bytes, mime_type="image/jpeg", user_notes=None: "Veredicto: yo si la jugaria con stake bajo"
+
+            main.procesar_update_telegram(
+                {
+                    "message": {
+                        "text": "/opinion",
+                        "reply_to_message": {
+                            "photo": [{"file_id": "reply-photo"}],
+                        },
+                    }
+                },
+                "token-test",
+            )
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main.generate_bet_slip_opinion_from_image = original_generate
+            main.openai_available = original_openai_available
+
+        self.assertEqual(getattr(dummy_client, "file_id", None), "reply-photo")
+        self.assertEqual(len(sent_messages), 2)
+        self.assertIn("Opinion IA de la apuesta", sent_messages[1])
 
     def test_lanzar_apuestas_async_usa_preset_lab_y_envia_resumen_final(self):
         import main

@@ -19,7 +19,12 @@ from pydantic import BaseModel
 
 from app import providers as provider_layer
 from app import sports as sports_layer
-from app.ai_service import enrich_picks_with_ai_narratives, generate_publication_ai_summary, openai_available
+from app.ai_service import (
+    enrich_picks_with_ai_narratives,
+    generate_bet_slip_opinion_from_image,
+    generate_publication_ai_summary,
+    openai_available,
+)
 from app.audit import (
     generate_daily_audit_report,
     format_audit_report_telegram,
@@ -922,10 +927,22 @@ def procesar_comando_telegram(command_text: str) -> str:
             "/pendientes - apuestas reales pendientes de cerrar\n"
             "/ganadas - historico reciente de apuestas reales ganadas\n"
             "/perdidas - historico reciente de apuestas reales perdidas\n"
-            "/apuestas - lanzar el preset del lab y publicar picks publicables"
+            "/apuestas - lanzar el preset del lab y publicar picks publicables\n"
+            "/opinion - responde a una captura de apuesta o envia la foto con ese comando para que la IA la valore"
         )
         client.send_message(help_text)
         return "Ayuda enviada por Telegram."
+
+    if command.startswith("/opinion"):
+        token, chat_id = telegram_config()
+        client = telegram_client(token=token, chat_id=chat_id)
+        client.send_message(
+            "<b>/opinion</b>\n"
+            "Enviane una captura de la apuesta junto al comando <code>/opinion</code>, "
+            "o responde con <code>/opinion</code> a una foto ya enviada.\n"
+            "Te devolvere una lectura IA con valor, fiabilidad, riesgo y veredicto."
+        )
+        return "Instrucciones de /opinion enviadas."
 
     if command.startswith("/panel"):
         token, chat_id = telegram_config()
@@ -1007,7 +1024,7 @@ def procesar_comando_telegram(command_text: str) -> str:
         )
         return f"/apuestas lanzado. Job {job_id}."
 
-    return "Comando no soportado. Usa /help, /resumen, /mes, /panel, /pendientes, /ganadas, /perdidas o /apuestas."
+    return "Comando no soportado. Usa /help, /resumen, /mes, /panel, /pendientes, /ganadas, /perdidas, /apuestas o /opinion."
 
 
 def construir_resumen_telegram(
@@ -1038,7 +1055,109 @@ def scores_for_pending_bot_picks(days_from: int = 3) -> list[dict[str, Any]]:
     )
 
 
+def _telegram_message_command_text(message: dict[str, Any]) -> str:
+    text = str(message.get("text") or "").strip()
+    if text:
+        return text
+    return str(message.get("caption") or "").strip()
+
+
+def _telegram_message_image_file(message: dict[str, Any]) -> tuple[str | None, str]:
+    photos = list(message.get("photo") or [])
+    if photos:
+        photo = photos[-1] or {}
+        file_id = str(photo.get("file_id") or "").strip()
+        if file_id:
+            return file_id, "image/jpeg"
+
+    document = message.get("document") or {}
+    mime_type = str(document.get("mime_type") or "").strip().lower()
+    if mime_type.startswith("image/"):
+        file_id = str(document.get("file_id") or "").strip()
+        if file_id:
+            return file_id, mime_type
+
+    return None, "image/jpeg"
+
+
+def _extract_opinion_user_notes(command_text: str) -> str:
+    text = str(command_text or "").strip()
+    if not text:
+        return ""
+    cleaned = re.sub(r"(?i)^/opinion(?:@\w+)?", "", text, count=1).strip()
+    return cleaned
+
+
+def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> bool:
+    command_text = _telegram_message_command_text(message)
+    if not command_text.lower().startswith("/opinion"):
+        return False
+
+    token_config, chat_id = telegram_config()
+    client = telegram_client(token=token or token_config, chat_id=chat_id)
+
+    if not openai_available():
+        client.send_message(
+            "🤖 <b>/opinion</b>\n"
+            "Ahora mismo no puedo analizar capturas porque OpenAI no esta configurado en este entorno."
+        )
+        return True
+
+    file_id, mime_type = _telegram_message_image_file(message)
+    if not file_id:
+        reply_message = message.get("reply_to_message") or {}
+        file_id, mime_type = _telegram_message_image_file(reply_message)
+
+    if not file_id:
+        client.send_message(
+            "<b>/opinion</b>\n"
+            "Necesito una captura de la apuesta. Puedes mandarla con el caption <code>/opinion</code> o responder <code>/opinion</code> a una foto."
+        )
+        return True
+
+    notes = _extract_opinion_user_notes(command_text)
+    client.send_message(
+        "🧠 <b>/opinion en marcha</b>\n"
+        "Estoy leyendo la captura y te doy una valoracion profesional en unos segundos."
+    )
+    try:
+        image_bytes = client.download_file_bytes(file_id)
+        analysis = generate_bet_slip_opinion_from_image(
+            image_bytes,
+            mime_type=mime_type or "image/jpeg",
+            user_notes=notes,
+        )
+    except HTTPException as exc:
+        client.send_message(
+            "🤖 <b>/opinion</b>\n"
+            f"No pude analizar la captura.\nDetalle: <code>{telegram_text_service(str(exc.detail))}</code>"
+        )
+        return True
+    except Exception as exc:
+        client.send_message(
+            "🤖 <b>/opinion</b>\n"
+            f"No pude analizar la captura.\nDetalle: <code>{telegram_text_service(str(exc))}</code>"
+        )
+        return True
+
+    if not analysis:
+        client.send_message(
+            "🤖 <b>/opinion</b>\n"
+            "No he podido sacar una lectura util de la captura. Prueba con una imagen mas clara o recortada."
+        )
+        return True
+
+    client.send_message(
+        "🤖 <b>Opinion IA de la apuesta</b>\n"
+        f"{telegram_text_service(analysis)}"
+    )
+    return True
+
+
 def procesar_update_telegram(update: dict[str, Any], token: str) -> None:
+    message = update.get("message") or {}
+    if message and _handle_telegram_opinion_message(message, token):
+        return
     client = telegram_client(token=token, chat_id=os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID))
     client.process_update(update, procesar_callback_pick, procesar_comando_telegram)
 

@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 from typing import Any
@@ -33,7 +34,7 @@ def openai_available() -> bool:
     return _openai_enabled() and bool(_openai_api_key())
 
 
-def _post_responses_api(system_prompt: str, user_prompt: str) -> str | None:
+def _post_responses_api_content(system_prompt: str, user_content: list[dict[str, Any]]) -> str | None:
     if not openai_available():
         return None
 
@@ -51,12 +52,7 @@ def _post_responses_api(system_prompt: str, user_prompt: str) -> str | None:
             },
             {
                 "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": user_prompt,
-                    }
-                ],
+                "content": user_content,
             },
         ],
         "store": False,
@@ -90,6 +86,58 @@ def _post_responses_api(system_prompt: str, user_prompt: str) -> str | None:
                 fragments.append(str(text_value))
     text = "\n".join(fragment.strip() for fragment in fragments if str(fragment).strip()).strip()
     return text or None
+
+
+def _post_responses_api(system_prompt: str, user_prompt: str) -> str | None:
+    return _post_responses_api_content(
+        system_prompt,
+        [
+            {
+                "type": "input_text",
+                "text": user_prompt,
+            }
+        ],
+    )
+
+
+def generate_bet_slip_opinion_from_image(
+    image_bytes: bytes,
+    *,
+    mime_type: str = "image/jpeg",
+    user_notes: str | None = None,
+) -> str | None:
+    if not openai_available():
+        return None
+
+    encoded_image = base64.b64encode(image_bytes).decode("ascii")
+    system_prompt = (
+        "Eres un analista experto de apuestas deportivas. "
+        "Debes analizar una captura de una apuesta o combinada creada por el usuario en una casa de apuestas. "
+        "Extrae lo que puedas leer de la imagen y da una opinion profesional, responsable y accionable. "
+        "No inventes datos que no se vean con claridad. "
+        "Responde en espanol con exactamente estos apartados en texto plano, uno por linea: "
+        "Apuesta detectada:, Valor:, Fiabilidad:, Riesgo principal:, Veredicto:, Stake sugerido:, Lectura:. "
+        "En Veredicto di de forma directa si tu la jugarias o no. "
+        "Si la captura no se entiende bien, dilo claramente."
+    )
+    notes = str(user_notes or "").strip()
+    user_text = (
+        "Analiza esta captura de apuesta subida a Telegram."
+        + (f" Contexto del usuario: {notes}" if notes else "")
+    )
+    return _post_responses_api_content(
+        system_prompt,
+        [
+            {
+                "type": "input_text",
+                "text": user_text,
+            },
+            {
+                "type": "input_image",
+                "image_url": f"data:{mime_type};base64,{encoded_image}",
+            },
+        ],
+    )
 
 
 def build_pick_action_advice(pick: dict[str, Any]) -> str:
