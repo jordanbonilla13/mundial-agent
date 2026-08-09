@@ -1266,13 +1266,43 @@ def _format_opinion_provider_context(event: dict[str, Any] | None) -> str:
     kickoff = telegram_kickoff_label(event.get("commence_time"))
     lines = [
         "",
-        "Contexto real detectado:",
-        f"- Partido: {event.get('partido')}",
-        f"- Liga: {event.get('liga')}",
+        "🧭 Contexto real detectado:",
+        f"🏟️ Partido: {event.get('partido')}",
+        f"🌍 Liga: {event.get('liga')}",
     ]
     if kickoff:
-        lines.append(f"- Hora: {kickoff}")
+        lines.append(f"🕒 Hora: {kickoff}")
     return "\n".join(lines)
+
+
+def _format_opinion_visual(text: str) -> str:
+    icon_map = {
+        "Partido:": "🏟️ ",
+        "Apuesta detectada:": "🎯 ",
+        "Valor:": "📈 ",
+        "Fiabilidad:": "🛡️ ",
+        "Riesgo principal:": "⚠️ ",
+        "Veredicto:": "✅ ",
+        "Cantidad sugerida:": "💶 ",
+        "Lectura:": "🧠 ",
+        "🧭 Contexto real detectado:": "",
+        "🌍 Liga:": "",
+        "🕒 Hora:": "",
+    }
+    formatted_lines: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        applied = False
+        for prefix, icon in icon_map.items():
+            if line.startswith(prefix):
+                formatted_lines.append(f"{icon}{line}".strip())
+                applied = True
+                break
+        if not applied:
+            formatted_lines.append(line)
+    return "\n".join(formatted_lines).strip()
 
 
 def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> bool:
@@ -1338,7 +1368,7 @@ def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> boo
 
     client.send_message(
         "🤖 <b>Opinion IA de la apuesta</b>\n"
-        f"{telegram_text_service((analysis or '') + _format_opinion_provider_context(opinion_event))}"
+        f"{telegram_text_service(_format_opinion_visual((analysis or '') + _format_opinion_provider_context(opinion_event)))}"
     )
     return True
 

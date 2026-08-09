@@ -4374,6 +4374,29 @@ class BettingModelTests(unittest.TestCase):
             "",
         )
 
+    def test_format_opinion_visual_aniade_iconos(self):
+        import main
+
+        formatted = main._format_opinion_visual(
+            "Partido: Flamengo vs Vitoria\n"
+            "Apuesta detectada: Flamengo gana + Menos de 5 goles\n"
+            "Valor: Medio\n"
+            "Fiabilidad: Media-alta\n"
+            "Riesgo principal: Que Flamengo no gane\n"
+            "Veredicto: Si, la jugaria\n"
+            "Cantidad sugerida: 3/10\n"
+            "Lectura: Favorito claro\n"
+        )
+
+        self.assertIn("🏟️ Partido:", formatted)
+        self.assertIn("🎯 Apuesta detectada:", formatted)
+        self.assertIn("📈 Valor:", formatted)
+        self.assertIn("🛡️ Fiabilidad:", formatted)
+        self.assertIn("⚠️ Riesgo principal:", formatted)
+        self.assertIn("✅ Veredicto:", formatted)
+        self.assertIn("💶 Cantidad sugerida:", formatted)
+        self.assertIn("🧠 Lectura:", formatted)
+
     def test_lanzar_apuestas_async_usa_preset_lab_y_envia_resumen_final(self):
         import main
 
