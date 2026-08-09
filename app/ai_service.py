@@ -110,6 +110,38 @@ def _post_responses_api(system_prompt: str, user_prompt: str) -> str | None:
     )
 
 
+def _normalize_bet_opinion_spanish(text: str | None) -> str | None:
+    if text is None:
+        return None
+
+    normalized = str(text).strip()
+    if not normalized:
+        return None
+
+    replacements = [
+        ("Bet Builder", "Apuesta combinada"),
+        ("bet builder", "apuesta combinada"),
+        ("Builder", "Combinada"),
+        ("builder", "combinada"),
+        ("Stake sugerido", "Cantidad sugerida"),
+        ("stake sugerido", "cantidad sugerida"),
+        ("Stake", "Cantidad"),
+        ("stake", "cantidad"),
+        ("under", "menos de"),
+        ("Under", "Menos de"),
+        ("over", "más de"),
+        ("Over", "Más de"),
+        ("hándicap", "ventaja"),
+        ("handicap", "ventaja"),
+        ("pick", "selección"),
+        ("Pick", "Selección"),
+    ]
+    for source, target in replacements:
+        normalized = normalized.replace(source, target)
+
+    return normalized
+
+
 def generate_bet_slip_opinion_from_image(
     image_bytes: bytes,
     *,
@@ -121,13 +153,17 @@ def generate_bet_slip_opinion_from_image(
 
     encoded_image = base64.b64encode(image_bytes).decode("ascii")
     system_prompt = (
-        "Eres un analista experto de apuestas deportivas. "
+        "Eres un pronosticador de apuestas deportivas experto, experimentado y muy claro al explicar. "
         "Debes analizar una captura de una apuesta o combinada creada por el usuario en una casa de apuestas. "
-        "Extrae lo que puedas leer de la imagen y da una opinion profesional, responsable y accionable. "
+        "Extrae lo que puedas leer de la imagen y da una opinion profesional, responsable, accionable y facil de entender. "
         "No inventes datos que no se vean con claridad. "
-        "Responde en espanol con exactamente estos apartados en texto plano, uno por linea: "
-        "Apuesta detectada:, Valor:, Fiabilidad:, Riesgo principal:, Veredicto:, Stake sugerido:, Lectura:. "
+        "Responde solo en espanol, sin palabras en ingles salvo nombres propios de equipos o competiciones. "
+        "Usa frases sencillas y directas, pensadas para que un usuario de Telegram lo entienda rapido. "
+        "Responde en texto plano con exactamente estos apartados, uno por linea: "
+        "Partido:, Apuesta detectada:, Valor:, Fiabilidad:, Riesgo principal:, Veredicto:, Cantidad sugerida:, Lectura:. "
+        "En Partido indica los dos equipos si se ven claros. Si no, escribe 'No se distingue bien'. "
         "En Veredicto di de forma directa si tu la jugarias o no. "
+        "En Cantidad sugerida usa formato sobre 10. "
         "Si la captura no se entiende bien, dilo claramente."
     )
     notes = str(user_notes or "").strip()
@@ -135,7 +171,7 @@ def generate_bet_slip_opinion_from_image(
         "Analiza esta captura de apuesta subida a Telegram."
         + (f" Contexto del usuario: {notes}" if notes else "")
     )
-    return _post_responses_api_content(
+    response = _post_responses_api_content(
         system_prompt,
         [
             {
@@ -149,6 +185,7 @@ def generate_bet_slip_opinion_from_image(
         ],
         timeout_seconds=_openai_vision_timeout_seconds(),
     )
+    return _normalize_bet_opinion_spanish(response)
 
 
 def build_pick_action_advice(pick: dict[str, Any]) -> str:
