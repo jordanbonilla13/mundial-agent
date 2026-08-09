@@ -26,6 +26,11 @@ def _openai_timeout_seconds() -> int:
     return max(5, int(os.getenv("OPENAI_TIMEOUT_SECONDS", "20")))
 
 
+def _openai_vision_timeout_seconds() -> int:
+    base_timeout = _openai_timeout_seconds()
+    return max(base_timeout, int(os.getenv("OPENAI_VISION_TIMEOUT_SECONDS", "60")))
+
+
 def _openai_telegram_picks_max() -> int:
     return max(0, int(os.getenv("OPENAI_TELEGRAM_PICKS_MAX", "3")))
 
@@ -34,7 +39,12 @@ def openai_available() -> bool:
     return _openai_enabled() and bool(_openai_api_key())
 
 
-def _post_responses_api_content(system_prompt: str, user_content: list[dict[str, Any]]) -> str | None:
+def _post_responses_api_content(
+    system_prompt: str,
+    user_content: list[dict[str, Any]],
+    *,
+    timeout_seconds: int | None = None,
+) -> str | None:
     if not openai_available():
         return None
 
@@ -68,7 +78,7 @@ def _post_responses_api_content(system_prompt: str, user_content: list[dict[str,
             "Content-Type": "application/json",
         },
         json=payload,
-        timeout=_openai_timeout_seconds(),
+        timeout=timeout_seconds or _openai_timeout_seconds(),
     )
     response.raise_for_status()
     data = response.json()
@@ -137,6 +147,7 @@ def generate_bet_slip_opinion_from_image(
                 "image_url": f"data:{mime_type};base64,{encoded_image}",
             },
         ],
+        timeout_seconds=_openai_vision_timeout_seconds(),
     )
 
 
