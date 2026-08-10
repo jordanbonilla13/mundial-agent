@@ -5,9 +5,7 @@ import re
 import subprocess
 import threading
 import uuid
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from html import escape
 from typing import Any
 from urllib.parse import parse_qs, urlencode
@@ -63,9 +61,6 @@ from app.lab_service import build_empty_lab_run, build_lab_run, render_lab_run_h
 from app.prediction_service import build_prediction_payload
 from app.performance_guard_service import build_performance_guard, apply_performance_guard_to_pick
 from app.publication_service import (
-    _build_emergency_fallback_picks,
-    _build_last_resort_picks,
-    _build_operational_fallback_picks,
     fingerprint_pick as fingerprint_pick_service,
     publish_telegram_predictions,
     select_picks_for_telegram,
@@ -84,7 +79,6 @@ from app.telegram_service import (
     format_pick_message,
     format_summary_message,
     telegram_keyboard_for_pick as telegram_keyboard_for_pick_service,
-    telegram_kickoff_label,
     telegram_text as telegram_text_service,
     telegram_tier_label as telegram_tier_label_service,
 )
@@ -126,7 +120,6 @@ audit_scheduler_thread: threading.Thread | None = None
 lab_publication_jobs: dict[str, dict[str, Any]] = {}
 telegram_command_jobs: dict[str, dict[str, Any]] = {}
 TODO_FILTERS_SETTING = "lab_todo_filters"
-_opinion_catalog_cache: dict[str, Any] = {"expires_at": None, "sports": []}
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY")
@@ -810,152 +803,6 @@ def enviar_mensaje_telegram(
     return client.send_message(texto, reply_markup=reply_markup)
 
 
-def _strip_html_for_telegram(text: str) -> str:
-    plain = re.sub(r"<[^>]+>", "", str(text or ""))
-    plain = plain.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&#x27;", "'")
-    return plain.strip()
-
-
-def _safe_send_telegram_job_message(token: str, chat_id: str, text: str) -> dict[str, Any]:
-    client = telegram_client(token=token, chat_id=chat_id)
-    try:
-        return client.send_message(text)
-    except Exception:
-        plain_text = _strip_html_for_telegram(text)
-        return client.api_request(
-            "sendMessage",
-            payload={
-                "chat_id": chat_id,
-                "text": plain_text[:4000],
-                "disable_web_page_preview": True,
-            },
-        )
-
-
-def _notify_apuestas_job_result(
-    *,
-    token: str,
-    chat_id: str,
-    job_id: str,
-    result: dict[str, Any],
-    usage: dict[str, Any],
-) -> None:
-    total_publicadas = int(result.get("picks_guardados") or 0)
-    total_mensajes = int(result.get("mensajes_enviados") or 0)
-    publication_id = result.get("publication_id")
-    credits_used = int(usage.get("credits_used") or 0)
-    calls = int(usage.get("calls") or 0)
-    remaining = usage.get("last_remaining")
-    usage_line = (
-        f"Consumo API: <b>{credits_used}</b> creditos en <b>{calls}</b> llamadas"
-        + (f"\nRestantes: <b>{remaining}</b>" if remaining is not None else "")
-    )
-    build_line = f"Build: <code>{telegram_text_service(APP_BUILD_SHA)}</code>"
-    diagnostics = result.get("zero_picks_diagnostics") or {}
-
-    if total_publicadas > 0:
-        _safe_send_telegram_job_message(
-            token,
-            chat_id,
-            "✅ <b>/apuestas completado</b>\n"
-            f"Job: <code>{telegram_text_service(job_id)}</code>\n"
-            f"Picks publicadas: <b>{total_publicadas}</b>\n"
-            f"Mensajes enviados: <b>{total_mensajes}</b>\n"
-            f"Publication ID: <code>{telegram_text_service(publication_id or '-')}</code>\n"
-            f"{usage_line}\n"
-            f"{build_line}"
-        )
-        return
-
-    analyzed = int(diagnostics.get("analizadas") or 0)
-    recommended = int(diagnostics.get("recomendadas") or 0)
-    discarded = int(diagnostics.get("descartadas_preview") or 0)
-    available_matches = int(diagnostics.get("partidos_disponibles") or 0)
-    snapshots = int(diagnostics.get("snapshots_guardados") or 0)
-    guard_reasons = list(diagnostics.get("guard_reasons") or [])
-    discard_reasons = list(diagnostics.get("top_discard_reasons") or [])
-    coverage_notice = str(diagnostics.get("coverage_notice") or "").strip()
-    base_criteria = str(diagnostics.get("base_criteria") or "").strip()
-    blocked_summary = dict(diagnostics.get("blocked_summary") or {})
-    detail_lines = [
-        f"Job: <code>{telegram_text_service(job_id)}</code>",
-        f"Analizadas: <b>{analyzed}</b>",
-        f"Recomendadas antes del corte: <b>{recommended}</b>",
-        f"Descartadas visibles: <b>{discarded}</b>",
-        f"Partidos disponibles: <b>{available_matches}</b>",
-        f"Snapshots: <b>{snapshots}</b>",
-    ]
-    if guard_reasons:
-        detail_lines.append(
-            "Guard activo: " + " | ".join(telegram_text_service(str(reason)) for reason in guard_reasons)
-        )
-    if discard_reasons:
-        detail_lines.append(
-            "Motivos top: "
-            + " | ".join(
-                f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
-                for item in discard_reasons
-            )
-        )
-    risk_count = int(blocked_summary.get("risk_count") or 0)
-    performance_count = int(blocked_summary.get("performance_count") or 0)
-    if risk_count or performance_count:
-        detail_lines.append(
-            f"Bloqueos: risk <b>{risk_count}</b> | performance <b>{performance_count}</b>"
-        )
-    risk_reasons = list(blocked_summary.get("risk_reasons") or [])
-    if risk_reasons:
-        detail_lines.append(
-            "Risk top: "
-            + " | ".join(
-                f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
-                for item in risk_reasons
-            )
-        )
-    performance_reasons = list(blocked_summary.get("performance_reasons") or [])
-    if performance_reasons:
-        detail_lines.append(
-            "Performance top: "
-            + " | ".join(
-                f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
-                for item in performance_reasons
-            )
-        )
-    elif coverage_notice:
-        detail_lines.append("Cobertura: " + telegram_text_service(coverage_notice))
-    elif analyzed == 0 and base_criteria:
-        detail_lines.append("Contexto: " + telegram_text_service(base_criteria))
-
-    _safe_send_telegram_job_message(
-        token,
-        chat_id,
-        "ℹ️ <b>/apuestas sin picks publicables</b>\n"
-        "He ejecutado el preset del lab, pero en esta pasada no salio ninguna pick valida para publicar.\n"
-        + "\n".join(detail_lines)
-        + "\n"
-        f"{usage_line}\n"
-        f"{build_line}"
-    )
-
-
-def _notify_apuestas_job_error(
-    *,
-    token: str,
-    chat_id: str,
-    job_id: str,
-    error_text: str,
-    stage: str | None = None,
-) -> None:
-    stage_line = f"\nFase: <code>{telegram_text_service(stage)}</code>" if stage else ""
-    _safe_send_telegram_job_message(
-        token,
-        chat_id,
-        "❌ <b>/apuestas falló</b>\n"
-        f"Job: <code>{telegram_text_service(job_id)}</code>\n"
-        f"No pude completar la publicacion automatica.{stage_line}\nDetalle: <code>{telegram_text_service(error_text)}</code>"
-    )
-
-
 def answer_callback_query_telegram(callback_query_id: str, text: str, token: str | None = None) -> dict:
     client = telegram_client(token=token, chat_id=os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID))
     return client.answer_callback_query(callback_query_id, text)
@@ -1238,222 +1085,7 @@ def _extract_opinion_user_notes(command_text: str) -> str:
     if not text:
         return ""
     cleaned = re.sub(r"(?i)^/opinion(?:@\w+)?", "", text, count=1).strip()
-    tokens = cleaned.split()
-    if not tokens:
-        return ""
-    sport_hint = _extract_opinion_sport_hint(command_text)
-    if sport_hint and tokens and sports_layer.SPORT_ALIASES.get(tokens[0].strip().lower()) == sport_hint:
-        tokens = tokens[1:]
-    return " ".join(tokens).strip()
-
-
-def _extract_opinion_sport_hint(command_text: str) -> str | None:
-    text = str(command_text or "").strip()
-    if not text:
-        return None
-    cleaned = re.sub(r"(?i)^/opinion(?:@\w+)?", "", text, count=1).strip().lower()
-    if not cleaned:
-        return None
-    first_token = cleaned.split()[0].strip()
-    if not first_token:
-        return None
-    mapped = sports_layer.SPORT_ALIASES.get(first_token)
-    return str(mapped or "").strip().lower() or None
-
-
-def _normalize_name_for_match(value: str) -> str:
-    text = str(value or "").strip().lower()
-    replacements = {
-        "á": "a",
-        "à": "a",
-        "ä": "a",
-        "â": "a",
-        "ã": "a",
-        "é": "e",
-        "è": "e",
-        "ë": "e",
-        "ê": "e",
-        "í": "i",
-        "ì": "i",
-        "ï": "i",
-        "î": "i",
-        "ó": "o",
-        "ò": "o",
-        "ö": "o",
-        "ô": "o",
-        "õ": "o",
-        "ú": "u",
-        "ù": "u",
-        "ü": "u",
-        "û": "u",
-        "ñ": "n",
-        "ç": "c",
-    }
-    for source, target in replacements.items():
-        text = text.replace(source, target)
-    text = re.sub(r"\b(fc|cf|sc|ac|cd|club|clube|esporte clube)\b", " ", text)
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _extract_matchup_from_opinion_text(text: str) -> tuple[str, str] | None:
-    content = str(text or "").strip()
-    if not content:
-        return None
-
-    match = re.search(r"(?im)^Partido:\s*(.+)$", content)
-    if not match:
-        match = re.search(r"(?im)^Apuesta detectada:\s*(.+?)\s*(?:,| cuota|$)", content)
-        if not match:
-            return None
-
-    value = match.group(1).strip()
-    for pattern in (r"\s+vs\s+", r"\s+v\s+", r"\s+-\s+"):
-        parts = re.split(pattern, value, flags=re.IGNORECASE, maxsplit=1)
-        if len(parts) == 2:
-            left = parts[0].strip(" :,-")
-            right = parts[1].strip(" :,-")
-            if left and right:
-                return left, right
-    return None
-
-
-def _opinion_candidate_contexts(sport_hint: str | None = None) -> list[dict[str, Any]]:
-    now = datetime.now(timezone.utc)
-    cache_key = str(sport_hint or "auto").strip().lower() or "auto"
-    cache_store = _opinion_catalog_cache.setdefault("by_hint", {})
-    cache_entry = cache_store.get(cache_key) or {}
-    expires_at = cache_entry.get("expires_at")
-    cached = list(cache_entry.get("sports") or [])
-    if isinstance(expires_at, datetime) and expires_at > now and cached:
-        return cached
-
-    try:
-        catalog = provider_layer.discover_available_catalog(provider="the_odds_api")
-    except Exception:
-        return cached
-
-    sports = []
-    for item in list(catalog.get("sports") or []):
-        sport_key = str(item.get("sport_key") or "")
-        family = sports_layer.family_from_sport_key(sport_key)
-        if sport_hint:
-            mapped_hint = sports_layer.SPORT_ALIASES.get(sport_hint, sport_hint)
-            target_family = {
-                "futbol": "soccer",
-                "tenis": "tennis",
-                "baloncesto": "basketball",
-                "basket": "basketball",
-                "basketball": "basketball",
-                "esports": "esports",
-            }.get(mapped_hint, mapped_hint)
-            if family != target_family:
-                continue
-        elif family not in {"soccer", "tennis", "basketball", "esports"}:
-            continue
-        if bool(item.get("has_outrights")):
-            continue
-        sports.append(item)
-
-    sports.sort(key=sports_layer.prioridad_contexto_todo)
-    limit_default = 6 if not sport_hint else 8
-    limited = sports[: max(1, int(os.getenv("OPINION_ODDS_CONTEXTS_MAX", str(limit_default))))]
-    cache_store[cache_key] = {
-        "sports": limited,
-        "expires_at": now + timedelta(hours=3),
-    }
-    return limited
-
-
-def _find_real_event_for_opinion(analysis_text: str, sport_hint: str | None = None) -> dict[str, Any] | None:
-    matchup = _extract_matchup_from_opinion_text(analysis_text)
-    if not matchup:
-        return None
-
-    left_target = _normalize_name_for_match(matchup[0])
-    right_target = _normalize_name_for_match(matchup[1])
-    if not left_target or not right_target:
-        return None
-
-    contexts = _opinion_candidate_contexts(sport_hint=sport_hint)
-    for context in contexts:
-        try:
-            events = provider_layer.fetch_the_odds_odds(["h2h"], context)
-        except Exception:
-            continue
-
-        for event in events:
-            home = str(event.get("home_team") or "").strip()
-            away = str(event.get("away_team") or "").strip()
-            home_norm = _normalize_name_for_match(home)
-            away_norm = _normalize_name_for_match(away)
-            if not home_norm or not away_norm:
-                continue
-
-            direct_match = left_target == home_norm and right_target == away_norm
-            reverse_match = left_target == away_norm and right_target == home_norm
-            soft_match = (
-                (left_target in home_norm or home_norm in left_target)
-                and (right_target in away_norm or away_norm in right_target)
-            ) or (
-                (left_target in away_norm or away_norm in left_target)
-                and (right_target in home_norm or home_norm in right_target)
-            )
-            if not (direct_match or reverse_match or soft_match):
-                continue
-
-            return {
-                "partido": f"{home} vs {away}",
-                "liga": event.get("league_label") or context.get("league_label") or context.get("title") or "General",
-                "deporte": event.get("sport_label") or context.get("sport_label") or "General",
-                "commence_time": event.get("commence_time"),
-            }
-    return None
-
-
-def _format_opinion_provider_context(event: dict[str, Any] | None) -> str:
-    if not event:
-        return ""
-    kickoff = telegram_kickoff_label(event.get("commence_time"))
-    lines = [
-        "",
-        "🧭 Contexto real detectado:",
-        f"🏟️ Partido: {event.get('partido')}",
-        f"🌍 Liga: {event.get('liga')}",
-    ]
-    if kickoff:
-        lines.append(f"🕒 Hora: {kickoff}")
-    return "\n".join(lines)
-
-
-def _format_opinion_visual(text: str) -> str:
-    icon_map = {
-        "Partido:": "🏟️ ",
-        "Apuesta detectada:": "🎯 ",
-        "Valor:": "📈 ",
-        "Fiabilidad:": "🛡️ ",
-        "Riesgo principal:": "⚠️ ",
-        "Veredicto:": "✅ ",
-        "Cantidad sugerida:": "💶 ",
-        "Lectura:": "🧠 ",
-        "🧭 Contexto real detectado:": "",
-        "🌍 Liga:": "",
-        "🕒 Hora:": "",
-    }
-    formatted_lines: list[str] = []
-    for raw_line in str(text or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        applied = False
-        for prefix, icon in icon_map.items():
-            if line.startswith(prefix):
-                formatted_lines.append(f"{icon}{line}".strip())
-                applied = True
-                break
-        if not applied:
-            formatted_lines.append(line)
-    return "\n".join(formatted_lines).strip()
+    return cleaned
 
 
 def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> bool:
@@ -1484,7 +1116,6 @@ def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> boo
         return True
 
     notes = _extract_opinion_user_notes(command_text)
-    sport_hint = _extract_opinion_sport_hint(command_text)
     client.send_message(
         "🧠 <b>/opinion en marcha</b>\n"
         "Estoy leyendo la captura y te doy una valoracion profesional en unos segundos."
@@ -1496,7 +1127,6 @@ def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> boo
             mime_type=mime_type or "image/jpeg",
             user_notes=notes,
         )
-        opinion_event = _find_real_event_for_opinion(analysis or "", sport_hint=sport_hint)
     except HTTPException as exc:
         client.send_message(
             "🤖 <b>/opinion</b>\n"
@@ -1519,7 +1149,7 @@ def _handle_telegram_opinion_message(message: dict[str, Any], token: str) -> boo
 
     client.send_message(
         "🤖 <b>Opinion IA de la apuesta</b>\n"
-        f"{telegram_text_service(_format_opinion_visual((analysis or '') + _format_opinion_provider_context(opinion_event)))}"
+        f"{telegram_text_service(analysis)}"
     )
     return True
 
@@ -1682,17 +1312,11 @@ def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
         {**pick, **(_raw_pick(picks_por_fingerprint.get(fingerprint_pick_service(pick), {})) if picks_por_fingerprint.get(fingerprint_pick_service(pick)) else {}), **(picks_por_fingerprint.get(fingerprint_pick_service(pick)) or {})}
         for pick in picks_publicables
     ]
-    ranked_picks = [
-        {**pick, "telegram_rank": index + 1}
-        for index, pick in enumerate(picks_publicables)
-    ]
 
     summary_text = str(payload.get("resumen_telegram") or "").strip()
     pick_messages = list(payload.get("mensajes_telegram") or [])
-    if len(pick_messages) != len(ranked_picks):
-        pick_messages = [formatear_mensaje_telegram_pick(pick) for pick in ranked_picks]
-    else:
-        pick_messages = [formatear_mensaje_telegram_pick(pick) for pick in ranked_picks]
+    if len(pick_messages) != len(picks_publicables):
+        pick_messages = [formatear_mensaje_telegram_pick(pick) for pick in picks_publicables]
     messages = ([summary_text] if summary_text else []) + pick_messages
 
     sent_messages = []
@@ -1702,9 +1326,9 @@ def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
         reply_markup = None
         pick_id = None
         if summary_text and index > 0:
-            pick = ranked_picks[index - 1]
+            pick = picks_publicables[index - 1]
         elif not summary_text:
-            pick = ranked_picks[index]
+            pick = picks_publicables[index]
         else:
             pick = None
         if pick is not None and pick.get("id"):
@@ -1757,45 +1381,6 @@ def _parse_apuestas_compact_commence(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
-def _apuestas_market_bucket(pick: dict[str, Any]) -> str:
-    mercado = str(pick.get("mercado") or "").strip().lower()
-    if mercado in {"totals", "alternate_totals", "team_totals", "totals_h1", "totals_h2"}:
-        return "totales"
-    if mercado == "h2h":
-        return "ganador"
-    if mercado == "spreads":
-        return "handicap"
-    if mercado == "double_chance":
-        return "doble_oportunidad"
-    if mercado == "btts":
-        return "ambos_anotan"
-    return mercado or "general"
-
-
-def _apuestas_diversity_block(pick: dict[str, Any]) -> tuple[str, str]:
-    sport = str(pick.get("sport_label") or "General").strip().lower() or "general"
-    return (sport, _apuestas_market_bucket(pick))
-
-
-def _recent_apuestas_block_exposure(*, lookback_hours: int = 48, limit: int = 8) -> Counter[tuple[str, str]]:
-    counter: Counter[tuple[str, str]] = Counter()
-    now = datetime.now(timezone.utc)
-    for publication in listar_publicaciones_telegram(limit=limit):
-        created_at = _parse_apuestas_compact_commence(publication.get("created_at"))
-        if created_at is None:
-            continue
-        age_hours = (now - created_at).total_seconds() / 3600
-        if age_hours < 0 or age_hours > lookback_hours:
-            continue
-        for item in list(publication.get("items") or []):
-            if str(item.get("message_kind") or "").strip().lower() != "pick":
-                continue
-            raw_pick = _raw_pick(item)
-            source = raw_pick or item
-            counter[_apuestas_diversity_block(source)] += 1
-    return counter
-
-
 def seleccionar_picks_para_apuestas_lab(
     data: dict[str, Any],
     solo_stakazos: bool = False,
@@ -1818,17 +1403,6 @@ def seleccionar_picks_para_apuestas_lab(
             return False
         return quality >= 55 or reliability >= 68
 
-    def _is_soft_pick(pick: dict[str, Any]) -> bool:
-        cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or pick.get("cuota") or 0)
-        quality = float(pick.get("quality_score") or 0)
-        reliability = float(pick.get("reliability_score") or 0)
-        tier = str(pick.get("elite_tier") or "").strip().lower()
-        if cuota <= 0 or cuota > 3.4:
-            return False
-        if quality >= 48 or reliability >= 60:
-            return True
-        return tier in {"stakazo", "elite"}
-
     def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, float, float, float]:
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
         if commence is None:
@@ -1847,61 +1421,10 @@ def seleccionar_picks_para_apuestas_lab(
         return (bucket, max(delta_hours, 0.0), -float(pick.get("quality_score") or 0), -float(pick.get("reliability_score") or 0))
 
     reasonable = [pick for pick in base if _is_reasonable_pick(pick)]
-    soft_candidates = [pick for pick in base if _is_soft_pick(pick)]
-    candidate_pool = reasonable or soft_candidates
-    if not candidate_pool:
+    if not reasonable:
         return []
     reasonable.sort(key=_pick_sort_key)
-    soft_candidates.sort(key=_pick_sort_key)
-    candidate_pool = list(reasonable)
-    for pick in soft_candidates:
-        if fingerprint_pick_service(pick) not in {fingerprint_pick_service(item) for item in candidate_pool}:
-            candidate_pool.append(pick)
-
-    recent_exposure = _recent_apuestas_block_exposure()
-    selected: list[dict[str, Any]] = []
-    selected_keys: set[tuple[str, str, str, str, str]] = set()
-    selected_sports: Counter[str] = Counter()
-    selected_blocks: Counter[tuple[str, str]] = Counter()
-
-    def _candidate_penalty(pick: dict[str, Any]) -> tuple[int, int, int, int]:
-        same_event = 1 if any(str(item.get("event_id") or "") == str(pick.get("event_id") or "") for item in selected) else 0
-        block = _apuestas_diversity_block(pick)
-        sport = block[0]
-        block_penalty = selected_blocks[block] * 14 + int(recent_exposure.get(block, 0)) * 5
-        sport_penalty = selected_sports[sport] * 6
-        tier_penalty = 0 if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"} else 1
-        return (same_event, block_penalty, sport_penalty, tier_penalty)
-
-    first_pick = candidate_pool[0]
-    selected.append(first_pick)
-    selected_keys.add(fingerprint_pick_service(first_pick))
-    selected_block = _apuestas_diversity_block(first_pick)
-    selected_blocks[selected_block] += 1
-    selected_sports[selected_block[0]] += 1
-
-    while len(selected) < 3:
-        candidates = [
-            pick for pick in candidate_pool
-            if fingerprint_pick_service(pick) not in selected_keys
-        ]
-        if not candidates:
-            break
-        candidates.sort(
-            key=lambda pick: (
-                _candidate_penalty(pick),
-                _pick_sort_key(pick),
-                -float(pick.get("valor_esperado") or 0),
-            )
-        )
-        chosen = candidates[0]
-        selected.append(chosen)
-        selected_keys.add(fingerprint_pick_service(chosen))
-        block = _apuestas_diversity_block(chosen)
-        selected_blocks[block] += 1
-        selected_sports[block[0]] += 1
-
-    return selected[:3]
+    return reasonable[:3]
 
 
 def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[str, Any]:
@@ -1931,94 +1454,32 @@ def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[
     }
 
 
-def _apply_apuestas_lab_fallback(
-    lab_data: dict[str, Any],
-    *,
-    bankroll: float | None,
-    solo_stakazos: bool,
-    perfil: str,
-    modo: str,
-) -> dict[str, Any]:
-    payload = dict(lab_data.get("telegram_preview") or {})
-    payload["pronosticos"] = list(payload.get("pronosticos") or [])
-    payload["mensajes_telegram"] = list(payload.get("mensajes_telegram") or [])
-    diagnostics = _build_apuestas_zero_diagnostics_from_lab(lab_data)
-
-    if payload["pronosticos"] or solo_stakazos:
-        return {
-            "payload": payload,
-            "zero_picks_diagnostics": diagnostics,
-        }
-
-    forecast = dict(lab_data.get("forecast") or {})
-    fallback_picks = _build_operational_fallback_picks(
-        forecast,
-        bankroll=bankroll,
-        max_items=3,
-    )
-    fallback_kind = "operational"
-    if not fallback_picks:
-        fallback_picks = _build_emergency_fallback_picks(
-            forecast,
-            bankroll=bankroll,
-            max_items=3,
-        )
-        fallback_kind = "emergency"
-    if not fallback_picks:
-        fallback_picks = _build_last_resort_picks(
-            forecast,
-            bankroll=bankroll,
-            max_items=2,
-        )
-        fallback_kind = "last_resort"
-
-    if not fallback_picks:
-        return {
-            "payload": payload,
-            "zero_picks_diagnostics": diagnostics,
-        }
-
-    fallback_data = dict(forecast)
-    fallback_data["mejores_apuestas"] = [dict(pick) for pick in fallback_picks]
-    fallback_data["total_recomendadas"] = max(
-        int(forecast.get("total_recomendadas") or 0),
-        len(fallback_picks),
-    )
-    fallback_payload = build_prediction_payload(
-        data=fallback_data,
-        solo_stakazos=False,
+def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
+    lab_data = build_lab_run(
+        runtime_settings=RUNTIME_SETTINGS,
+        publication_guard=system_publication_guard,
+        run_forecast=lambda request: apuestas_hoy(
+            bankroll=request.bankroll,
+            perfil=request.perfil,
+            modo=request.modo,
+            mercados=request.mercados,
+            partido=request.partido,
+            guardar=request.guardar,
+            deporte=request.deporte,
+            solo_elite=request.solo_elite,
+            solo_stakazos=request.solo_stakazos,
+            historical_mode=request.historical_mode,
+            historical_date=request.historical_date,
+            historical_from=request.historical_from,
+            historical_to=request.historical_to,
+        ),
+        build_prediction_payload=build_prediction_payload,
         ai_available=lambda: False,
-        select_picks_for_telegram=lambda data, solo_stakazos=False: list(data.get("mejores_apuestas") or [])[:3],
+        select_picks_for_telegram=seleccionar_picks_para_apuestas_lab,
         enrich_with_ai=lambda picks: picks,
-        build_ai_summary=generate_publication_ai_summary,
+        build_ai_summary=lambda *args, **kwargs: None,
         format_pick_message=formatear_mensaje_telegram_pick,
         format_summary_message=format_summary_message,
-        perfil=perfil,
-        modo=modo,
-        perfiles_stake=PERFILES_STAKE,
-        modos_informe=MODOS_INFORME,
-        perfil_label=perfil_es,
-        modo_label=modo_es,
-    )
-    fallback_payload["fallback_rescue_kind"] = fallback_kind
-    fallback_payload["pronosticos"] = list(fallback_payload.get("pronosticos") or [])
-    fallback_payload["mensajes_telegram"] = list(fallback_payload.get("mensajes_telegram") or [])
-    lab_data["telegram_preview"] = fallback_payload
-    diagnostics["fallback_rescue_kind"] = fallback_kind
-    diagnostics["fallback_rescue_count"] = len(fallback_payload["pronosticos"])
-
-    forecast_summary = lab_data.get("forecast_summary")
-    if isinstance(forecast_summary, dict):
-        forecast_summary["total_publicables_preview"] = len(fallback_payload["pronosticos"])
-
-    return {
-        "payload": fallback_payload,
-        "zero_picks_diagnostics": diagnostics,
-    }
-
-
-def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
-    forecast = apuestas_hoy_telegram_compacto(
         perfil=kwargs["perfil"],
         modo=kwargs["modo"],
         mercados=kwargs["mercados"],
@@ -2026,48 +1487,20 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         deporte=kwargs["deporte"],
         bankroll=kwargs["bankroll"],
         solo_stakazos=kwargs["solo_stakazos"],
-    )
-    payload = build_prediction_payload(
-        data=forecast,
-        solo_stakazos=bool(kwargs.get("solo_stakazos")),
-        ai_available=lambda: False,
-        select_picks_for_telegram=seleccionar_picks_para_apuestas_lab,
-        enrich_with_ai=lambda picks: picks,
-        build_ai_summary=lambda *args, **kwargs: None,
-        format_pick_message=formatear_mensaje_telegram_pick,
-        format_summary_message=format_summary_message,
-        perfil=str(kwargs.get("perfil") or "agresivo"),
-        modo=str(kwargs.get("modo") or "comparador"),
         perfiles_stake=PERFILES_STAKE,
         modos_informe=MODOS_INFORME,
         perfil_label=perfil_es,
         modo_label=modo_es,
+        simulation_mode="live",
     )
-    lab_data = {
-        "forecast": forecast,
-        "forecast_summary": {
-            "sport_label": forecast.get("sport_label"),
-            "league_label": forecast.get("league_label"),
-            "total_analizadas": int(forecast.get("total_analizadas", 0) or 0),
-            "total_recomendadas": int(forecast.get("total_recomendadas", 0) or 0),
-            "total_descartadas_preview": len(list(forecast.get("descartadas") or [])),
-            "total_publicables_preview": len(list(payload.get("pronosticos") or [])),
-            "total_bloqueadas_en_recomendadas": 0,
-            "total_bloqueadas_en_descartadas": 0,
-        },
-        "telegram_preview": payload,
-    }
-    publication_plan = _apply_apuestas_lab_fallback(
-        lab_data,
-        bankroll=kwargs.get("bankroll"),
-        solo_stakazos=bool(kwargs.get("solo_stakazos")),
-        perfil=str(kwargs.get("perfil") or "agresivo"),
-        modo=str(kwargs.get("modo") or "comparador"),
-    )
+    payload = dict(lab_data.get("telegram_preview") or {})
+    payload["pronosticos"] = list(payload.get("pronosticos") or [])
+    payload["mensajes_telegram"] = list(payload.get("mensajes_telegram") or [])
+    diagnostics = _build_apuestas_zero_diagnostics_from_lab(lab_data)
     return {
         "lab_data": lab_data,
-        "payload": dict(publication_plan.get("payload") or {}),
-        "zero_picks_diagnostics": dict(publication_plan.get("zero_picks_diagnostics") or {}),
+        "payload": payload,
+        "zero_picks_diagnostics": diagnostics,
     }
 
 
@@ -2119,35 +1552,11 @@ def iniciar_publicacion_lab_async(
     return job_id
 
 
-def _run_apuestas_job_step(
-    func,
-    *,
-    timeout_seconds: int,
-    step_label: str,
-):
-    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"apuestas-{step_label}")
-    future = executor.submit(func)
-    try:
-        return future.result(timeout=timeout_seconds)
-    except FuturesTimeoutError as exc:
-        future.cancel()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise TimeoutError(
-            f"La fase '{step_label}' supero {timeout_seconds}s y se cancelo para evitar un bloqueo silencioso."
-        ) from exc
-    except Exception:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=False, cancel_futures=False)
-
-
 def lanzar_apuestas_telegram_async() -> str:
     token, chat_id = telegram_config()
     job_id = uuid.uuid4().hex[:12]
     telegram_command_jobs[job_id] = {
         "state": "queued",
-        "stage": "queued",
         "command": "/apuestas",
         "created_at": datetime.now(timezone.utc).isoformat(),
         **TELEGRAM_APUESTAS_DEFAULTS,
@@ -2156,21 +1565,11 @@ def lanzar_apuestas_telegram_async() -> str:
     def _worker() -> None:
         try:
             telegram_command_jobs[job_id]["state"] = "running"
-            telegram_command_jobs[job_id]["stage"] = "building_lab"
             provider_layer.reset_odds_api_usage_tracking()
-            publication_plan = _run_apuestas_job_step(
-                lambda: construir_publicacion_apuestas_lab(**TELEGRAM_APUESTAS_DEFAULTS),
-                timeout_seconds=300,
-                step_label="building_lab",
-            )
+            publication_plan = construir_publicacion_apuestas_lab(**TELEGRAM_APUESTAS_DEFAULTS)
             payload = dict(publication_plan.get("payload") or {})
             if list(payload.get("pronosticos") or []):
-                telegram_command_jobs[job_id]["stage"] = "publishing"
-                result = _run_apuestas_job_step(
-                    lambda: publicar_payload_preparado_lab(payload),
-                    timeout_seconds=90,
-                    step_label="publishing",
-                )
+                result = publicar_payload_preparado_lab(payload)
             else:
                 result = {
                     "ok": True,
@@ -2179,54 +1578,121 @@ def lanzar_apuestas_telegram_async() -> str:
                     "publication_id": None,
                     "zero_picks_diagnostics": publication_plan.get("zero_picks_diagnostics") or {},
                 }
-            telegram_command_jobs[job_id]["stage"] = "collecting_usage"
-            usage = _run_apuestas_job_step(
-                provider_layer.get_odds_api_usage_tracking,
-                timeout_seconds=15,
-                step_label="collecting_usage",
-            )
+            usage = provider_layer.get_odds_api_usage_tracking()
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs[job_id],
                 "state": "completed",
-                "stage": "completed",
                 "result": result,
                 "odds_api_usage": usage,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
-            telegram_command_jobs[job_id]["stage"] = "notifying_success"
-            _notify_apuestas_job_result(
-                token=token,
-                chat_id=chat_id,
-                job_id=job_id,
-                result=result,
-                usage=usage,
+
+            client = telegram_client(token=token, chat_id=chat_id)
+            total_publicadas = int(result.get("picks_guardados") or 0)
+            total_mensajes = int(result.get("mensajes_enviados") or 0)
+            publication_id = result.get("publication_id")
+            credits_used = int(usage.get("credits_used") or 0)
+            calls = int(usage.get("calls") or 0)
+            remaining = usage.get("last_remaining")
+            usage_line = (
+                f"Consumo API: <b>{credits_used}</b> creditos en <b>{calls}</b> llamadas"
+                + (f"\nRestantes: <b>{remaining}</b>" if remaining is not None else "")
             )
-            telegram_command_jobs[job_id]["stage"] = "notified_success"
+            build_line = f"Build: <code>{telegram_text_service(APP_BUILD_SHA)}</code>"
+            diagnostics = result.get("zero_picks_diagnostics") or {}
+
+            if total_publicadas > 0:
+                client.send_message(
+                    "✅ <b>/apuestas completado</b>\n"
+                    f"Picks publicadas: <b>{total_publicadas}</b>\n"
+                    f"Mensajes enviados: <b>{total_mensajes}</b>\n"
+                    f"Publication ID: <code>{telegram_text_service(publication_id or '-')}</code>\n"
+                    f"{usage_line}\n"
+                    f"{build_line}"
+                )
+            else:
+                analyzed = int(diagnostics.get("analizadas") or 0)
+                recommended = int(diagnostics.get("recomendadas") or 0)
+                discarded = int(diagnostics.get("descartadas_preview") or 0)
+                available_matches = int(diagnostics.get("partidos_disponibles") or 0)
+                snapshots = int(diagnostics.get("snapshots_guardados") or 0)
+                guard_reasons = list(diagnostics.get("guard_reasons") or [])
+                discard_reasons = list(diagnostics.get("top_discard_reasons") or [])
+                coverage_notice = str(diagnostics.get("coverage_notice") or "").strip()
+                base_criteria = str(diagnostics.get("base_criteria") or "").strip()
+                blocked_summary = dict(diagnostics.get("blocked_summary") or {})
+                detail_lines = [
+                    f"Analizadas: <b>{analyzed}</b>",
+                    f"Recomendadas antes del corte: <b>{recommended}</b>",
+                    f"Descartadas visibles: <b>{discarded}</b>",
+                    f"Partidos disponibles: <b>{available_matches}</b>",
+                    f"Snapshots: <b>{snapshots}</b>",
+                ]
+                if guard_reasons:
+                    detail_lines.append(
+                        "Guard activo: " + " | ".join(telegram_text_service(str(reason)) for reason in guard_reasons)
+                    )
+                if discard_reasons:
+                    detail_lines.append(
+                        "Motivos top: "
+                        + " | ".join(
+                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                            for item in discard_reasons
+                        )
+                    )
+                risk_count = int(blocked_summary.get("risk_count") or 0)
+                performance_count = int(blocked_summary.get("performance_count") or 0)
+                if risk_count or performance_count:
+                    detail_lines.append(
+                        f"Bloqueos: risk <b>{risk_count}</b> | performance <b>{performance_count}</b>"
+                    )
+                risk_reasons = list(blocked_summary.get("risk_reasons") or [])
+                if risk_reasons:
+                    detail_lines.append(
+                        "Risk top: "
+                        + " | ".join(
+                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                            for item in risk_reasons
+                        )
+                    )
+                performance_reasons = list(blocked_summary.get("performance_reasons") or [])
+                if performance_reasons:
+                    detail_lines.append(
+                        "Performance top: "
+                        + " | ".join(
+                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                            for item in performance_reasons
+                        )
+                    )
+                elif coverage_notice:
+                    detail_lines.append("Cobertura: " + telegram_text_service(coverage_notice))
+                elif analyzed == 0 and base_criteria:
+                    detail_lines.append("Contexto: " + telegram_text_service(base_criteria))
+                client.send_message(
+                    "ℹ️ <b>/apuestas sin picks publicables</b>\n"
+                    "He ejecutado el preset del lab, pero en esta pasada no salio ninguna pick valida para publicar.\n"
+                    + "\n".join(detail_lines)
+                    + "\n"
+                    f"{usage_line}\n"
+                    f"{build_line}"
+                )
         except Exception as exc:
-            stage = str(telegram_command_jobs.get(job_id, {}).get("stage") or "unknown")
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs.get(job_id, {}),
                 "state": "error",
-                "stage": "error",
                 "error": str(exc),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
             try:
-                _notify_apuestas_job_error(
-                    token=token,
-                    chat_id=chat_id,
-                    job_id=job_id,
-                    error_text=str(exc),
-                    stage=stage,
+                client = telegram_client(token=token, chat_id=chat_id)
+                client.send_message(
+                    "❌ <b>/apuestas falló</b>\n"
+                    f"No pude completar la publicacion automatica.\nDetalle: <code>{telegram_text_service(str(exc))}</code>"
                 )
-                telegram_command_jobs[job_id]["notification_stage"] = "error_sent"
-            except Exception as notify_exc:
-                telegram_command_jobs[job_id] = {
-                    **telegram_command_jobs.get(job_id, {}),
-                    "notification_error": str(notify_exc),
-                }
+            except Exception:
+                pass
 
-    threading.Thread(target=_worker, daemon=False).start()
+    threading.Thread(target=_worker, daemon=True).start()
     return job_id
 
 
@@ -2246,14 +1712,6 @@ def auto_publicar_telegram_once() -> dict | None:
         solo_stakazos=TELEGRAM_AUTOPUBLISH_SOLO_STAKAZOS,
         publication_type="auto",
     )
-
-
-@app.get("/system/telegram-command-jobs")
-def system_telegram_command_jobs() -> dict[str, Any]:
-    return {
-        "total": len(telegram_command_jobs),
-        "jobs": telegram_command_jobs,
-    }
 
 
 @app.get("/system/publication-guard")
@@ -3993,113 +3451,6 @@ def apuestas_hoy(
         aggregate_sports=lambda: deportes_agregados_para_todo(
             max_total=24,
             strict_family_limits=False,
-        ),
-        fetch_odds=cuotas,
-        list_matches=partidos_disponibles,
-        save_snapshots=guardar_snapshot_cuotas,
-        filter_matches=filtrar_partidos,
-        fetch_elos=obtener_elos,
-        select_reference_house=seleccionar_casa_referencia,
-        analyze_comparison=analizar_comparador_casas,
-        translate_pick=traducir_apuesta,
-        historical_penalties=penalizaciones_historicas,
-        apply_historical_penalty=aplicar_penalizacion_historica,
-        sort_key_pick=prioridad_pick,
-        sort_key_todo=prioridad_pick_todo,
-        limit_todo_picks=lambda recomendadas, max_total: limitar_picks_todo(
-            recomendadas,
-            max_total=max_total,
-            operating_mode=RISK_OPERATING_MODE,
-        ),
-        save_recommendations=guardar_recomendaciones,
-        perfil_label=perfil_es,
-        modo_label=modo_es,
-        source_strength_for_context=source_strength_for_context,
-        stake_limit_text=stake_limit_text,
-        risk_disclaimer=standard_risk_disclaimer,
-        attach_context_to_pick=attach_context_to_pick,
-        build_risk_policy=politica_riesgo_actual,
-        apply_risk_policy_to_pick=lambda pick, policy, league_penalties=None: apply_risk_policy_to_pick(
-            pick,
-            policy=policy,
-            league_penalties=league_penalties,
-        ),
-        build_performance_guard=lambda: build_performance_guard(
-            load_dashboard=dashboard_data,
-            operating_mode=RISK_OPERATING_MODE,
-        ),
-        apply_performance_guard_to_pick=apply_performance_guard_to_pick,
-        apply_exposure_limits=lambda picks, max_total=None: apply_exposure_limits(
-            picks,
-            operating_mode=RISK_OPERATING_MODE,
-            max_total=max_total,
-        ),
-        single_sport_pick_limit=lambda partido: single_sport_pick_limit(RISK_OPERATING_MODE, partido),
-        multi_sport_pick_limit=lambda: multi_sport_pick_limit(RISK_OPERATING_MODE),
-        run_single_request=lambda nested_request: apuestas_hoy(
-            bankroll=nested_request.bankroll,
-            perfil=nested_request.perfil,
-            modo=nested_request.modo,
-            mercados=nested_request.mercados,
-            partido=nested_request.partido,
-            guardar=nested_request.guardar,
-            deporte=nested_request.deporte,
-            solo_elite=nested_request.solo_elite,
-            solo_stakazos=nested_request.solo_stakazos,
-            historical_mode=nested_request.historical_mode,
-            historical_date=nested_request.historical_date,
-            historical_from=nested_request.historical_from,
-            historical_to=nested_request.historical_to,
-        ),
-    )
-    return run_forecast_request(
-        ForecastRequest(
-            bankroll=bankroll,
-            perfil=perfil,
-            modo=modo,
-            mercados=mercados,
-            partido=partido,
-            guardar=guardar,
-            deporte=deporte,
-            solo_elite=solo_elite,
-            solo_stakazos=solo_stakazos,
-            historical_mode=historical_mode,
-            historical_date=historical_date,
-            historical_from=historical_from,
-            historical_to=historical_to,
-        ),
-        deps,
-    )
-
-
-def apuestas_hoy_telegram_compacto(
-    bankroll: float | None = None,
-    perfil: str = "moderado",
-    modo: str = "comparador",
-    mercados: str = "todo",
-    partido: str = "todos",
-    guardar: bool = False,
-    deporte: str = DEFAULT_SPORT,
-    solo_elite: bool = False,
-    solo_stakazos: bool = False,
-    historical_mode: bool = False,
-    historical_date: str | None = None,
-    historical_from: str | None = None,
-    historical_to: str | None = None,
-):
-    deps = ForecastDependencies(
-        provider_name=ODDS_PROVIDER,
-        reference_bookmaker=REFERENCE_BOOKMAKER,
-        perfiles_stake=PERFILES_STAKE,
-        modos_informe=MODOS_INFORME,
-        get_bankroll=obtener_bankroll,
-        update_bankroll=actualizar_bankroll,
-        resolve_context=resolver_contexto_deporte,
-        resolve_markets=resolver_mercados,
-        list_sport_options=lambda: opciones_deporte_disponibles(),
-        aggregate_sports=lambda: deportes_agregados_para_todo(
-            max_total=10,
-            strict_family_limits=True,
         ),
         fetch_odds=cuotas,
         list_matches=partidos_disponibles,

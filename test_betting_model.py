@@ -1,7 +1,6 @@
 import os
 import tempfile
 import unittest
-from collections import Counter
 from unittest.mock import patch
 
 from betting_model import (
@@ -61,7 +60,6 @@ from main import (
     telegram_config,
     telegram_keyboard_for_pick,
 )
-from app.telegram_service import format_summary_message
 from translations import apuesta_es, tipo_resultado_es
 
 
@@ -4234,7 +4232,6 @@ class BettingModelTests(unittest.TestCase):
         original_telegram_client = main.telegram_client
         original_generate = main.generate_bet_slip_opinion_from_image
         original_openai_available = main.openai_available
-        original_find_event = main._find_real_event_for_opinion
 
         sent_messages: list[str] = []
 
@@ -4257,7 +4254,6 @@ class BettingModelTests(unittest.TestCase):
             main.telegram_client = lambda token=None, chat_id=None: dummy_client
             main.openai_available = lambda: True
             main.generate_bet_slip_opinion_from_image = lambda image_bytes, mime_type="image/jpeg", user_notes=None: (
-                "Partido: Flamengo vs Vitoria\n"
                 "Apuesta detectada: combinada doble\n"
                 "Valor: medio\n"
                 "Fiabilidad: media\n"
@@ -4266,11 +4262,6 @@ class BettingModelTests(unittest.TestCase):
                 "Stake sugerido: 0.5/5\n"
                 "Lectura: demasiado justa."
             )
-            main._find_real_event_for_opinion = lambda analysis, sport_hint=None: {
-                "partido": "Flamengo vs Vitoria",
-                "liga": "Brazil Campeonato",
-                "commence_time": "2026-08-09T22:30:00Z",
-            }
 
             main.procesar_update_telegram(
                 {
@@ -4286,15 +4277,12 @@ class BettingModelTests(unittest.TestCase):
             main.telegram_client = original_telegram_client
             main.generate_bet_slip_opinion_from_image = original_generate
             main.openai_available = original_openai_available
-            main._find_real_event_for_opinion = original_find_event
 
         self.assertEqual(getattr(dummy_client, "file_id", None), "big")
         self.assertEqual(len(sent_messages), 2)
         self.assertIn("/opinion en marcha", sent_messages[0])
         self.assertIn("Opinion IA de la apuesta", sent_messages[1])
         self.assertIn("Apuesta detectada", sent_messages[1])
-        self.assertIn("Contexto real detectado", sent_messages[1])
-        self.assertIn("Brazil Campeonato", sent_messages[1])
 
     def test_procesar_update_telegram_opinion_admite_reply_a_foto(self):
         import main
@@ -4347,257 +4335,6 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(len(sent_messages), 2)
         self.assertIn("Opinion IA de la apuesta", sent_messages[1])
 
-    def test_extract_matchup_from_opinion_text_detecta_partido(self):
-        import main
-
-        matchup = main._extract_matchup_from_opinion_text(
-            "Partido: Flamengo vs Vitoria\n"
-            "Apuesta detectada: Flamengo gana + Menos de 5 goles"
-        )
-
-        self.assertEqual(matchup, ("Flamengo", "Vitoria"))
-
-    def test_extract_opinion_sport_hint_detecta_deporte(self):
-        import main
-
-        self.assertEqual(main._extract_opinion_sport_hint("/opinion futbol"), "futbol")
-        self.assertEqual(main._extract_opinion_sport_hint("/opinion tenis cuota justa"), "tenis")
-        self.assertEqual(main._extract_opinion_sport_hint("/opinion nba"), "baloncesto")
-
-    def test_extract_opinion_user_notes_omite_pista_deporte(self):
-        import main
-
-        self.assertEqual(
-            main._extract_opinion_user_notes("/opinion futbol la ves buena para hoy"),
-            "la ves buena para hoy",
-        )
-        self.assertEqual(
-            main._extract_opinion_user_notes("/opinion tenis"),
-            "",
-        )
-
-    def test_format_opinion_visual_aniade_iconos(self):
-        import main
-
-        formatted = main._format_opinion_visual(
-            "Partido: Flamengo vs Vitoria\n"
-            "Apuesta detectada: Flamengo gana + Menos de 5 goles\n"
-            "Valor: Medio\n"
-            "Fiabilidad: Media-alta\n"
-            "Riesgo principal: Que Flamengo no gane\n"
-            "Veredicto: Si, la jugaria\n"
-            "Cantidad sugerida: 3/10\n"
-            "Lectura: Favorito claro\n"
-        )
-
-        self.assertIn("🏟️ Partido:", formatted)
-        self.assertIn("🎯 Apuesta detectada:", formatted)
-        self.assertIn("📈 Valor:", formatted)
-        self.assertIn("🛡️ Fiabilidad:", formatted)
-        self.assertIn("⚠️ Riesgo principal:", formatted)
-        self.assertIn("✅ Veredicto:", formatted)
-        self.assertIn("💶 Cantidad sugerida:", formatted)
-        self.assertIn("🧠 Lectura:", formatted)
-
-    def test_formatear_mensaje_telegram_pick_muestra_ranking(self):
-        pick = {
-            "telegram_rank": 1,
-            "elite_tier": "elite",
-            "league_label": "ATP Toronto",
-            "partido": "Player A vs Player B",
-            "equipo": "Menos de 20.5 juegos",
-            "mercado": "totals",
-            "tipo_resultado_es": "Totales",
-            "cuota_apuesta": 1.91,
-            "stake": 1.7,
-            "importe_sugerido": 3.5,
-            "valor_esperado": 0.04,
-            "quality_score": 88,
-            "confianza": "Media",
-            "reliability_tier": "alta",
-            "reliability_score": 84,
-            "motivo_es": "Valor positivo con exposicion controlada",
-        }
-
-        message = formatear_mensaje_telegram_pick(pick)
-
-        self.assertIn("1. ELITE", message)
-
-    def test_format_summary_message_incluye_leyenda_tiers(self):
-        message = format_summary_message(
-            sport_label="Todo",
-            league_label="Todas las ligas base",
-            perfil_label="Agresivo",
-            modo_label="Comparar casas",
-            total_elite=3,
-            total_stakazos=1,
-            total_messages=3,
-            solo_stakazos=False,
-            fallback_a_elite=False,
-            ai_summary=None,
-        )
-
-        self.assertIn("Leyenda", message)
-        self.assertIn("Stakazo = maxima conviccion", message)
-        self.assertIn("Elite = muy buena", message)
-
-    def test_seleccionar_picks_para_apuestas_lab_diversifica_bloques(self):
-        import main
-
-        original_selector = main.seleccionar_picks_para_telegram
-        original_recent_exposure = main._recent_apuestas_block_exposure
-
-        try:
-            main.seleccionar_picks_para_telegram = lambda data, solo_stakazos=False, max_items=6: [
-                {
-                    "event_id": "ten-1",
-                    "sport_label": "Tenis",
-                    "mercado": "totals",
-                    "quality_score": 92,
-                    "reliability_score": 88,
-                    "valor_esperado": 0.052,
-                    "commence_time": "2026-08-10T12:00:00Z",
-                    "cuota_apuesta": 1.90,
-                    "elite_tier": "elite",
-                },
-                {
-                    "event_id": "ten-2",
-                    "sport_label": "Tenis",
-                    "mercado": "totals",
-                    "quality_score": 91,
-                    "reliability_score": 87,
-                    "valor_esperado": 0.051,
-                    "commence_time": "2026-08-10T13:00:00Z",
-                    "cuota_apuesta": 1.91,
-                    "elite_tier": "elite",
-                },
-                {
-                    "event_id": "soc-1",
-                    "sport_label": "Futbol",
-                    "mercado": "h2h",
-                    "quality_score": 86,
-                    "reliability_score": 82,
-                    "valor_esperado": 0.046,
-                    "commence_time": "2026-08-10T14:00:00Z",
-                    "cuota_apuesta": 1.88,
-                    "elite_tier": "premium",
-                },
-                {
-                    "event_id": "bas-1",
-                    "sport_label": "Baloncesto",
-                    "mercado": "spreads",
-                    "quality_score": 80,
-                    "reliability_score": 79,
-                    "valor_esperado": 0.041,
-                    "commence_time": "2026-08-10T15:00:00Z",
-                    "cuota_apuesta": 1.95,
-                    "elite_tier": "premium",
-                },
-            ]
-            main._recent_apuestas_block_exposure = lambda lookback_hours=48, limit=8: Counter()
-
-            picks = main.seleccionar_picks_para_apuestas_lab({}, solo_stakazos=False)
-        finally:
-            main.seleccionar_picks_para_telegram = original_selector
-            main._recent_apuestas_block_exposure = original_recent_exposure
-
-        self.assertEqual(len(picks), 3)
-        self.assertEqual(picks[0]["event_id"], "ten-1")
-        self.assertEqual({pick["sport_label"] for pick in picks[1:]}, {"Futbol", "Baloncesto"})
-
-    def test_seleccionar_picks_para_apuestas_lab_penaliza_saturacion_reciente(self):
-        import main
-
-        original_selector = main.seleccionar_picks_para_telegram
-        original_recent_exposure = main._recent_apuestas_block_exposure
-
-        try:
-            main.seleccionar_picks_para_telegram = lambda data, solo_stakazos=False, max_items=6: [
-                {
-                    "event_id": "ten-1",
-                    "sport_label": "Tenis",
-                    "mercado": "totals",
-                    "quality_score": 92,
-                    "reliability_score": 88,
-                    "valor_esperado": 0.052,
-                    "commence_time": "2026-08-10T12:00:00Z",
-                    "cuota_apuesta": 1.90,
-                    "elite_tier": "elite",
-                },
-                {
-                    "event_id": "ten-2",
-                    "sport_label": "Tenis",
-                    "mercado": "totals",
-                    "quality_score": 90,
-                    "reliability_score": 86,
-                    "valor_esperado": 0.049,
-                    "commence_time": "2026-08-10T13:00:00Z",
-                    "cuota_apuesta": 1.89,
-                    "elite_tier": "elite",
-                },
-                {
-                    "event_id": "ten-3",
-                    "sport_label": "Tenis",
-                    "mercado": "h2h",
-                    "quality_score": 87,
-                    "reliability_score": 81,
-                    "valor_esperado": 0.045,
-                    "commence_time": "2026-08-10T14:00:00Z",
-                    "cuota_apuesta": 1.85,
-                    "elite_tier": "premium",
-                },
-            ]
-            main._recent_apuestas_block_exposure = lambda lookback_hours=48, limit=8: Counter({("tenis", "totales"): 4})
-
-            picks = main.seleccionar_picks_para_apuestas_lab({}, solo_stakazos=False)
-        finally:
-            main.seleccionar_picks_para_telegram = original_selector
-            main._recent_apuestas_block_exposure = original_recent_exposure
-
-        self.assertEqual(picks[0]["event_id"], "ten-1")
-        self.assertEqual(picks[1]["event_id"], "ten-3")
-
-    def test_seleccionar_picks_para_apuestas_lab_hace_fallback_suave_si_no_hay_reasonable(self):
-        import main
-
-        original_selector = main.seleccionar_picks_para_telegram
-        original_recent_exposure = main._recent_apuestas_block_exposure
-
-        try:
-            main.seleccionar_picks_para_telegram = lambda data, solo_stakazos=False, max_items=6: [
-                {
-                    "event_id": "soc-1",
-                    "sport_label": "Futbol",
-                    "mercado": "h2h",
-                    "quality_score": 50,
-                    "reliability_score": 59,
-                    "valor_esperado": 0.032,
-                    "commence_time": "2026-08-10T12:00:00Z",
-                    "cuota_apuesta": 1.95,
-                    "elite_tier": "premium",
-                },
-                {
-                    "event_id": "ten-1",
-                    "sport_label": "Tenis",
-                    "mercado": "totals",
-                    "quality_score": 49,
-                    "reliability_score": 58,
-                    "valor_esperado": 0.03,
-                    "commence_time": "2026-08-10T13:00:00Z",
-                    "cuota_apuesta": 1.90,
-                    "elite_tier": "elite",
-                },
-            ]
-            main._recent_apuestas_block_exposure = lambda lookback_hours=48, limit=8: Counter()
-
-            picks = main.seleccionar_picks_para_apuestas_lab({}, solo_stakazos=False)
-        finally:
-            main.seleccionar_picks_para_telegram = original_selector
-            main._recent_apuestas_block_exposure = original_recent_exposure
-
-        self.assertEqual(len(picks), 2)
-        self.assertEqual(picks[0]["event_id"], "soc-1")
-
     def test_lanzar_apuestas_async_usa_preset_lab_y_envia_resumen_final(self):
         import main
 
@@ -4609,7 +4346,6 @@ class BettingModelTests(unittest.TestCase):
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
         original_build_sha = main.APP_BUILD_SHA
-        original_run_step = main._run_apuestas_job_step
 
         sent_messages: list[str] = []
         published_calls: list[dict[str, object]] = []
@@ -4660,7 +4396,6 @@ class BettingModelTests(unittest.TestCase):
             main.construir_publicacion_apuestas_lab = fake_construir_publicacion_apuestas_lab
             main.publicar_payload_preparado_lab = fake_publicar_payload_preparado_lab
             main.threading.Thread = ImmediateThread
-            main._run_apuestas_job_step = lambda func, **kwargs: func()
 
             job_id = main.lanzar_apuestas_telegram_async()
         finally:
@@ -4671,7 +4406,6 @@ class BettingModelTests(unittest.TestCase):
             main.threading.Thread = original_thread
             main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
             main.provider_layer.get_odds_api_usage_tracking = original_get_usage
-            main._run_apuestas_job_step = original_run_step
 
         self.assertTrue(job_id)
         self.assertEqual(len(published_calls), 1)
@@ -4703,7 +4437,6 @@ class BettingModelTests(unittest.TestCase):
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
         original_build_sha = main.APP_BUILD_SHA
-        original_run_step = main._run_apuestas_job_step
 
         sent_messages: list[str] = []
 
@@ -4760,7 +4493,6 @@ class BettingModelTests(unittest.TestCase):
                 },
             }
             main.threading.Thread = ImmediateThread
-            main._run_apuestas_job_step = lambda func, **kwargs: func()
 
             main.lanzar_apuestas_telegram_async()
         finally:
@@ -4771,7 +4503,6 @@ class BettingModelTests(unittest.TestCase):
             main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
             main.provider_layer.get_odds_api_usage_tracking = original_get_usage
             main.APP_BUILD_SHA = original_build_sha
-            main._run_apuestas_job_step = original_run_step
 
         self.assertEqual(len(sent_messages), 1)
         self.assertIn("/apuestas sin picks publicables", sent_messages[0])
@@ -4788,159 +4519,6 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Consumo API: <b>66</b> creditos en <b>28</b> llamadas", sent_messages[0])
         self.assertIn("Build: <code>buildtest123</code>", sent_messages[0])
         self.assertNotIn("Guard activo:", sent_messages[0])
-
-    def test_lanzar_apuestas_async_notifica_error_con_fase_si_un_bloque_se_atasca(self):
-        import main
-
-        original_telegram_config = main.telegram_config
-        original_telegram_client = main.telegram_client
-        original_thread = main.threading.Thread
-        original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
-        original_run_step = main._run_apuestas_job_step
-
-        sent_messages: list[str] = []
-
-        class DummyClient:
-            def send_message(self, text, reply_markup=None):
-                sent_messages.append(text)
-                return {"ok": True}
-
-        class ImmediateThread:
-            def __init__(self, target=None, daemon=None):
-                self._target = target
-
-            def start(self):
-                if self._target is not None:
-                    self._target()
-
-        try:
-            main.telegram_config = lambda: ("token-test", "chat-test")
-            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
-            main.provider_layer.reset_odds_api_usage_tracking = lambda: None
-            main.threading.Thread = ImmediateThread
-
-            def fake_run_step(func, *, timeout_seconds, step_label):
-                if step_label == "building_lab":
-                    raise TimeoutError("La fase 'building_lab' supero 120s y se cancelo para evitar un bloqueo silencioso.")
-                return func()
-
-            main._run_apuestas_job_step = fake_run_step
-
-            main.lanzar_apuestas_telegram_async()
-        finally:
-            main.telegram_config = original_telegram_config
-            main.telegram_client = original_telegram_client
-            main.threading.Thread = original_thread
-            main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
-            main._run_apuestas_job_step = original_run_step
-
-        self.assertEqual(len(sent_messages), 1)
-        self.assertIn("/apuestas falló", sent_messages[0])
-        self.assertIn("Fase: <code>building_lab</code>", sent_messages[0])
-        self.assertIn("bloqueo silencioso", sent_messages[0])
-
-    def test_run_apuestas_job_step_no_espera_al_shutdown_si_hay_timeout(self):
-        import main
-
-        original_executor = main.ThreadPoolExecutor
-
-        class FakeTimeoutFuture:
-            def __init__(self):
-                self.cancel_called = False
-
-            def result(self, timeout=None):
-                raise main.FuturesTimeoutError()
-
-            def cancel(self):
-                self.cancel_called = True
-                return True
-
-        class FakeExecutor:
-            last_instance = None
-
-            def __init__(self, *args, **kwargs):
-                self.future = FakeTimeoutFuture()
-                self.shutdown_calls: list[tuple[bool, bool]] = []
-                FakeExecutor.last_instance = self
-
-            def submit(self, func):
-                return self.future
-
-            def shutdown(self, wait=True, cancel_futures=False):
-                self.shutdown_calls.append((wait, cancel_futures))
-
-        try:
-            main.ThreadPoolExecutor = FakeExecutor
-
-            with self.assertRaises(TimeoutError):
-                main._run_apuestas_job_step(lambda: None, timeout_seconds=1, step_label="building_lab")
-        finally:
-            main.ThreadPoolExecutor = original_executor
-
-        self.assertIsNotNone(FakeExecutor.last_instance)
-        self.assertTrue(FakeExecutor.last_instance.future.cancel_called)
-        self.assertEqual(FakeExecutor.last_instance.shutdown_calls, [(False, True)])
-
-    def test_construir_publicacion_apuestas_lab_rescata_descartadas_operativas_si_preview_sale_vacio(self):
-        import main
-
-        original_compact_forecast = main.apuestas_hoy_telegram_compacto
-
-        try:
-            main.apuestas_hoy_telegram_compacto = lambda **kwargs: {
-                "sport_label": "Todo",
-                "league_label": "Todas las ligas base",
-                "criterio": "Top 3-5 mejores apuestas",
-                "total_elite": 0,
-                "total_analizadas": 366,
-                "total_recomendadas": 0,
-                "snapshots_guardados": 817,
-                "partidos_disponibles": [{"id": "event-1"}],
-                "mejores_apuestas": [],
-                "descartadas_operativas": [
-                    {
-                        "event_id": "soc-nyc-santos",
-                        "partido": "New York City FC vs Santos Laguna",
-                        "sport_label": "Futbol",
-                        "league_label": "Concacaf Leagues Cup",
-                        "mercado": "totals",
-                        "tipo_resultado": "under",
-                        "equipo": "Menos de 3 goles",
-                        "casa": "Coolbet",
-                        "cuota_apuesta": 1.93,
-                        "cuota_pinnacle": 1.88,
-                        "reliability_score": 64,
-                        "quality_score": 58,
-                        "valor_esperado": 0.046,
-                        "margen_cuota": 1.012,
-                        "stake": 1.9,
-                        "motivo_es": "Filtro de valor y margen superado",
-                        "commence_time": "2026-08-10T23:30:00Z",
-                        "recomendacion": "No apostar",
-                    },
-                ],
-                "descartadas": [],
-            }
-
-            result = main.construir_publicacion_apuestas_lab(
-                bankroll=200.0,
-                perfil="agresivo",
-                modo="comparador",
-                mercados="todo",
-                partido="todos",
-                deporte="todo",
-                solo_stakazos=False,
-            )
-        finally:
-            main.apuestas_hoy_telegram_compacto = original_compact_forecast
-
-        payload = result["payload"]
-        diagnostics = result["zero_picks_diagnostics"]
-        self.assertEqual(len(payload["pronosticos"]), 1)
-        self.assertEqual(payload.get("fallback_rescue_kind"), "operational")
-        self.assertEqual(diagnostics.get("fallback_rescue_kind"), "operational")
-        self.assertEqual(diagnostics.get("fallback_rescue_count"), 1)
-        self.assertEqual(payload["pronosticos"][0]["event_id"], "soc-nyc-santos")
 
     def test_resumen_telegram_muestra_publicado_hoy_con_picks_del_dia(self):
         report = {
