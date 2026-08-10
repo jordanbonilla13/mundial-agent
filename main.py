@@ -1668,6 +1668,17 @@ def seleccionar_picks_para_apuestas_lab(
             return False
         return quality >= 55 or reliability >= 68
 
+    def _is_soft_pick(pick: dict[str, Any]) -> bool:
+        cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or pick.get("cuota") or 0)
+        quality = float(pick.get("quality_score") or 0)
+        reliability = float(pick.get("reliability_score") or 0)
+        tier = str(pick.get("elite_tier") or "").strip().lower()
+        if cuota <= 0 or cuota > 3.4:
+            return False
+        if quality >= 48 or reliability >= 60:
+            return True
+        return tier in {"stakazo", "elite"}
+
     def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, float, float, float]:
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
         if commence is None:
@@ -1686,9 +1697,16 @@ def seleccionar_picks_para_apuestas_lab(
         return (bucket, max(delta_hours, 0.0), -float(pick.get("quality_score") or 0), -float(pick.get("reliability_score") or 0))
 
     reasonable = [pick for pick in base if _is_reasonable_pick(pick)]
-    if not reasonable:
+    soft_candidates = [pick for pick in base if _is_soft_pick(pick)]
+    candidate_pool = reasonable or soft_candidates
+    if not candidate_pool:
         return []
     reasonable.sort(key=_pick_sort_key)
+    soft_candidates.sort(key=_pick_sort_key)
+    candidate_pool = list(reasonable)
+    for pick in soft_candidates:
+        if fingerprint_pick_service(pick) not in {fingerprint_pick_service(item) for item in candidate_pool}:
+            candidate_pool.append(pick)
 
     recent_exposure = _recent_apuestas_block_exposure()
     selected: list[dict[str, Any]] = []
@@ -1705,7 +1723,7 @@ def seleccionar_picks_para_apuestas_lab(
         tier_penalty = 0 if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"} else 1
         return (same_event, block_penalty, sport_penalty, tier_penalty)
 
-    first_pick = reasonable[0]
+    first_pick = candidate_pool[0]
     selected.append(first_pick)
     selected_keys.add(fingerprint_pick_service(first_pick))
     selected_block = _apuestas_diversity_block(first_pick)
@@ -1714,7 +1732,7 @@ def seleccionar_picks_para_apuestas_lab(
 
     while len(selected) < 3:
         candidates = [
-            pick for pick in reasonable
+            pick for pick in candidate_pool
             if fingerprint_pick_service(pick) not in selected_keys
         ]
         if not candidates:

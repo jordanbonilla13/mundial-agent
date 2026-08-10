@@ -4557,6 +4557,47 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(picks[0]["event_id"], "ten-1")
         self.assertEqual(picks[1]["event_id"], "ten-3")
 
+    def test_seleccionar_picks_para_apuestas_lab_hace_fallback_suave_si_no_hay_reasonable(self):
+        import main
+
+        original_selector = main.seleccionar_picks_para_telegram
+        original_recent_exposure = main._recent_apuestas_block_exposure
+
+        try:
+            main.seleccionar_picks_para_telegram = lambda data, solo_stakazos=False, max_items=6: [
+                {
+                    "event_id": "soc-1",
+                    "sport_label": "Futbol",
+                    "mercado": "h2h",
+                    "quality_score": 50,
+                    "reliability_score": 59,
+                    "valor_esperado": 0.032,
+                    "commence_time": "2026-08-10T12:00:00Z",
+                    "cuota_apuesta": 1.95,
+                    "elite_tier": "premium",
+                },
+                {
+                    "event_id": "ten-1",
+                    "sport_label": "Tenis",
+                    "mercado": "totals",
+                    "quality_score": 49,
+                    "reliability_score": 58,
+                    "valor_esperado": 0.03,
+                    "commence_time": "2026-08-10T13:00:00Z",
+                    "cuota_apuesta": 1.90,
+                    "elite_tier": "elite",
+                },
+            ]
+            main._recent_apuestas_block_exposure = lambda lookback_hours=48, limit=8: Counter()
+
+            picks = main.seleccionar_picks_para_apuestas_lab({}, solo_stakazos=False)
+        finally:
+            main.seleccionar_picks_para_telegram = original_selector
+            main._recent_apuestas_block_exposure = original_recent_exposure
+
+        self.assertEqual(len(picks), 2)
+        self.assertEqual(picks[0]["event_id"], "soc-1")
+
     def test_lanzar_apuestas_async_usa_preset_lab_y_envia_resumen_final(self):
         import main
 
