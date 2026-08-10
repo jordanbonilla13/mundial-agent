@@ -4839,6 +4839,48 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Fase: <code>building_lab</code>", sent_messages[0])
         self.assertIn("bloqueo silencioso", sent_messages[0])
 
+    def test_run_apuestas_job_step_no_espera_al_shutdown_si_hay_timeout(self):
+        import main
+
+        original_executor = main.ThreadPoolExecutor
+
+        class FakeTimeoutFuture:
+            def __init__(self):
+                self.cancel_called = False
+
+            def result(self, timeout=None):
+                raise main.FuturesTimeoutError()
+
+            def cancel(self):
+                self.cancel_called = True
+                return True
+
+        class FakeExecutor:
+            last_instance = None
+
+            def __init__(self, *args, **kwargs):
+                self.future = FakeTimeoutFuture()
+                self.shutdown_calls: list[tuple[bool, bool]] = []
+                FakeExecutor.last_instance = self
+
+            def submit(self, func):
+                return self.future
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                self.shutdown_calls.append((wait, cancel_futures))
+
+        try:
+            main.ThreadPoolExecutor = FakeExecutor
+
+            with self.assertRaises(TimeoutError):
+                main._run_apuestas_job_step(lambda: None, timeout_seconds=1, step_label="building_lab")
+        finally:
+            main.ThreadPoolExecutor = original_executor
+
+        self.assertIsNotNone(FakeExecutor.last_instance)
+        self.assertTrue(FakeExecutor.last_instance.future.cancel_called)
+        self.assertEqual(FakeExecutor.last_instance.shutdown_calls, [(False, True)])
+
     def test_construir_publicacion_apuestas_lab_rescata_descartadas_operativas_si_preview_sale_vacio(self):
         import main
 

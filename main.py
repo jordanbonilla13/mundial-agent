@@ -2124,14 +2124,21 @@ def _run_apuestas_job_step(
     timeout_seconds: int,
     step_label: str,
 ):
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"apuestas-{step_label}") as executor:
-        future = executor.submit(func)
-        try:
-            return future.result(timeout=timeout_seconds)
-        except FuturesTimeoutError as exc:
-            raise TimeoutError(
-                f"La fase '{step_label}' supero {timeout_seconds}s y se cancelo para evitar un bloqueo silencioso."
-            ) from exc
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"apuestas-{step_label}")
+    future = executor.submit(func)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError as exc:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise TimeoutError(
+            f"La fase '{step_label}' supero {timeout_seconds}s y se cancelo para evitar un bloqueo silencioso."
+        ) from exc
+    except Exception:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=False, cancel_futures=False)
 
 
 def lanzar_apuestas_telegram_async() -> str:
