@@ -4884,51 +4884,42 @@ class BettingModelTests(unittest.TestCase):
     def test_construir_publicacion_apuestas_lab_rescata_descartadas_operativas_si_preview_sale_vacio(self):
         import main
 
-        original_build_lab_run = main.build_lab_run
+        original_compact_forecast = main.apuestas_hoy_telegram_compacto
 
         try:
-            main.build_lab_run = lambda **kwargs: {
-                "telegram_preview": {
-                    "resumen_telegram": "Resumen base",
-                    "pronosticos": [],
-                    "mensajes_telegram": [],
-                },
-                "forecast_summary": {
-                    "total_analizadas": 366,
-                    "total_recomendadas": 0,
-                    "total_descartadas_preview": 5,
-                },
-                "forecast": {
-                    "sport_label": "Todo",
-                    "league_label": "Todas las ligas base",
-                    "criterio": "Top 3-5 mejores apuestas",
-                    "total_elite": 0,
-                    "snapshots_guardados": 817,
-                    "partidos_disponibles": [{"id": "event-1"}],
-                    "descartadas_operativas": [
-                        {
-                            "event_id": "soc-nyc-santos",
-                            "partido": "New York City FC vs Santos Laguna",
-                            "sport_label": "Futbol",
-                            "league_label": "Concacaf Leagues Cup",
-                            "mercado": "totals",
-                            "tipo_resultado": "under",
-                            "equipo": "Menos de 3 goles",
-                            "casa": "Coolbet",
-                            "cuota_apuesta": 1.93,
-                            "cuota_pinnacle": 1.88,
-                            "reliability_score": 64,
-                            "quality_score": 58,
-                            "valor_esperado": 0.046,
-                            "margen_cuota": 1.012,
-                            "stake": 1.9,
-                            "motivo_es": "Filtro de valor y margen superado",
-                            "commence_time": "2026-08-10T23:30:00Z",
-                            "recomendacion": "No apostar",
-                        },
-                    ],
-                    "descartadas": [],
-                },
+            main.apuestas_hoy_telegram_compacto = lambda **kwargs: {
+                "sport_label": "Todo",
+                "league_label": "Todas las ligas base",
+                "criterio": "Top 3-5 mejores apuestas",
+                "total_elite": 0,
+                "total_analizadas": 366,
+                "total_recomendadas": 0,
+                "snapshots_guardados": 817,
+                "partidos_disponibles": [{"id": "event-1"}],
+                "mejores_apuestas": [],
+                "descartadas_operativas": [
+                    {
+                        "event_id": "soc-nyc-santos",
+                        "partido": "New York City FC vs Santos Laguna",
+                        "sport_label": "Futbol",
+                        "league_label": "Concacaf Leagues Cup",
+                        "mercado": "totals",
+                        "tipo_resultado": "under",
+                        "equipo": "Menos de 3 goles",
+                        "casa": "Coolbet",
+                        "cuota_apuesta": 1.93,
+                        "cuota_pinnacle": 1.88,
+                        "reliability_score": 64,
+                        "quality_score": 58,
+                        "valor_esperado": 0.046,
+                        "margen_cuota": 1.012,
+                        "stake": 1.9,
+                        "motivo_es": "Filtro de valor y margen superado",
+                        "commence_time": "2026-08-10T23:30:00Z",
+                        "recomendacion": "No apostar",
+                    },
+                ],
+                "descartadas": [],
             }
 
             result = main.construir_publicacion_apuestas_lab(
@@ -4941,7 +4932,7 @@ class BettingModelTests(unittest.TestCase):
                 solo_stakazos=False,
             )
         finally:
-            main.build_lab_run = original_build_lab_run
+            main.apuestas_hoy_telegram_compacto = original_compact_forecast
 
         payload = result["payload"]
         diagnostics = result["zero_picks_diagnostics"]
