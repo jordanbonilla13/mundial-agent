@@ -2152,7 +2152,7 @@ def lanzar_apuestas_telegram_async() -> str:
             provider_layer.reset_odds_api_usage_tracking()
             publication_plan = _run_apuestas_job_step(
                 lambda: construir_publicacion_apuestas_lab(**TELEGRAM_APUESTAS_DEFAULTS),
-                timeout_seconds=120,
+                timeout_seconds=300,
                 step_label="building_lab",
             )
             payload = dict(publication_plan.get("payload") or {})
