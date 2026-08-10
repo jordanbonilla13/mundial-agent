@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from collections import Counter
 from unittest.mock import patch
 
 from betting_model import (
@@ -60,6 +61,7 @@ from main import (
     telegram_config,
     telegram_keyboard_for_pick,
 )
+from app.telegram_service import format_summary_message
 from translations import apuesta_es, tipo_resultado_es
 
 
@@ -4396,6 +4398,164 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("✅ Veredicto:", formatted)
         self.assertIn("💶 Cantidad sugerida:", formatted)
         self.assertIn("🧠 Lectura:", formatted)
+
+    def test_formatear_mensaje_telegram_pick_muestra_ranking(self):
+        pick = {
+            "telegram_rank": 1,
+            "elite_tier": "elite",
+            "league_label": "ATP Toronto",
+            "partido": "Player A vs Player B",
+            "equipo": "Menos de 20.5 juegos",
+            "mercado": "totals",
+            "tipo_resultado_es": "Totales",
+            "cuota_apuesta": 1.91,
+            "stake": 1.7,
+            "importe_sugerido": 3.5,
+            "valor_esperado": 0.04,
+            "quality_score": 88,
+            "confianza": "Media",
+            "reliability_tier": "alta",
+            "reliability_score": 84,
+            "motivo_es": "Valor positivo con exposicion controlada",
+        }
+
+        message = formatear_mensaje_telegram_pick(pick)
+
+        self.assertIn("1. ELITE", message)
+
+    def test_format_summary_message_incluye_leyenda_tiers(self):
+        message = format_summary_message(
+            sport_label="Todo",
+            league_label="Todas las ligas base",
+            perfil_label="Agresivo",
+            modo_label="Comparar casas",
+            total_elite=3,
+            total_stakazos=1,
+            total_messages=3,
+            solo_stakazos=False,
+            fallback_a_elite=False,
+            ai_summary=None,
+        )
+
+        self.assertIn("Leyenda", message)
+        self.assertIn("Stakazo = maxima conviccion", message)
+        self.assertIn("Elite = muy buena", message)
+
+    def test_seleccionar_picks_para_apuestas_lab_diversifica_bloques(self):
+        import main
+
+        original_selector = main.seleccionar_picks_para_telegram
+        original_recent_exposure = main._recent_apuestas_block_exposure
+
+        try:
+            main.seleccionar_picks_para_telegram = lambda data, solo_stakazos=False, max_items=6: [
+                {
+                    "event_id": "ten-1",
+                    "sport_label": "Tenis",
+                    "mercado": "totals",
+                    "quality_score": 92,
+                    "reliability_score": 88,
+                    "valor_esperado": 0.052,
+                    "commence_time": "2026-08-10T12:00:00Z",
+                    "cuota_apuesta": 1.90,
+                    "elite_tier": "elite",
+                },
+                {
+                    "event_id": "ten-2",
+                    "sport_label": "Tenis",
+                    "mercado": "totals",
+                    "quality_score": 91,
+                    "reliability_score": 87,
+                    "valor_esperado": 0.051,
+                    "commence_time": "2026-08-10T13:00:00Z",
+                    "cuota_apuesta": 1.91,
+                    "elite_tier": "elite",
+                },
+                {
+                    "event_id": "soc-1",
+                    "sport_label": "Futbol",
+                    "mercado": "h2h",
+                    "quality_score": 86,
+                    "reliability_score": 82,
+                    "valor_esperado": 0.046,
+                    "commence_time": "2026-08-10T14:00:00Z",
+                    "cuota_apuesta": 1.88,
+                    "elite_tier": "premium",
+                },
+                {
+                    "event_id": "bas-1",
+                    "sport_label": "Baloncesto",
+                    "mercado": "spreads",
+                    "quality_score": 80,
+                    "reliability_score": 79,
+                    "valor_esperado": 0.041,
+                    "commence_time": "2026-08-10T15:00:00Z",
+                    "cuota_apuesta": 1.95,
+                    "elite_tier": "premium",
+                },
+            ]
+            main._recent_apuestas_block_exposure = lambda lookback_hours=48, limit=8: Counter()
+
+            picks = main.seleccionar_picks_para_apuestas_lab({}, solo_stakazos=False)
+        finally:
+            main.seleccionar_picks_para_telegram = original_selector
+            main._recent_apuestas_block_exposure = original_recent_exposure
+
+        self.assertEqual(len(picks), 3)
+        self.assertEqual(picks[0]["event_id"], "ten-1")
+        self.assertEqual({pick["sport_label"] for pick in picks[1:]}, {"Futbol", "Baloncesto"})
+
+    def test_seleccionar_picks_para_apuestas_lab_penaliza_saturacion_reciente(self):
+        import main
+
+        original_selector = main.seleccionar_picks_para_telegram
+        original_recent_exposure = main._recent_apuestas_block_exposure
+
+        try:
+            main.seleccionar_picks_para_telegram = lambda data, solo_stakazos=False, max_items=6: [
+                {
+                    "event_id": "ten-1",
+                    "sport_label": "Tenis",
+                    "mercado": "totals",
+                    "quality_score": 92,
+                    "reliability_score": 88,
+                    "valor_esperado": 0.052,
+                    "commence_time": "2026-08-10T12:00:00Z",
+                    "cuota_apuesta": 1.90,
+                    "elite_tier": "elite",
+                },
+                {
+                    "event_id": "ten-2",
+                    "sport_label": "Tenis",
+                    "mercado": "totals",
+                    "quality_score": 90,
+                    "reliability_score": 86,
+                    "valor_esperado": 0.049,
+                    "commence_time": "2026-08-10T13:00:00Z",
+                    "cuota_apuesta": 1.89,
+                    "elite_tier": "elite",
+                },
+                {
+                    "event_id": "ten-3",
+                    "sport_label": "Tenis",
+                    "mercado": "h2h",
+                    "quality_score": 87,
+                    "reliability_score": 81,
+                    "valor_esperado": 0.045,
+                    "commence_time": "2026-08-10T14:00:00Z",
+                    "cuota_apuesta": 1.85,
+                    "elite_tier": "premium",
+                },
+            ]
+            main._recent_apuestas_block_exposure = lambda lookback_hours=48, limit=8: Counter({("tenis", "totales"): 4})
+
+            picks = main.seleccionar_picks_para_apuestas_lab({}, solo_stakazos=False)
+        finally:
+            main.seleccionar_picks_para_telegram = original_selector
+            main._recent_apuestas_block_exposure = original_recent_exposure
+
+        self.assertEqual(picks[0]["event_id"], "ten-1")
+        self.assertEqual(picks[1]["event_id"], "ten-3")
 
     def test_lanzar_apuestas_async_usa_preset_lab_y_envia_resumen_final(self):
         import main

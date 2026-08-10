@@ -520,7 +520,11 @@ def publish_telegram_predictions(
         ai_summary=ai_summary,
     )
 
-    messages = [summary_text] + [format_pick_message(pick) for pick in picks_publicables]
+    ranked_picks = [
+        {**pick, "telegram_rank": index + 1}
+        for index, pick in enumerate(picks_publicables)
+    ]
+    messages = [summary_text] + [format_pick_message(pick) for pick in ranked_picks]
     sent_messages = []
     publication_items = []
 
@@ -533,7 +537,7 @@ def publish_telegram_predictions(
                 "pick_id": None,
             }
             if index > 0:
-                pick = picks_publicables[index - 1]
+                pick = ranked_picks[index - 1]
                 key = fingerprint_pick(pick)
                 pick_guardado = picks_por_fingerprint.get(key)
                 if pick_guardado is not None:
@@ -569,7 +573,7 @@ def publish_telegram_predictions(
     for index, text in enumerate(messages):
         reply_markup = None
         if index > 0:
-            pick = picks_publicables[index - 1]
+            pick = ranked_picks[index - 1]
             if pick.get("id"):
                 reply_markup = telegram_keyboard_for_pick(int(pick["id"]))
 
@@ -590,7 +594,7 @@ def publish_telegram_predictions(
         }
 
         if index > 0:
-            pick = picks_publicables[index - 1]
+            pick = ranked_picks[index - 1]
             key = fingerprint_pick(pick)
             pick_guardado = picks_por_fingerprint.get(key)
             if pick_guardado is not None:

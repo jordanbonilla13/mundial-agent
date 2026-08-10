@@ -97,6 +97,12 @@ def format_pick_message(
     liga = pick.get("league_label") or pick.get("sport_label") or "General"
     tier = telegram_tier_label(pick.get("elite_tier"))
     tier_icon = telegram_tier_icon(pick.get("elite_tier"))
+    rank_raw = pick.get("telegram_rank")
+    try:
+        rank = int(rank_raw) if rank_raw is not None else None
+    except (TypeError, ValueError):
+        rank = None
+    tier_header = f"{rank}. {tier}" if rank is not None and rank > 0 else tier
     confianza = pick.get("confianza") or "Media"
     fiabilidad = pick.get("reliability_tier") or "media"
     fiabilidad_score = pick.get("reliability_score") or 0
@@ -113,7 +119,7 @@ def format_pick_message(
     lectura_ia = pick.get("ai_narrative_es")
 
     return (
-        f"<b>{telegram_text(tier_icon)} {telegram_text(tier)} | {telegram_text(liga)}</b>\n"
+        f"<b>{telegram_text(tier_icon)} {telegram_text(tier_header)} | {telegram_text(liga)}</b>\n"
         f"<b>{telegram_text(titulo)}</b>\n"
         f"🏟️ <b>Partido:</b> {telegram_text(partido)}\n"
         f"🎯 <b>Seleccion:</b> {telegram_text(seleccion)}\n"
@@ -148,6 +154,7 @@ def format_summary_message(
 ) -> str:
     filtro = "Solo stakazos" if solo_stakazos else "Top 3-5 mejores apuestas"
     footer = "Sin stakazos ahora: se publica seleccion elite." if fallback_a_elite else "Seleccion priorizada por calidad, value y fiabilidad."
+    legend = "🔥 Stakazo = maxima conviccion | ⭐ Elite = muy buena | 💎 Premium = interesante | 📌 Seguimiento = mas justa"
 
     return (
         f"<b>📊 PREDI IA | INFORME PREMIUM</b>\n"
@@ -160,6 +167,7 @@ def format_summary_message(
         f"📨 <b>Envios:</b> {telegram_text(total_messages)}\n"
         f"🎛️ <b>Filtro:</b> {telegram_text(filtro)}\n"
         f"🛡️ <b>Nota:</b> {telegram_text(footer)}"
+        + f"\n🧾 <b>Leyenda:</b> {telegram_text(legend)}"
         + (f"\n🧬 <b>Lectura IA:</b> {telegram_text(ai_summary)}" if ai_summary else "")
     )
 

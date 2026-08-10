@@ -5,6 +5,7 @@ import re
 import subprocess
 import threading
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any
@@ -1531,11 +1532,17 @@ def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
         {**pick, **(_raw_pick(picks_por_fingerprint.get(fingerprint_pick_service(pick), {})) if picks_por_fingerprint.get(fingerprint_pick_service(pick)) else {}), **(picks_por_fingerprint.get(fingerprint_pick_service(pick)) or {})}
         for pick in picks_publicables
     ]
+    ranked_picks = [
+        {**pick, "telegram_rank": index + 1}
+        for index, pick in enumerate(picks_publicables)
+    ]
 
     summary_text = str(payload.get("resumen_telegram") or "").strip()
     pick_messages = list(payload.get("mensajes_telegram") or [])
-    if len(pick_messages) != len(picks_publicables):
-        pick_messages = [formatear_mensaje_telegram_pick(pick) for pick in picks_publicables]
+    if len(pick_messages) != len(ranked_picks):
+        pick_messages = [formatear_mensaje_telegram_pick(pick) for pick in ranked_picks]
+    else:
+        pick_messages = [formatear_mensaje_telegram_pick(pick) for pick in ranked_picks]
     messages = ([summary_text] if summary_text else []) + pick_messages
 
     sent_messages = []
@@ -1545,9 +1552,9 @@ def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
         reply_markup = None
         pick_id = None
         if summary_text and index > 0:
-            pick = picks_publicables[index - 1]
+            pick = ranked_picks[index - 1]
         elif not summary_text:
-            pick = picks_publicables[index]
+            pick = ranked_picks[index]
         else:
             pick = None
         if pick is not None and pick.get("id"):
@@ -1600,6 +1607,45 @@ def _parse_apuestas_compact_commence(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _apuestas_market_bucket(pick: dict[str, Any]) -> str:
+    mercado = str(pick.get("mercado") or "").strip().lower()
+    if mercado in {"totals", "alternate_totals", "team_totals", "totals_h1", "totals_h2"}:
+        return "totales"
+    if mercado == "h2h":
+        return "ganador"
+    if mercado == "spreads":
+        return "handicap"
+    if mercado == "double_chance":
+        return "doble_oportunidad"
+    if mercado == "btts":
+        return "ambos_anotan"
+    return mercado or "general"
+
+
+def _apuestas_diversity_block(pick: dict[str, Any]) -> tuple[str, str]:
+    sport = str(pick.get("sport_label") or "General").strip().lower() or "general"
+    return (sport, _apuestas_market_bucket(pick))
+
+
+def _recent_apuestas_block_exposure(*, lookback_hours: int = 48, limit: int = 8) -> Counter[tuple[str, str]]:
+    counter: Counter[tuple[str, str]] = Counter()
+    now = datetime.now(timezone.utc)
+    for publication in listar_publicaciones_telegram(limit=limit):
+        created_at = _parse_apuestas_compact_commence(publication.get("created_at"))
+        if created_at is None:
+            continue
+        age_hours = (now - created_at).total_seconds() / 3600
+        if age_hours < 0 or age_hours > lookback_hours:
+            continue
+        for item in list(publication.get("items") or []):
+            if str(item.get("message_kind") or "").strip().lower() != "pick":
+                continue
+            raw_pick = _raw_pick(item)
+            source = raw_pick or item
+            counter[_apuestas_diversity_block(source)] += 1
+    return counter
+
+
 def seleccionar_picks_para_apuestas_lab(
     data: dict[str, Any],
     solo_stakazos: bool = False,
@@ -1643,7 +1689,51 @@ def seleccionar_picks_para_apuestas_lab(
     if not reasonable:
         return []
     reasonable.sort(key=_pick_sort_key)
-    return reasonable[:3]
+
+    recent_exposure = _recent_apuestas_block_exposure()
+    selected: list[dict[str, Any]] = []
+    selected_keys: set[tuple[str, str, str, str, str]] = set()
+    selected_sports: Counter[str] = Counter()
+    selected_blocks: Counter[tuple[str, str]] = Counter()
+
+    def _candidate_penalty(pick: dict[str, Any]) -> tuple[int, int, int, int]:
+        same_event = 1 if any(str(item.get("event_id") or "") == str(pick.get("event_id") or "") for item in selected) else 0
+        block = _apuestas_diversity_block(pick)
+        sport = block[0]
+        block_penalty = selected_blocks[block] * 14 + int(recent_exposure.get(block, 0)) * 5
+        sport_penalty = selected_sports[sport] * 6
+        tier_penalty = 0 if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"} else 1
+        return (same_event, block_penalty, sport_penalty, tier_penalty)
+
+    first_pick = reasonable[0]
+    selected.append(first_pick)
+    selected_keys.add(fingerprint_pick_service(first_pick))
+    selected_block = _apuestas_diversity_block(first_pick)
+    selected_blocks[selected_block] += 1
+    selected_sports[selected_block[0]] += 1
+
+    while len(selected) < 3:
+        candidates = [
+            pick for pick in reasonable
+            if fingerprint_pick_service(pick) not in selected_keys
+        ]
+        if not candidates:
+            break
+        candidates.sort(
+            key=lambda pick: (
+                _candidate_penalty(pick),
+                _pick_sort_key(pick),
+                -float(pick.get("valor_esperado") or 0),
+            )
+        )
+        chosen = candidates[0]
+        selected.append(chosen)
+        selected_keys.add(fingerprint_pick_service(chosen))
+        block = _apuestas_diversity_block(chosen)
+        selected_blocks[block] += 1
+        selected_sports[block[0]] += 1
+
+    return selected[:3]
 
 
 def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[str, Any]:
