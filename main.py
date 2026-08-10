@@ -6,6 +6,7 @@ import subprocess
 import threading
 import uuid
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Any
@@ -943,13 +944,15 @@ def _notify_apuestas_job_error(
     chat_id: str,
     job_id: str,
     error_text: str,
+    stage: str | None = None,
 ) -> None:
+    stage_line = f"\nFase: <code>{telegram_text_service(stage)}</code>" if stage else ""
     _safe_send_telegram_job_message(
         token,
         chat_id,
         "❌ <b>/apuestas falló</b>\n"
         f"Job: <code>{telegram_text_service(job_id)}</code>\n"
-        f"No pude completar la publicacion automatica.\nDetalle: <code>{telegram_text_service(error_text)}</code>"
+        f"No pude completar la publicacion automatica.{stage_line}\nDetalle: <code>{telegram_text_service(error_text)}</code>"
     )
 
 
@@ -2115,11 +2118,28 @@ def iniciar_publicacion_lab_async(
     return job_id
 
 
+def _run_apuestas_job_step(
+    func,
+    *,
+    timeout_seconds: int,
+    step_label: str,
+):
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"apuestas-{step_label}") as executor:
+        future = executor.submit(func)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except FuturesTimeoutError as exc:
+            raise TimeoutError(
+                f"La fase '{step_label}' supero {timeout_seconds}s y se cancelo para evitar un bloqueo silencioso."
+            ) from exc
+
+
 def lanzar_apuestas_telegram_async() -> str:
     token, chat_id = telegram_config()
     job_id = uuid.uuid4().hex[:12]
     telegram_command_jobs[job_id] = {
         "state": "queued",
+        "stage": "queued",
         "command": "/apuestas",
         "created_at": datetime.now(timezone.utc).isoformat(),
         **TELEGRAM_APUESTAS_DEFAULTS,
@@ -2128,11 +2148,21 @@ def lanzar_apuestas_telegram_async() -> str:
     def _worker() -> None:
         try:
             telegram_command_jobs[job_id]["state"] = "running"
+            telegram_command_jobs[job_id]["stage"] = "building_lab"
             provider_layer.reset_odds_api_usage_tracking()
-            publication_plan = construir_publicacion_apuestas_lab(**TELEGRAM_APUESTAS_DEFAULTS)
+            publication_plan = _run_apuestas_job_step(
+                lambda: construir_publicacion_apuestas_lab(**TELEGRAM_APUESTAS_DEFAULTS),
+                timeout_seconds=120,
+                step_label="building_lab",
+            )
             payload = dict(publication_plan.get("payload") or {})
             if list(payload.get("pronosticos") or []):
-                result = publicar_payload_preparado_lab(payload)
+                telegram_command_jobs[job_id]["stage"] = "publishing"
+                result = _run_apuestas_job_step(
+                    lambda: publicar_payload_preparado_lab(payload),
+                    timeout_seconds=90,
+                    step_label="publishing",
+                )
             else:
                 result = {
                     "ok": True,
@@ -2141,14 +2171,21 @@ def lanzar_apuestas_telegram_async() -> str:
                     "publication_id": None,
                     "zero_picks_diagnostics": publication_plan.get("zero_picks_diagnostics") or {},
                 }
-            usage = provider_layer.get_odds_api_usage_tracking()
+            telegram_command_jobs[job_id]["stage"] = "collecting_usage"
+            usage = _run_apuestas_job_step(
+                provider_layer.get_odds_api_usage_tracking,
+                timeout_seconds=15,
+                step_label="collecting_usage",
+            )
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs[job_id],
                 "state": "completed",
+                "stage": "completed",
                 "result": result,
                 "odds_api_usage": usage,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
+            telegram_command_jobs[job_id]["stage"] = "notifying_success"
             _notify_apuestas_job_result(
                 token=token,
                 chat_id=chat_id,
@@ -2156,10 +2193,13 @@ def lanzar_apuestas_telegram_async() -> str:
                 result=result,
                 usage=usage,
             )
+            telegram_command_jobs[job_id]["stage"] = "notified_success"
         except Exception as exc:
+            stage = str(telegram_command_jobs.get(job_id, {}).get("stage") or "unknown")
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs.get(job_id, {}),
                 "state": "error",
+                "stage": "error",
                 "error": str(exc),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
@@ -2169,14 +2209,16 @@ def lanzar_apuestas_telegram_async() -> str:
                     chat_id=chat_id,
                     job_id=job_id,
                     error_text=str(exc),
+                    stage=stage,
                 )
+                telegram_command_jobs[job_id]["notification_stage"] = "error_sent"
             except Exception as notify_exc:
                 telegram_command_jobs[job_id] = {
                     **telegram_command_jobs.get(job_id, {}),
                     "notification_error": str(notify_exc),
                 }
 
-    threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_worker, daemon=False).start()
     return job_id
 
 

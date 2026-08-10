@@ -4609,6 +4609,7 @@ class BettingModelTests(unittest.TestCase):
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
         original_build_sha = main.APP_BUILD_SHA
+        original_run_step = main._run_apuestas_job_step
 
         sent_messages: list[str] = []
         published_calls: list[dict[str, object]] = []
@@ -4659,6 +4660,7 @@ class BettingModelTests(unittest.TestCase):
             main.construir_publicacion_apuestas_lab = fake_construir_publicacion_apuestas_lab
             main.publicar_payload_preparado_lab = fake_publicar_payload_preparado_lab
             main.threading.Thread = ImmediateThread
+            main._run_apuestas_job_step = lambda func, **kwargs: func()
 
             job_id = main.lanzar_apuestas_telegram_async()
         finally:
@@ -4669,6 +4671,7 @@ class BettingModelTests(unittest.TestCase):
             main.threading.Thread = original_thread
             main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
             main.provider_layer.get_odds_api_usage_tracking = original_get_usage
+            main._run_apuestas_job_step = original_run_step
 
         self.assertTrue(job_id)
         self.assertEqual(len(published_calls), 1)
@@ -4700,6 +4703,7 @@ class BettingModelTests(unittest.TestCase):
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
         original_build_sha = main.APP_BUILD_SHA
+        original_run_step = main._run_apuestas_job_step
 
         sent_messages: list[str] = []
 
@@ -4756,6 +4760,7 @@ class BettingModelTests(unittest.TestCase):
                 },
             }
             main.threading.Thread = ImmediateThread
+            main._run_apuestas_job_step = lambda func, **kwargs: func()
 
             main.lanzar_apuestas_telegram_async()
         finally:
@@ -4766,6 +4771,7 @@ class BettingModelTests(unittest.TestCase):
             main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
             main.provider_layer.get_odds_api_usage_tracking = original_get_usage
             main.APP_BUILD_SHA = original_build_sha
+            main._run_apuestas_job_step = original_run_step
 
         self.assertEqual(len(sent_messages), 1)
         self.assertIn("/apuestas sin picks publicables", sent_messages[0])
@@ -4782,6 +4788,56 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Consumo API: <b>66</b> creditos en <b>28</b> llamadas", sent_messages[0])
         self.assertIn("Build: <code>buildtest123</code>", sent_messages[0])
         self.assertNotIn("Guard activo:", sent_messages[0])
+
+    def test_lanzar_apuestas_async_notifica_error_con_fase_si_un_bloque_se_atasca(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_thread = main.threading.Thread
+        original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
+        original_run_step = main._run_apuestas_job_step
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        class ImmediateThread:
+            def __init__(self, target=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                if self._target is not None:
+                    self._target()
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main.provider_layer.reset_odds_api_usage_tracking = lambda: None
+            main.threading.Thread = ImmediateThread
+
+            def fake_run_step(func, *, timeout_seconds, step_label):
+                if step_label == "building_lab":
+                    raise TimeoutError("La fase 'building_lab' supero 120s y se cancelo para evitar un bloqueo silencioso.")
+                return func()
+
+            main._run_apuestas_job_step = fake_run_step
+
+            main.lanzar_apuestas_telegram_async()
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main.threading.Thread = original_thread
+            main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
+            main._run_apuestas_job_step = original_run_step
+
+        self.assertEqual(len(sent_messages), 1)
+        self.assertIn("/apuestas falló", sent_messages[0])
+        self.assertIn("Fase: <code>building_lab</code>", sent_messages[0])
+        self.assertIn("bloqueo silencioso", sent_messages[0])
 
     def test_construir_publicacion_apuestas_lab_rescata_descartadas_operativas_si_preview_sale_vacio(self):
         import main
