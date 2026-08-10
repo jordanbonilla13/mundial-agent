@@ -62,6 +62,9 @@ from app.lab_service import build_empty_lab_run, build_lab_run, render_lab_run_h
 from app.prediction_service import build_prediction_payload
 from app.performance_guard_service import build_performance_guard, apply_performance_guard_to_pick
 from app.publication_service import (
+    _build_emergency_fallback_picks,
+    _build_last_resort_picks,
+    _build_operational_fallback_picks,
     fingerprint_pick as fingerprint_pick_service,
     publish_telegram_predictions,
     select_picks_for_telegram,
@@ -1925,6 +1928,92 @@ def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[
     }
 
 
+def _apply_apuestas_lab_fallback(
+    lab_data: dict[str, Any],
+    *,
+    bankroll: float | None,
+    solo_stakazos: bool,
+    perfil: str,
+    modo: str,
+) -> dict[str, Any]:
+    payload = dict(lab_data.get("telegram_preview") or {})
+    payload["pronosticos"] = list(payload.get("pronosticos") or [])
+    payload["mensajes_telegram"] = list(payload.get("mensajes_telegram") or [])
+    diagnostics = _build_apuestas_zero_diagnostics_from_lab(lab_data)
+
+    if payload["pronosticos"] or solo_stakazos:
+        return {
+            "payload": payload,
+            "zero_picks_diagnostics": diagnostics,
+        }
+
+    forecast = dict(lab_data.get("forecast") or {})
+    fallback_picks = _build_operational_fallback_picks(
+        forecast,
+        bankroll=bankroll,
+        max_items=3,
+    )
+    fallback_kind = "operational"
+    if not fallback_picks:
+        fallback_picks = _build_emergency_fallback_picks(
+            forecast,
+            bankroll=bankroll,
+            max_items=3,
+        )
+        fallback_kind = "emergency"
+    if not fallback_picks:
+        fallback_picks = _build_last_resort_picks(
+            forecast,
+            bankroll=bankroll,
+            max_items=2,
+        )
+        fallback_kind = "last_resort"
+
+    if not fallback_picks:
+        return {
+            "payload": payload,
+            "zero_picks_diagnostics": diagnostics,
+        }
+
+    fallback_data = dict(forecast)
+    fallback_data["mejores_apuestas"] = [dict(pick) for pick in fallback_picks]
+    fallback_data["total_recomendadas"] = max(
+        int(forecast.get("total_recomendadas") or 0),
+        len(fallback_picks),
+    )
+    fallback_payload = build_prediction_payload(
+        data=fallback_data,
+        solo_stakazos=False,
+        ai_available=lambda: False,
+        select_picks_for_telegram=lambda data, solo_stakazos=False: list(data.get("mejores_apuestas") or [])[:3],
+        enrich_with_ai=lambda picks: picks,
+        build_ai_summary=generate_publication_ai_summary,
+        format_pick_message=formatear_mensaje_telegram_pick,
+        format_summary_message=format_summary_message,
+        perfil=perfil,
+        modo=modo,
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
+    )
+    fallback_payload["fallback_rescue_kind"] = fallback_kind
+    fallback_payload["pronosticos"] = list(fallback_payload.get("pronosticos") or [])
+    fallback_payload["mensajes_telegram"] = list(fallback_payload.get("mensajes_telegram") or [])
+    lab_data["telegram_preview"] = fallback_payload
+    diagnostics["fallback_rescue_kind"] = fallback_kind
+    diagnostics["fallback_rescue_count"] = len(fallback_payload["pronosticos"])
+
+    forecast_summary = lab_data.get("forecast_summary")
+    if isinstance(forecast_summary, dict):
+        forecast_summary["total_publicables_preview"] = len(fallback_payload["pronosticos"])
+
+    return {
+        "payload": fallback_payload,
+        "zero_picks_diagnostics": diagnostics,
+    }
+
+
 def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
     lab_data = build_lab_run(
         runtime_settings=RUNTIME_SETTINGS,
@@ -1964,14 +2053,17 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         modo_label=modo_es,
         simulation_mode="live",
     )
-    payload = dict(lab_data.get("telegram_preview") or {})
-    payload["pronosticos"] = list(payload.get("pronosticos") or [])
-    payload["mensajes_telegram"] = list(payload.get("mensajes_telegram") or [])
-    diagnostics = _build_apuestas_zero_diagnostics_from_lab(lab_data)
+    publication_plan = _apply_apuestas_lab_fallback(
+        lab_data,
+        bankroll=kwargs.get("bankroll"),
+        solo_stakazos=bool(kwargs.get("solo_stakazos")),
+        perfil=str(kwargs.get("perfil") or "agresivo"),
+        modo=str(kwargs.get("modo") or "comparador"),
+    )
     return {
         "lab_data": lab_data,
-        "payload": payload,
-        "zero_picks_diagnostics": diagnostics,
+        "payload": dict(publication_plan.get("payload") or {}),
+        "zero_picks_diagnostics": dict(publication_plan.get("zero_picks_diagnostics") or {}),
     }
 
 
