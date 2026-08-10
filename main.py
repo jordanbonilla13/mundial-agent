@@ -806,6 +806,150 @@ def enviar_mensaje_telegram(
     return client.send_message(texto, reply_markup=reply_markup)
 
 
+def _strip_html_for_telegram(text: str) -> str:
+    plain = re.sub(r"<[^>]+>", "", str(text or ""))
+    plain = plain.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&#x27;", "'")
+    return plain.strip()
+
+
+def _safe_send_telegram_job_message(token: str, chat_id: str, text: str) -> dict[str, Any]:
+    client = telegram_client(token=token, chat_id=chat_id)
+    try:
+        return client.send_message(text)
+    except Exception:
+        plain_text = _strip_html_for_telegram(text)
+        return client.api_request(
+            "sendMessage",
+            payload={
+                "chat_id": chat_id,
+                "text": plain_text[:4000],
+                "disable_web_page_preview": True,
+            },
+        )
+
+
+def _notify_apuestas_job_result(
+    *,
+    token: str,
+    chat_id: str,
+    job_id: str,
+    result: dict[str, Any],
+    usage: dict[str, Any],
+) -> None:
+    total_publicadas = int(result.get("picks_guardados") or 0)
+    total_mensajes = int(result.get("mensajes_enviados") or 0)
+    publication_id = result.get("publication_id")
+    credits_used = int(usage.get("credits_used") or 0)
+    calls = int(usage.get("calls") or 0)
+    remaining = usage.get("last_remaining")
+    usage_line = (
+        f"Consumo API: <b>{credits_used}</b> creditos en <b>{calls}</b> llamadas"
+        + (f"\nRestantes: <b>{remaining}</b>" if remaining is not None else "")
+    )
+    build_line = f"Build: <code>{telegram_text_service(APP_BUILD_SHA)}</code>"
+    diagnostics = result.get("zero_picks_diagnostics") or {}
+
+    if total_publicadas > 0:
+        _safe_send_telegram_job_message(
+            token,
+            chat_id,
+            "✅ <b>/apuestas completado</b>\n"
+            f"Job: <code>{telegram_text_service(job_id)}</code>\n"
+            f"Picks publicadas: <b>{total_publicadas}</b>\n"
+            f"Mensajes enviados: <b>{total_mensajes}</b>\n"
+            f"Publication ID: <code>{telegram_text_service(publication_id or '-')}</code>\n"
+            f"{usage_line}\n"
+            f"{build_line}"
+        )
+        return
+
+    analyzed = int(diagnostics.get("analizadas") or 0)
+    recommended = int(diagnostics.get("recomendadas") or 0)
+    discarded = int(diagnostics.get("descartadas_preview") or 0)
+    available_matches = int(diagnostics.get("partidos_disponibles") or 0)
+    snapshots = int(diagnostics.get("snapshots_guardados") or 0)
+    guard_reasons = list(diagnostics.get("guard_reasons") or [])
+    discard_reasons = list(diagnostics.get("top_discard_reasons") or [])
+    coverage_notice = str(diagnostics.get("coverage_notice") or "").strip()
+    base_criteria = str(diagnostics.get("base_criteria") or "").strip()
+    blocked_summary = dict(diagnostics.get("blocked_summary") or {})
+    detail_lines = [
+        f"Job: <code>{telegram_text_service(job_id)}</code>",
+        f"Analizadas: <b>{analyzed}</b>",
+        f"Recomendadas antes del corte: <b>{recommended}</b>",
+        f"Descartadas visibles: <b>{discarded}</b>",
+        f"Partidos disponibles: <b>{available_matches}</b>",
+        f"Snapshots: <b>{snapshots}</b>",
+    ]
+    if guard_reasons:
+        detail_lines.append(
+            "Guard activo: " + " | ".join(telegram_text_service(str(reason)) for reason in guard_reasons)
+        )
+    if discard_reasons:
+        detail_lines.append(
+            "Motivos top: "
+            + " | ".join(
+                f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                for item in discard_reasons
+            )
+        )
+    risk_count = int(blocked_summary.get("risk_count") or 0)
+    performance_count = int(blocked_summary.get("performance_count") or 0)
+    if risk_count or performance_count:
+        detail_lines.append(
+            f"Bloqueos: risk <b>{risk_count}</b> | performance <b>{performance_count}</b>"
+        )
+    risk_reasons = list(blocked_summary.get("risk_reasons") or [])
+    if risk_reasons:
+        detail_lines.append(
+            "Risk top: "
+            + " | ".join(
+                f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                for item in risk_reasons
+            )
+        )
+    performance_reasons = list(blocked_summary.get("performance_reasons") or [])
+    if performance_reasons:
+        detail_lines.append(
+            "Performance top: "
+            + " | ".join(
+                f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                for item in performance_reasons
+            )
+        )
+    elif coverage_notice:
+        detail_lines.append("Cobertura: " + telegram_text_service(coverage_notice))
+    elif analyzed == 0 and base_criteria:
+        detail_lines.append("Contexto: " + telegram_text_service(base_criteria))
+
+    _safe_send_telegram_job_message(
+        token,
+        chat_id,
+        "ℹ️ <b>/apuestas sin picks publicables</b>\n"
+        "He ejecutado el preset del lab, pero en esta pasada no salio ninguna pick valida para publicar.\n"
+        + "\n".join(detail_lines)
+        + "\n"
+        f"{usage_line}\n"
+        f"{build_line}"
+    )
+
+
+def _notify_apuestas_job_error(
+    *,
+    token: str,
+    chat_id: str,
+    job_id: str,
+    error_text: str,
+) -> None:
+    _safe_send_telegram_job_message(
+        token,
+        chat_id,
+        "❌ <b>/apuestas falló</b>\n"
+        f"Job: <code>{telegram_text_service(job_id)}</code>\n"
+        f"No pude completar la publicacion automatica.\nDetalle: <code>{telegram_text_service(error_text)}</code>"
+    )
+
+
 def answer_callback_query_telegram(callback_query_id: str, text: str, token: str | None = None) -> dict:
     client = telegram_client(token=token, chat_id=os.getenv("TELEGRAM_CHAT_ID", TELEGRAM_CHAT_ID))
     return client.answer_callback_query(callback_query_id, text)
@@ -1913,96 +2057,13 @@ def lanzar_apuestas_telegram_async() -> str:
                 "odds_api_usage": usage,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
-
-            client = telegram_client(token=token, chat_id=chat_id)
-            total_publicadas = int(result.get("picks_guardados") or 0)
-            total_mensajes = int(result.get("mensajes_enviados") or 0)
-            publication_id = result.get("publication_id")
-            credits_used = int(usage.get("credits_used") or 0)
-            calls = int(usage.get("calls") or 0)
-            remaining = usage.get("last_remaining")
-            usage_line = (
-                f"Consumo API: <b>{credits_used}</b> creditos en <b>{calls}</b> llamadas"
-                + (f"\nRestantes: <b>{remaining}</b>" if remaining is not None else "")
+            _notify_apuestas_job_result(
+                token=token,
+                chat_id=chat_id,
+                job_id=job_id,
+                result=result,
+                usage=usage,
             )
-            build_line = f"Build: <code>{telegram_text_service(APP_BUILD_SHA)}</code>"
-            diagnostics = result.get("zero_picks_diagnostics") or {}
-
-            if total_publicadas > 0:
-                client.send_message(
-                    "✅ <b>/apuestas completado</b>\n"
-                    f"Picks publicadas: <b>{total_publicadas}</b>\n"
-                    f"Mensajes enviados: <b>{total_mensajes}</b>\n"
-                    f"Publication ID: <code>{telegram_text_service(publication_id or '-')}</code>\n"
-                    f"{usage_line}\n"
-                    f"{build_line}"
-                )
-            else:
-                analyzed = int(diagnostics.get("analizadas") or 0)
-                recommended = int(diagnostics.get("recomendadas") or 0)
-                discarded = int(diagnostics.get("descartadas_preview") or 0)
-                available_matches = int(diagnostics.get("partidos_disponibles") or 0)
-                snapshots = int(diagnostics.get("snapshots_guardados") or 0)
-                guard_reasons = list(diagnostics.get("guard_reasons") or [])
-                discard_reasons = list(diagnostics.get("top_discard_reasons") or [])
-                coverage_notice = str(diagnostics.get("coverage_notice") or "").strip()
-                base_criteria = str(diagnostics.get("base_criteria") or "").strip()
-                blocked_summary = dict(diagnostics.get("blocked_summary") or {})
-                detail_lines = [
-                    f"Analizadas: <b>{analyzed}</b>",
-                    f"Recomendadas antes del corte: <b>{recommended}</b>",
-                    f"Descartadas visibles: <b>{discarded}</b>",
-                    f"Partidos disponibles: <b>{available_matches}</b>",
-                    f"Snapshots: <b>{snapshots}</b>",
-                ]
-                if guard_reasons:
-                    detail_lines.append(
-                        "Guard activo: " + " | ".join(telegram_text_service(str(reason)) for reason in guard_reasons)
-                    )
-                if discard_reasons:
-                    detail_lines.append(
-                        "Motivos top: "
-                        + " | ".join(
-                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
-                            for item in discard_reasons
-                        )
-                    )
-                risk_count = int(blocked_summary.get("risk_count") or 0)
-                performance_count = int(blocked_summary.get("performance_count") or 0)
-                if risk_count or performance_count:
-                    detail_lines.append(
-                        f"Bloqueos: risk <b>{risk_count}</b> | performance <b>{performance_count}</b>"
-                    )
-                risk_reasons = list(blocked_summary.get("risk_reasons") or [])
-                if risk_reasons:
-                    detail_lines.append(
-                        "Risk top: "
-                        + " | ".join(
-                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
-                            for item in risk_reasons
-                        )
-                    )
-                performance_reasons = list(blocked_summary.get("performance_reasons") or [])
-                if performance_reasons:
-                    detail_lines.append(
-                        "Performance top: "
-                        + " | ".join(
-                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
-                            for item in performance_reasons
-                        )
-                    )
-                elif coverage_notice:
-                    detail_lines.append("Cobertura: " + telegram_text_service(coverage_notice))
-                elif analyzed == 0 and base_criteria:
-                    detail_lines.append("Contexto: " + telegram_text_service(base_criteria))
-                client.send_message(
-                    "ℹ️ <b>/apuestas sin picks publicables</b>\n"
-                    "He ejecutado el preset del lab, pero en esta pasada no salio ninguna pick valida para publicar.\n"
-                    + "\n".join(detail_lines)
-                    + "\n"
-                    f"{usage_line}\n"
-                    f"{build_line}"
-                )
         except Exception as exc:
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs.get(job_id, {}),
@@ -2011,13 +2072,17 @@ def lanzar_apuestas_telegram_async() -> str:
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }
             try:
-                client = telegram_client(token=token, chat_id=chat_id)
-                client.send_message(
-                    "❌ <b>/apuestas falló</b>\n"
-                    f"No pude completar la publicacion automatica.\nDetalle: <code>{telegram_text_service(str(exc))}</code>"
+                _notify_apuestas_job_error(
+                    token=token,
+                    chat_id=chat_id,
+                    job_id=job_id,
+                    error_text=str(exc),
                 )
-            except Exception:
-                pass
+            except Exception as notify_exc:
+                telegram_command_jobs[job_id] = {
+                    **telegram_command_jobs.get(job_id, {}),
+                    "notification_error": str(notify_exc),
+                }
 
     threading.Thread(target=_worker, daemon=True).start()
     return job_id
@@ -2039,6 +2104,14 @@ def auto_publicar_telegram_once() -> dict | None:
         solo_stakazos=TELEGRAM_AUTOPUBLISH_SOLO_STAKAZOS,
         publication_type="auto",
     )
+
+
+@app.get("/system/telegram-command-jobs")
+def system_telegram_command_jobs() -> dict[str, Any]:
+    return {
+        "total": len(telegram_command_jobs),
+        "jobs": telegram_command_jobs,
+    }
 
 
 @app.get("/system/publication-guard")
