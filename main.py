@@ -4056,8 +4056,14 @@ def apuestas_hoy_para_telegram_ultracompacta(
 ):
     bankroll_resuelto = float(bankroll if bankroll is not None else TELEGRAM_APUESTAS_DEFAULTS.get("bankroll", 200.0))
 
-    def _resolve_featured_markets(filtro: str, deporte_actual: str | None = None) -> tuple[list[str], str | None]:
-        mercados_lista, aviso = resolver_mercados(filtro, deporte=deporte_actual)
+    def _resolve_featured_markets(
+        filtro: str,
+        deporte_actual: str | None = None,
+        *,
+        deporte: str | None = None,
+    ) -> tuple[list[str], str | None]:
+        deporte_final = deporte if deporte is not None else deporte_actual
+        mercados_lista, aviso = resolver_mercados(filtro, deporte=deporte_final)
         featured = [market for market in mercados_lista if market in FEATURED_MARKETS] or ["h2h"]
         if featured != mercados_lista:
             extra_notice = "Modo compacto Telegram: se usan solo mercados featured para reducir consumo."
