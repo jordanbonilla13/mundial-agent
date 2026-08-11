@@ -4118,7 +4118,7 @@ def apuestas_hoy_para_telegram_ultracompacta(
             max_total=max_total,
         ),
         single_sport_pick_limit=lambda partido_actual: single_sport_pick_limit(RISK_OPERATING_MODE, partido_actual),
-        multi_sport_pick_limit=lambda: min(telegram_pick_limit(RISK_OPERATING_MODE), 4),
+        multi_sport_pick_limit=lambda: min(telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos), 4),
         run_single_request=None,
     )
     return run_forecast_request(
