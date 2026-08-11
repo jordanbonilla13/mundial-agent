@@ -1677,25 +1677,24 @@ def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[
 
 
 def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
-    lab_data = build_lab_run(
-        runtime_settings=RUNTIME_SETTINGS,
-        publication_guard=system_publication_guard,
-        run_forecast=lambda request: apuestas_hoy_para_telegram_lab(
-            bankroll=request.bankroll,
-            perfil=request.perfil,
-            modo=request.modo,
-            mercados=request.mercados,
-            partido=request.partido,
-            guardar=request.guardar,
-            deporte=request.deporte,
-            solo_elite=request.solo_elite,
-            solo_stakazos=request.solo_stakazos,
-            historical_mode=request.historical_mode,
-            historical_date=request.historical_date,
-            historical_from=request.historical_from,
-            historical_to=request.historical_to,
-        ),
-        build_prediction_payload=build_prediction_payload,
+    forecast = apuestas_hoy_para_telegram_lab(
+        bankroll=kwargs["bankroll"],
+        perfil=kwargs["perfil"],
+        modo=kwargs["modo"],
+        mercados=kwargs["mercados"],
+        partido=kwargs["partido"],
+        guardar=False,
+        deporte=kwargs["deporte"],
+        solo_elite=False,
+        solo_stakazos=kwargs["solo_stakazos"],
+        historical_mode=False,
+        historical_date=None,
+        historical_from=None,
+        historical_to=None,
+    )
+    payload = build_prediction_payload(
+        data=forecast,
+        solo_stakazos=kwargs["solo_stakazos"],
         ai_available=lambda: False,
         select_picks_for_telegram=seleccionar_picks_para_apuestas_lab,
         enrich_with_ai=lambda picks: picks,
@@ -1704,23 +1703,43 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         format_summary_message=format_summary_message,
         perfil=kwargs["perfil"],
         modo=kwargs["modo"],
-        mercados=kwargs["mercados"],
-        partido=kwargs["partido"],
-        deporte=kwargs["deporte"],
-        bankroll=kwargs["bankroll"],
-        solo_stakazos=kwargs["solo_stakazos"],
         perfiles_stake=PERFILES_STAKE,
         modos_informe=MODOS_INFORME,
         perfil_label=perfil_es,
         modo_label=modo_es,
-        simulation_mode="live",
     )
-    payload = dict(lab_data.get("telegram_preview") or {})
     payload["pronosticos"] = list(payload.get("pronosticos") or [])
     payload["mensajes_telegram"] = list(payload.get("mensajes_telegram") or [])
-    diagnostics = _build_apuestas_zero_diagnostics_from_lab(lab_data)
+    diagnostics = {
+        "analizadas": int(forecast.get("total_analizadas") or 0),
+        "recomendadas": int(forecast.get("total_recomendadas") or 0),
+        "descartadas_preview": len(list(forecast.get("descartadas") or [])),
+        "partidos_disponibles": len(list(forecast.get("partidos_disponibles") or [])),
+        "snapshots_guardados": int(forecast.get("snapshots_guardados") or 0),
+        "coverage_notice": str(forecast.get("aviso_cobertura") or "").strip(),
+        "base_criteria": str(forecast.get("criterio") or "").strip(),
+        "blocked_summary": dict(forecast.get("blocked_summary") or {}),
+        "top_discard_reasons": _build_apuestas_zero_diagnostics_from_lab(
+            {
+                "forecast_summary": {
+                    "total_analizadas": int(forecast.get("total_analizadas") or 0),
+                    "total_recomendadas": int(forecast.get("total_recomendadas") or 0),
+                    "total_descartadas_preview": len(list(forecast.get("descartadas") or [])),
+                },
+                "forecast": forecast,
+            }
+        ).get("top_discard_reasons", []),
+    }
     return {
-        "lab_data": lab_data,
+        "lab_data": {
+            "forecast": forecast,
+            "forecast_summary": {
+                "total_analizadas": int(forecast.get("total_analizadas") or 0),
+                "total_recomendadas": int(forecast.get("total_recomendadas") or 0),
+                "total_descartadas_preview": len(list(forecast.get("descartadas") or [])),
+            },
+            "telegram_preview": payload,
+        },
         "payload": payload,
         "zero_picks_diagnostics": diagnostics,
     }

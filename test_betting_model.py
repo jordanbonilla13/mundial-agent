@@ -4636,7 +4636,6 @@ class BettingModelTests(unittest.TestCase):
     def test_construir_publicacion_apuestas_lab_usa_forecast_compacto_para_telegram(self):
         import main
 
-        original_build_lab_run = main.build_lab_run
         original_forecast_compacto = main.apuestas_hoy_para_telegram_lab
 
         captured: dict[str, object] = {}
@@ -4659,38 +4658,9 @@ class BettingModelTests(unittest.TestCase):
                     "blocked_summary": {},
                 }
 
-            def fake_build_lab_run(**kwargs):
-                forecast = kwargs["run_forecast"](
-                    main.ForecastRequest(
-                        bankroll=200.0,
-                        perfil="agresivo",
-                        modo="comparador",
-                        mercados="h2h,spreads,totals",
-                        partido="todos",
-                        guardar=False,
-                        deporte="todo",
-                        solo_elite=False,
-                        solo_stakazos=False,
-                    )
-                )
-                return {
-                    "forecast": forecast,
-                    "forecast_summary": {
-                        "total_analizadas": int(forecast.get("total_analizadas") or 0),
-                        "total_recomendadas": int(forecast.get("total_recomendadas") or 0),
-                        "total_descartadas_preview": 0,
-                    },
-                    "telegram_preview": {
-                        "resumen_telegram": "Resumen",
-                        "pronosticos": [],
-                        "mensajes_telegram": [],
-                    },
-                }
-
             main.apuestas_hoy_para_telegram_lab = fake_forecast_compacto
-            main.build_lab_run = fake_build_lab_run
 
-            main.construir_publicacion_apuestas_lab(
+            result = main.construir_publicacion_apuestas_lab(
                 bankroll=200.0,
                 perfil="agresivo",
                 modo="comparador",
@@ -4700,12 +4670,13 @@ class BettingModelTests(unittest.TestCase):
                 solo_stakazos=False,
             )
         finally:
-            main.build_lab_run = original_build_lab_run
             main.apuestas_hoy_para_telegram_lab = original_forecast_compacto
 
         self.assertTrue(captured.get("called"))
         self.assertEqual(captured["kwargs"]["deporte"], "todo")
         self.assertEqual(captured["kwargs"]["perfil"], "agresivo")
+        self.assertIn("payload", result)
+        self.assertIn("zero_picks_diagnostics", result)
 
     def test_resumen_telegram_muestra_publicado_hoy_con_picks_del_dia(self):
         report = {
