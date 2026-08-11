@@ -4627,10 +4627,10 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(main.telegram_command_jobs[job_id]["state"], "completed")
         self.assertEqual(main.telegram_command_jobs[job_id]["phase"], "completed")
 
-    def test_construir_publicacion_apuestas_lab_usa_forecast_compacto_para_telegram(self):
+    def test_construir_publicacion_apuestas_lab_usa_forecast_ultracompacto_para_telegram(self):
         import main
 
-        original_forecast_compacto = main.apuestas_hoy_para_telegram_lab
+        original_forecast_compacto = main.apuestas_hoy_para_telegram_ultracompacta
 
         captured: dict[str, object] = {}
 
@@ -4652,7 +4652,7 @@ class BettingModelTests(unittest.TestCase):
                     "blocked_summary": {},
                 }
 
-            main.apuestas_hoy_para_telegram_lab = fake_forecast_compacto
+            main.apuestas_hoy_para_telegram_ultracompacta = fake_forecast_compacto
 
             result = main.construir_publicacion_apuestas_lab(
                 bankroll=200.0,
@@ -4664,7 +4664,7 @@ class BettingModelTests(unittest.TestCase):
                 solo_stakazos=False,
             )
         finally:
-            main.apuestas_hoy_para_telegram_lab = original_forecast_compacto
+            main.apuestas_hoy_para_telegram_ultracompacta = original_forecast_compacto
 
         self.assertTrue(captured.get("called"))
         self.assertEqual(captured["kwargs"]["deporte"], "todo")

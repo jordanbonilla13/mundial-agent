@@ -1522,7 +1522,7 @@ def pronosticos_compactos_para_apuestas(
     deporte: str = DEFAULT_SPORT,
     solo_stakazos: bool = False,
 ) -> dict[str, Any]:
-    forecast = apuestas_hoy_para_telegram_lab(
+    forecast = apuestas_hoy_para_telegram_ultracompacta(
         bankroll=bankroll,
         perfil=perfil,
         modo=modo,
@@ -1769,7 +1769,7 @@ def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[
 
 
 def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
-    forecast = apuestas_hoy_para_telegram_lab(
+    forecast = apuestas_hoy_para_telegram_ultracompacta(
         bankroll=kwargs["bankroll"],
         perfil=kwargs["perfil"],
         modo=kwargs["modo"],
@@ -3974,6 +3974,107 @@ def apuestas_hoy_para_telegram_lab(
             historical_from=nested_request.historical_from,
             historical_to=nested_request.historical_to,
         ),
+    )
+    return run_forecast_request(
+        ForecastRequest(
+            bankroll=bankroll,
+            perfil=perfil,
+            modo=modo,
+            mercados=mercados,
+            partido=partido,
+            guardar=guardar,
+            deporte=deporte,
+            solo_elite=solo_elite,
+            solo_stakazos=solo_stakazos,
+            historical_mode=historical_mode,
+            historical_date=historical_date,
+            historical_from=historical_from,
+            historical_to=historical_to,
+        ),
+        deps,
+    )
+
+
+def apuestas_hoy_para_telegram_ultracompacta(
+    bankroll: float | None = None,
+    perfil: str = "moderado",
+    modo: str = "comparador",
+    mercados: str = "todo",
+    partido: str = "todos",
+    guardar: bool = False,
+    deporte: str = DEFAULT_SPORT,
+    solo_elite: bool = False,
+    solo_stakazos: bool = False,
+    historical_mode: bool = False,
+    historical_date: str | None = None,
+    historical_from: str | None = None,
+    historical_to: str | None = None,
+):
+    def _resolve_featured_markets(filtro: str, deporte_actual: str | None = None) -> tuple[list[str], str | None]:
+        mercados_lista, aviso = resolver_mercados(filtro, deporte=deporte_actual)
+        featured = [market for market in mercados_lista if market in FEATURED_MARKETS] or ["h2h"]
+        if featured != mercados_lista:
+            extra_notice = "Modo compacto Telegram: se usan solo mercados featured para reducir consumo."
+            aviso = f"{aviso} {extra_notice}".strip() if aviso else extra_notice
+        return featured, aviso
+
+    deps = ForecastDependencies(
+        provider_name=ODDS_PROVIDER,
+        reference_bookmaker=REFERENCE_BOOKMAKER,
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
+        get_bankroll=obtener_bankroll,
+        update_bankroll=actualizar_bankroll,
+        resolve_context=resolver_contexto_deporte,
+        resolve_markets=_resolve_featured_markets,
+        list_sport_options=lambda: opciones_deporte_disponibles(),
+        aggregate_sports=lambda: deportes_agregados_para_todo(
+            max_total=4,
+            strict_family_limits=True,
+        ),
+        fetch_odds=cuotas,
+        list_matches=partidos_disponibles,
+        save_snapshots=lambda _: 0,
+        filter_matches=filtrar_partidos,
+        fetch_elos=obtener_elos,
+        select_reference_house=seleccionar_casa_referencia,
+        analyze_comparison=analizar_comparador_casas,
+        translate_pick=traducir_apuesta,
+        historical_penalties=penalizaciones_historicas,
+        apply_historical_penalty=aplicar_penalizacion_historica,
+        sort_key_pick=prioridad_pick,
+        sort_key_todo=prioridad_pick_todo,
+        limit_todo_picks=lambda recomendadas, max_total: limitar_picks_todo(
+            recomendadas,
+            max_total=max_total,
+            operating_mode=RISK_OPERATING_MODE,
+        ),
+        save_recommendations=guardar_recomendaciones,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
+        source_strength_for_context=source_strength_for_context,
+        stake_limit_text=stake_limit_text,
+        risk_disclaimer=standard_risk_disclaimer,
+        attach_context_to_pick=attach_context_to_pick,
+        build_risk_policy=politica_riesgo_actual,
+        apply_risk_policy_to_pick=lambda pick, policy, league_penalties=None: apply_risk_policy_to_pick(
+            pick,
+            policy=policy,
+            league_penalties=league_penalties,
+        ),
+        build_performance_guard=lambda: build_performance_guard(
+            load_dashboard=dashboard_data,
+            operating_mode=RISK_OPERATING_MODE,
+        ),
+        apply_performance_guard_to_pick=apply_performance_guard_to_pick,
+        apply_exposure_limits=lambda picks, max_total=None: apply_exposure_limits(
+            picks,
+            operating_mode=RISK_OPERATING_MODE,
+            max_total=max_total,
+        ),
+        single_sport_pick_limit=lambda partido_actual: single_sport_pick_limit(RISK_OPERATING_MODE, partido_actual),
+        multi_sport_pick_limit=lambda: min(telegram_pick_limit(RISK_OPERATING_MODE), 4),
+        run_single_request=None,
     )
     return run_forecast_request(
         ForecastRequest(
