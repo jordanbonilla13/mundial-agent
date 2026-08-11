@@ -631,6 +631,50 @@ def deportes_agregados_para_todo(
     return seleccionados
 
 
+def deportes_agregados_para_todo_ultracompacta(
+    provider: str | None = None,
+    *,
+    max_total: int = 4,
+) -> list[str]:
+    candidatos: list[dict[str, Any]] = []
+    fallback_genericos: list[dict[str, Any]] = []
+
+    for item in opciones_deporte_disponibles(provider=provider):
+        valor = str(item.get("value") or "").strip().lower()
+        if not valor or valor == "todo":
+            continue
+        contexto = sports_layer.resolver_contexto_deporte(valor)
+        family = family_from_sport_key(contexto.get("sport_key", ""))
+        if family not in TODO_LIMITS_BY_FAMILY:
+            continue
+        if _is_generic_sport_alias(valor):
+            fallback_genericos.append(contexto)
+            continue
+        candidatos.append(contexto)
+
+    if not candidatos:
+        candidatos = list(fallback_genericos)
+
+    candidatos.sort(key=prioridad_contexto_todo)
+    seleccionados: list[str] = []
+    por_familia: dict[str, int] = {}
+
+    for contexto in candidatos:
+        if len(seleccionados) >= max_total:
+            break
+        family = family_from_sport_key(contexto.get("sport_key", ""))
+        limite = TODO_LIMITS_BY_FAMILY.get(family, 0)
+        if por_familia.get(family, 0) >= limite:
+            continue
+        catalog_key = str(contexto.get("catalog_key") or "").strip().lower()
+        if not catalog_key:
+            continue
+        seleccionados.append(catalog_key)
+        por_familia[family] = por_familia.get(family, 0) + 1
+
+    return seleccionados
+
+
 def enriquecer_eventos_contexto(eventos: list[dict], contexto: dict) -> list[dict]:
     return sports_layer.enriquecer_eventos_contexto(eventos, contexto)
 
@@ -4010,6 +4054,8 @@ def apuestas_hoy_para_telegram_ultracompacta(
     historical_from: str | None = None,
     historical_to: str | None = None,
 ):
+    bankroll_resuelto = float(bankroll if bankroll is not None else TELEGRAM_APUESTAS_DEFAULTS.get("bankroll", 200.0))
+
     def _resolve_featured_markets(filtro: str, deporte_actual: str | None = None) -> tuple[list[str], str | None]:
         mercados_lista, aviso = resolver_mercados(filtro, deporte=deporte_actual)
         featured = [market for market in mercados_lista if market in FEATURED_MARKETS] or ["h2h"]
@@ -4023,14 +4069,13 @@ def apuestas_hoy_para_telegram_ultracompacta(
         reference_bookmaker=REFERENCE_BOOKMAKER,
         perfiles_stake=PERFILES_STAKE,
         modos_informe=MODOS_INFORME,
-        get_bankroll=obtener_bankroll,
-        update_bankroll=actualizar_bankroll,
+        get_bankroll=lambda: bankroll_resuelto,
+        update_bankroll=lambda _: bankroll_resuelto,
         resolve_context=resolver_contexto_deporte,
         resolve_markets=_resolve_featured_markets,
         list_sport_options=lambda: opciones_deporte_disponibles(),
-        aggregate_sports=lambda: deportes_agregados_para_todo(
+        aggregate_sports=lambda: deportes_agregados_para_todo_ultracompacta(
             max_total=4,
-            strict_family_limits=True,
         ),
         fetch_odds=cuotas,
         list_matches=partidos_disponibles,
