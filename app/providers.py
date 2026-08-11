@@ -20,7 +20,10 @@ from .sports import (
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY")
 ODDS_PROVIDER = os.getenv("ODDS_PROVIDER", "the_odds_api").strip().lower()
-ODDS_API_BOOKMAKERS = os.getenv("ODDS_API_BOOKMAKERS", "").strip()
+DEFAULT_ODDS_API_BOOKMAKERS = (
+    "pinnacle,betfair_ex_eu,matchbook,betsson,coolbet,betvictor,marathonbet"
+)
+ODDS_API_BOOKMAKERS = os.getenv("ODDS_API_BOOKMAKERS", DEFAULT_ODDS_API_BOOKMAKERS).strip()
 ODDS_API_REGIONS_DEFAULT = os.getenv("ODDS_API_REGIONS_DEFAULT", "eu,uk").strip() or "eu,uk"
 ODDS_API_REGIONS_SOCCER = os.getenv("ODDS_API_REGIONS_SOCCER", ODDS_API_REGIONS_DEFAULT).strip() or ODDS_API_REGIONS_DEFAULT
 ODDS_API_REGIONS_TENNIS = os.getenv("ODDS_API_REGIONS_TENNIS", ODDS_API_REGIONS_DEFAULT).strip() or ODDS_API_REGIONS_DEFAULT

@@ -4704,6 +4704,22 @@ class BettingModelTests(unittest.TestCase):
         self.assertNotIn("basketball_wnba", seleccionados)
         self.assertIn("tennis_atp_canadian_open", seleccionados)
 
+    def test_build_the_odds_query_params_usa_bookmakers_recomendados_por_defecto(self):
+        import app.providers as providers
+
+        params = providers.build_the_odds_query_params(
+            {
+                "sport_key": "soccer_spain_la_liga",
+                "sport_label": "Futbol",
+            },
+            ["h2h"],
+        )
+
+        self.assertEqual(
+            params.get("bookmakers"),
+            "pinnacle,betfair_ex_eu,matchbook,betsson,coolbet,betvictor,marathonbet",
+        )
+
     def test_resumen_telegram_muestra_publicado_hoy_con_picks_del_dia(self):
         report = {
             "date": "2026-07-30",
