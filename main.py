@@ -1840,28 +1840,15 @@ def lanzar_apuestas_telegram_async() -> str:
         try:
             telegram_command_jobs[job_id]["state"] = "running"
             provider_layer.reset_odds_api_usage_tracking()
-            telegram_command_jobs[job_id]["phase"] = "building_lab"
-            publication_plan = _run_apuestas_phase_with_timeout(
-                phase_name="building_lab",
-                timeout_seconds=TELEGRAM_APUESTAS_BUILD_TIMEOUT_SECONDS,
-                fn=lambda: construir_publicacion_apuestas_lab(**TELEGRAM_APUESTAS_DEFAULTS),
+            telegram_command_jobs[job_id]["phase"] = "publishing_apuestas"
+            result = _run_apuestas_phase_with_timeout(
+                phase_name="publishing_apuestas",
+                timeout_seconds=max(
+                    TELEGRAM_APUESTAS_BUILD_TIMEOUT_SECONDS,
+                    TELEGRAM_APUESTAS_PUBLISH_TIMEOUT_SECONDS,
+                ),
+                fn=lambda: publicar_pronosticos_lab(**TELEGRAM_APUESTAS_DEFAULTS),
             )
-            payload = dict(publication_plan.get("payload") or {})
-            if list(payload.get("pronosticos") or []):
-                telegram_command_jobs[job_id]["phase"] = "publishing_telegram"
-                result = _run_apuestas_phase_with_timeout(
-                    phase_name="publishing_telegram",
-                    timeout_seconds=TELEGRAM_APUESTAS_PUBLISH_TIMEOUT_SECONDS,
-                    fn=lambda: publicar_payload_preparado_lab(payload),
-                )
-            else:
-                result = {
-                    "ok": True,
-                    "picks_guardados": 0,
-                    "mensajes_enviados": 0,
-                    "publication_id": None,
-                    "zero_picks_diagnostics": publication_plan.get("zero_picks_diagnostics") or {},
-                }
             usage = provider_layer.get_odds_api_usage_tracking()
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs[job_id],
