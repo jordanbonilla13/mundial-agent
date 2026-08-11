@@ -1933,14 +1933,7 @@ def lanzar_apuestas_telegram_async() -> str:
             telegram_command_jobs[job_id]["state"] = "running"
             provider_layer.reset_odds_api_usage_tracking()
             telegram_command_jobs[job_id]["phase"] = "publishing_apuestas"
-            result = _run_apuestas_phase_with_timeout(
-                phase_name="publishing_apuestas",
-                timeout_seconds=max(
-                    TELEGRAM_APUESTAS_BUILD_TIMEOUT_SECONDS,
-                    TELEGRAM_APUESTAS_PUBLISH_TIMEOUT_SECONDS,
-                ),
-                fn=lambda: publicar_pronosticos_lab_compacto(**TELEGRAM_APUESTAS_DEFAULTS),
-            )
+            result = publicar_pronosticos_lab_compacto(**TELEGRAM_APUESTAS_DEFAULTS)
             usage = provider_layer.get_odds_api_usage_tracking()
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs[job_id],
