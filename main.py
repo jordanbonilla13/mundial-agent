@@ -642,17 +642,36 @@ def deportes_agregados_para_todo_ultracompacta(
     candidatos: list[dict[str, Any]] = []
     fallback_genericos: list[dict[str, Any]] = []
 
-    for item in opciones_deporte_disponibles(provider=provider):
-        valor = str(item.get("value") or "").strip().lower()
+    try:
+        catalogo = discover_available_catalog(provider=provider)
+        source_items = [
+            item
+            for item in list(catalogo.get("sports") or [])
+            if item.get("active", True) is not False
+            and not bool(item.get("has_outrights"))
+        ]
+    except Exception:
+        source_items = []
+
+    if not source_items:
+        source_items = [
+            {**sports_layer.resolver_contexto_deporte(str(item.get("value") or "").strip().lower())}
+            for item in opciones_deporte_disponibles(provider=provider)
+            if str(item.get("value") or "").strip().lower() not in {"", "todo"}
+        ]
+
+    for contexto in source_items:
+        valor = str(contexto.get("catalog_key") or contexto.get("sport_key") or "").strip().lower()
         if not valor or valor == "todo":
             continue
-        contexto = sports_layer.resolver_contexto_deporte(valor)
         catalog_key = str(contexto.get("catalog_key") or valor).strip().lower()
         family = family_from_sport_key(contexto.get("sport_key", ""))
         if family not in TODO_LIMITS_BY_FAMILY:
             continue
         sport_bucket = str(SPORT_ALIASES.get(family, family)).strip().lower()
         if sport_bucket in disabled_sports:
+            continue
+        if "winner" in catalog_key or "championship" in catalog_key or "outright" in catalog_key:
             continue
         if _is_generic_sport_alias(valor):
             if catalog_key in disabled_leagues:

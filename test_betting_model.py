@@ -4704,6 +4704,46 @@ class BettingModelTests(unittest.TestCase):
         self.assertNotIn("basketball_wnba", seleccionados)
         self.assertIn("tennis_atp_canadian_open", seleccionados)
 
+    def test_deportes_agregados_para_todo_ultracompacta_omite_outrights(self):
+        import main
+
+        original_discover = main.discover_available_catalog
+        original_cargar = main.cargar_filtros_todo
+
+        try:
+            main.discover_available_catalog = lambda provider=None: {
+                "sports": [
+                    {
+                        "catalog_key": "basketball_nba_championship_winner",
+                        "sport_key": "basketball_nba_championship_winner",
+                        "sport_label": "Baloncesto",
+                        "league_label": "Nba Championship Winner",
+                        "active": True,
+                        "has_outrights": True,
+                    },
+                    {
+                        "catalog_key": "tennis_atp_canadian_open",
+                        "sport_key": "tennis_atp_canadian_open",
+                        "sport_label": "Tenis",
+                        "league_label": "Atp Canadian Open",
+                        "active": True,
+                        "has_outrights": False,
+                    },
+                ]
+            }
+            main.cargar_filtros_todo = lambda: {
+                "disabled_sports": set(),
+                "disabled_leagues": set(),
+            }
+
+            seleccionados = main.deportes_agregados_para_todo_ultracompacta(max_total=4)
+        finally:
+            main.discover_available_catalog = original_discover
+            main.cargar_filtros_todo = original_cargar
+
+        self.assertNotIn("basketball_nba_championship_winner", seleccionados)
+        self.assertIn("tennis_atp_canadian_open", seleccionados)
+
     def test_build_the_odds_query_params_usa_bookmakers_recomendados_por_defecto(self):
         import app.providers as providers
 
