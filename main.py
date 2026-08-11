@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import queue
 import re
 import subprocess
 import threading
@@ -138,6 +139,8 @@ TELEGRAM_AUTOPUBLISH_MERCADOS = os.getenv("TELEGRAM_AUTOPUBLISH_MERCADOS", "todo
 TELEGRAM_AUTOPUBLISH_PARTIDO = os.getenv("TELEGRAM_AUTOPUBLISH_PARTIDO", "todos").strip() or "todos"
 TELEGRAM_AUTOPUBLISH_DEPORTE = os.getenv("TELEGRAM_AUTOPUBLISH_DEPORTE", "todo").strip() or "todo"
 TELEGRAM_AUTOPUBLISH_SOLO_STAKAZOS = os.getenv("TELEGRAM_AUTOPUBLISH_SOLO_STAKAZOS", "true").strip().lower() in {"1", "true", "yes", "si", "on"}
+TELEGRAM_APUESTAS_BUILD_TIMEOUT_SECONDS = max(30, int(os.getenv("TELEGRAM_APUESTAS_BUILD_TIMEOUT_SECONDS", "180")))
+TELEGRAM_APUESTAS_PUBLISH_TIMEOUT_SECONDS = max(30, int(os.getenv("TELEGRAM_APUESTAS_PUBLISH_TIMEOUT_SECONDS", "90")))
 TELEGRAM_AUDIT_ENABLED = os.getenv("TELEGRAM_AUDIT_ENABLED", "true").strip().lower() in {"1", "true", "yes", "si", "on"}
 TELEGRAM_AUDIT_HOUR = int(os.getenv("TELEGRAM_AUDIT_HOUR", "21"))  # 21:00 por defecto
 RISK_OPERATING_MODE = os.getenv("RISK_OPERATING_MODE", "agresivo").strip().lower() or "agresivo"
@@ -1723,6 +1726,39 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
     }
 
 
+def _run_apuestas_phase_with_timeout(
+    *,
+    phase_name: str,
+    timeout_seconds: int,
+    fn,
+):
+    result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def _target() -> None:
+        try:
+            result_queue.put(("ok", fn()))
+        except Exception as exc:
+            result_queue.put(("error", exc))
+
+    worker = threading.Thread(target=_target, daemon=True)
+    worker.start()
+    join = getattr(worker, "join", None)
+    if callable(join):
+        join(timeout_seconds)
+    is_alive = getattr(worker, "is_alive", None)
+    if callable(is_alive) and is_alive():
+        raise TimeoutError(
+            f"La fase '{phase_name}' supero {timeout_seconds}s y se cancelo para evitar un bloqueo silencioso."
+        )
+    try:
+        status, payload = result_queue.get_nowait()
+    except queue.Empty as exc:
+        raise RuntimeError(f"La fase '{phase_name}' termino sin devolver resultado.") from exc
+    if status == "error":
+        raise payload
+    return payload
+
+
 def iniciar_publicacion_lab_async(
     *,
     payload: dict[str, Any] | None,
@@ -1785,10 +1821,20 @@ def lanzar_apuestas_telegram_async() -> str:
         try:
             telegram_command_jobs[job_id]["state"] = "running"
             provider_layer.reset_odds_api_usage_tracking()
-            publication_plan = construir_publicacion_apuestas_lab(**TELEGRAM_APUESTAS_DEFAULTS)
+            telegram_command_jobs[job_id]["phase"] = "building_lab"
+            publication_plan = _run_apuestas_phase_with_timeout(
+                phase_name="building_lab",
+                timeout_seconds=TELEGRAM_APUESTAS_BUILD_TIMEOUT_SECONDS,
+                fn=lambda: construir_publicacion_apuestas_lab(**TELEGRAM_APUESTAS_DEFAULTS),
+            )
             payload = dict(publication_plan.get("payload") or {})
             if list(payload.get("pronosticos") or []):
-                result = publicar_payload_preparado_lab(payload)
+                telegram_command_jobs[job_id]["phase"] = "publishing_telegram"
+                result = _run_apuestas_phase_with_timeout(
+                    phase_name="publishing_telegram",
+                    timeout_seconds=TELEGRAM_APUESTAS_PUBLISH_TIMEOUT_SECONDS,
+                    fn=lambda: publicar_payload_preparado_lab(payload),
+                )
             else:
                 result = {
                     "ok": True,
@@ -1801,6 +1847,7 @@ def lanzar_apuestas_telegram_async() -> str:
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs[job_id],
                 "state": "completed",
+                "phase": "completed",
                 "result": result,
                 "odds_api_usage": usage,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
@@ -1899,6 +1946,7 @@ def lanzar_apuestas_telegram_async() -> str:
             telegram_command_jobs[job_id] = {
                 **telegram_command_jobs.get(job_id, {}),
                 "state": "error",
+                "phase": telegram_command_jobs.get(job_id, {}).get("phase") or "unknown",
                 "error": str(exc),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }

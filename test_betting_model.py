@@ -4582,6 +4582,57 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Build: <code>buildtest123</code>", sent_messages[0])
         self.assertNotIn("Guard activo:", sent_messages[0])
 
+    def test_lanzar_apuestas_async_avisa_si_building_lab_supera_timeout(self):
+        import main
+
+        original_telegram_config = main.telegram_config
+        original_telegram_client = main.telegram_client
+        original_timeout_runner = main._run_apuestas_phase_with_timeout
+        original_thread = main.threading.Thread
+        original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
+
+        sent_messages: list[str] = []
+
+        class DummyClient:
+            def send_message(self, text, reply_markup=None):
+                sent_messages.append(text)
+                return {"ok": True}
+
+        class ImmediateThread:
+            def __init__(self, target=None, daemon=None):
+                self._target = target
+
+            def start(self):
+                if self._target is not None:
+                    self._target()
+
+        try:
+            main.telegram_config = lambda: ("token-test", "chat-test")
+            main.telegram_client = lambda token=None, chat_id=None: DummyClient()
+            main.provider_layer.reset_odds_api_usage_tracking = lambda: None
+            main.threading.Thread = ImmediateThread
+
+            def fake_timeout_runner(*, phase_name, timeout_seconds, fn):
+                raise TimeoutError(
+                    f"La fase '{phase_name}' supero {timeout_seconds}s y se cancelo para evitar un bloqueo silencioso."
+                )
+
+            main._run_apuestas_phase_with_timeout = fake_timeout_runner
+            job_id = main.lanzar_apuestas_telegram_async()
+        finally:
+            main.telegram_config = original_telegram_config
+            main.telegram_client = original_telegram_client
+            main._run_apuestas_phase_with_timeout = original_timeout_runner
+            main.threading.Thread = original_thread
+            main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
+
+        self.assertTrue(job_id)
+        self.assertEqual(len(sent_messages), 1)
+        self.assertIn("/apuestas fall", sent_messages[0])
+        self.assertIn("bloqueo silencioso", sent_messages[0])
+        self.assertEqual(main.telegram_command_jobs[job_id]["state"], "error")
+        self.assertEqual(main.telegram_command_jobs[job_id]["phase"], "building_lab")
+
     def test_construir_publicacion_apuestas_lab_usa_forecast_compacto_para_telegram(self):
         import main
 
