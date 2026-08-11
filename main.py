@@ -95,7 +95,7 @@ from elo import obtener_elos
 from tracking import _bool_pick_flag, _raw_pick, actualizar_bankroll, actualizar_cuota_pick, actualizar_importe_pick, actualizar_resultado, estadisticas, guardar_recomendaciones, listar_picks
 from tracking import archivar_picks_pendientes, eliminar_picks_archivadas, eliminar_reset_historial_deporte, guardar_apuesta_real, guardar_reset_historial_deporte, guardar_setting, marcar_apuesta_real_pick, obtener_setting
 from tracking import dashboard_data, guardar_snapshot_cuotas, aprendizaje, liquidar_picks_con_scores, listar_evaluaciones_picks, obtener_bankroll, penalizaciones_historicas
-from tracking import guardar_recomendaciones_unicas, inicializar_db, listar_publicaciones_telegram, registrar_publicacion_telegram
+from tracking import _insertar_pick, conectar, guardar_recomendaciones_unicas, inicializar_db, listar_publicaciones_telegram, registrar_publicacion_telegram
 from translations import (
     apuesta_es,
     equipo_es,
@@ -1607,7 +1607,7 @@ def publicar_pronosticos_lab_compacto(
     partido: str = "todos",
     deporte: str = DEFAULT_SPORT,
     solo_stakazos: bool = False,
-) -> dict[str, Any]:
+    ) -> dict[str, Any]:
     token, chat_id = telegram_config()
     forced_live = RuntimeSettings(
         environment=RUNTIME_SETTINGS.environment,
@@ -1622,7 +1622,7 @@ def publicar_pronosticos_lab_compacto(
             "stats": {},
         },
         pronosticos_fn=pronosticos_compactos_para_apuestas,
-        save_unique_recommendations=guardar_recomendaciones_unicas,
+        save_unique_recommendations=guardar_recomendaciones_directas_para_apuestas,
         read_raw_pick=_raw_pick,
         enrich_with_ai=lambda picks: picks,
         build_ai_summary=lambda *args, **kwargs: None,
@@ -1631,7 +1631,7 @@ def publicar_pronosticos_lab_compacto(
         format_pick_message=formatear_mensaje_telegram_pick,
         telegram_keyboard_for_pick=telegram_keyboard_for_pick,
         send_message=enviar_mensaje_telegram,
-        register_publication=registrar_publicacion_telegram,
+        register_publication=registrar_publicacion_telegram_compacta,
         perfil_label=perfil_es,
         modo_label=modo_es,
         perfiles_stake=PERFILES_STAKE,
@@ -1646,6 +1646,66 @@ def publicar_pronosticos_lab_compacto(
         token=token,
         chat_id=chat_id,
         publication_type="lab",
+    )
+
+
+def guardar_recomendaciones_directas_para_apuestas(
+    recomendaciones: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not recomendaciones:
+        return []
+
+    inicializar_db()
+    ahora = datetime.now(timezone.utc).isoformat()
+    salida: list[dict[str, Any]] = []
+
+    with conectar() as conn:
+        for rec in recomendaciones:
+            creado = _insertar_pick(conn, rec, created_at=ahora)
+            if creado is not None:
+                salida.append(creado)
+        conn.commit()
+
+    return salida
+
+
+def registrar_publicacion_telegram_compacta(
+    publication_type: str,
+    payload: dict[str, Any],
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    slim_payload = {
+        "deporte": payload.get("deporte"),
+        "liga": payload.get("liga"),
+        "criterio": payload.get("criterio"),
+        "aviso_cobertura": payload.get("aviso_cobertura"),
+        "ia_activa": bool(payload.get("ia_activa")),
+        "total_elite": int(payload.get("total_elite") or 0),
+        "total_stakazos": int(payload.get("total_stakazos") or 0),
+        "total_analizadas": int(payload.get("total_analizadas") or 0),
+        "total_recomendadas": int(payload.get("total_recomendadas") or 0),
+        "snapshots_guardados": int(payload.get("snapshots_guardados") or 0),
+        "solo_stakazos": bool(payload.get("solo_stakazos")),
+        "resumen_telegram": payload.get("resumen_telegram"),
+        "pronosticos": [
+            {
+                "event_id": pick.get("event_id"),
+                "partido": pick.get("partido"),
+                "equipo": pick.get("equipo"),
+                "casa": pick.get("casa"),
+                "mercado": pick.get("mercado"),
+                "stake": pick.get("stake"),
+                "importe_sugerido": pick.get("importe_sugerido"),
+                "cuota_apuesta": pick.get("cuota_apuesta"),
+                "quality_score": pick.get("quality_score"),
+            }
+            for pick in list(payload.get("pronosticos") or [])
+        ],
+    }
+    return registrar_publicacion_telegram(
+        publication_type=publication_type,
+        payload=slim_payload,
+        items=items,
     )
 
 
