@@ -4672,6 +4672,38 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("payload", result)
         self.assertIn("zero_picks_diagnostics", result)
 
+    def test_deportes_agregados_para_todo_ultracompacta_respeta_ligas_desactivadas(self):
+        import main
+
+        original_opciones = main.opciones_deporte_disponibles
+        original_resolver = main.sports_layer.resolver_contexto_deporte
+        original_cargar = main.cargar_filtros_todo
+
+        try:
+            main.opciones_deporte_disponibles = lambda provider=None: [
+                {"value": "basketball_wnba", "label": "Baloncesto - WNBA"},
+                {"value": "tennis_atp_canadian_open", "label": "Tenis - ATP Canadian Open"},
+            ]
+            main.sports_layer.resolver_contexto_deporte = lambda value: {
+                "catalog_key": value,
+                "sport_key": value,
+                "sport_label": "Baloncesto" if "basketball" in value else "Tenis",
+                "league_label": value,
+            }
+            main.cargar_filtros_todo = lambda: {
+                "disabled_sports": set(),
+                "disabled_leagues": {"basketball_wnba"},
+            }
+
+            seleccionados = main.deportes_agregados_para_todo_ultracompacta(max_total=4)
+        finally:
+            main.opciones_deporte_disponibles = original_opciones
+            main.sports_layer.resolver_contexto_deporte = original_resolver
+            main.cargar_filtros_todo = original_cargar
+
+        self.assertNotIn("basketball_wnba", seleccionados)
+        self.assertIn("tennis_atp_canadian_open", seleccionados)
+
     def test_resumen_telegram_muestra_publicado_hoy_con_picks_del_dia(self):
         report = {
             "date": "2026-07-30",

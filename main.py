@@ -636,6 +636,9 @@ def deportes_agregados_para_todo_ultracompacta(
     *,
     max_total: int = 4,
 ) -> list[str]:
+    filtros = cargar_filtros_todo()
+    disabled_sports = set(filtros.get("disabled_sports") or set())
+    disabled_leagues = set(filtros.get("disabled_leagues") or set())
     candidatos: list[dict[str, Any]] = []
     fallback_genericos: list[dict[str, Any]] = []
 
@@ -644,11 +647,19 @@ def deportes_agregados_para_todo_ultracompacta(
         if not valor or valor == "todo":
             continue
         contexto = sports_layer.resolver_contexto_deporte(valor)
+        catalog_key = str(contexto.get("catalog_key") or valor).strip().lower()
         family = family_from_sport_key(contexto.get("sport_key", ""))
         if family not in TODO_LIMITS_BY_FAMILY:
             continue
+        sport_bucket = str(SPORT_ALIASES.get(family, family)).strip().lower()
+        if sport_bucket in disabled_sports:
+            continue
         if _is_generic_sport_alias(valor):
+            if catalog_key in disabled_leagues:
+                continue
             fallback_genericos.append(contexto)
+            continue
+        if catalog_key in disabled_leagues:
             continue
         candidatos.append(contexto)
 
