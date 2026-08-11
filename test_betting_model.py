@@ -4402,7 +4402,7 @@ class BettingModelTests(unittest.TestCase):
 
         original_telegram_config = main.telegram_config
         original_telegram_client = main.telegram_client
-        original_publicar_pronosticos_lab = main.publicar_pronosticos_lab
+        original_publicar_pronosticos_lab_compacto = main.publicar_pronosticos_lab_compacto
         original_thread = main.threading.Thread
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
@@ -4434,7 +4434,7 @@ class BettingModelTests(unittest.TestCase):
                 "last_remaining": 18250,
             }
 
-            def fake_publicar_pronosticos_lab(**kwargs):
+            def fake_publicar_pronosticos_lab_compacto(**kwargs):
                 published_calls.append(kwargs)
                 return {
                     "ok": True,
@@ -4443,14 +4443,14 @@ class BettingModelTests(unittest.TestCase):
                     "publication_id": 77,
                 }
 
-            main.publicar_pronosticos_lab = fake_publicar_pronosticos_lab
+            main.publicar_pronosticos_lab_compacto = fake_publicar_pronosticos_lab_compacto
             main.threading.Thread = ImmediateThread
 
             job_id = main.lanzar_apuestas_telegram_async()
         finally:
             main.telegram_config = original_telegram_config
             main.telegram_client = original_telegram_client
-            main.publicar_pronosticos_lab = original_publicar_pronosticos_lab
+            main.publicar_pronosticos_lab_compacto = original_publicar_pronosticos_lab_compacto
             main.threading.Thread = original_thread
             main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
             main.provider_layer.get_odds_api_usage_tracking = original_get_usage
@@ -4480,7 +4480,7 @@ class BettingModelTests(unittest.TestCase):
 
         original_telegram_config = main.telegram_config
         original_telegram_client = main.telegram_client
-        original_publicar_pronosticos_lab = main.publicar_pronosticos_lab
+        original_publicar_pronosticos_lab_compacto = main.publicar_pronosticos_lab_compacto
         original_thread = main.threading.Thread
         original_reset_usage = main.provider_layer.reset_odds_api_usage_tracking
         original_get_usage = main.provider_layer.get_odds_api_usage_tracking
@@ -4511,7 +4511,7 @@ class BettingModelTests(unittest.TestCase):
                 "last_remaining": 9122,
             }
             main.APP_BUILD_SHA = "buildtest123"
-            main.publicar_pronosticos_lab = lambda **kwargs: {
+            main.publicar_pronosticos_lab_compacto = lambda **kwargs: {
                 "ok": True,
                 "picks_guardados": 0,
                 "mensajes_enviados": 0,
@@ -4545,7 +4545,7 @@ class BettingModelTests(unittest.TestCase):
         finally:
             main.telegram_config = original_telegram_config
             main.telegram_client = original_telegram_client
-            main.publicar_pronosticos_lab = original_publicar_pronosticos_lab
+            main.publicar_pronosticos_lab_compacto = original_publicar_pronosticos_lab_compacto
             main.threading.Thread = original_thread
             main.provider_layer.reset_odds_api_usage_tracking = original_reset_usage
             main.provider_layer.get_odds_api_usage_tracking = original_get_usage

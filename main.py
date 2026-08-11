@@ -1513,6 +1513,98 @@ def publicar_pronosticos_lab(
     )
 
 
+def pronosticos_compactos_para_apuestas(
+    bankroll: float | None = None,
+    perfil: str = "moderado",
+    modo: str = "comparador",
+    mercados: str = "todo",
+    partido: str = "todos",
+    deporte: str = DEFAULT_SPORT,
+    solo_stakazos: bool = False,
+) -> dict[str, Any]:
+    forecast = apuestas_hoy_para_telegram_lab(
+        bankroll=bankroll,
+        perfil=perfil,
+        modo=modo,
+        mercados=mercados,
+        partido=partido,
+        guardar=False,
+        deporte=deporte,
+        solo_elite=False,
+        solo_stakazos=solo_stakazos,
+        historical_mode=False,
+        historical_date=None,
+        historical_from=None,
+        historical_to=None,
+    )
+    return build_prediction_payload(
+        data=forecast,
+        solo_stakazos=solo_stakazos,
+        ai_available=lambda: False,
+        select_picks_for_telegram=seleccionar_picks_para_apuestas_lab,
+        enrich_with_ai=lambda picks: picks,
+        build_ai_summary=lambda *args, **kwargs: None,
+        format_pick_message=formatear_mensaje_telegram_pick,
+        format_summary_message=format_summary_message,
+        perfil=perfil,
+        modo=modo,
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
+    )
+
+
+def publicar_pronosticos_lab_compacto(
+    bankroll: float | None = None,
+    perfil: str = "moderado",
+    modo: str = "comparador",
+    mercados: str = "todo",
+    partido: str = "todos",
+    deporte: str = DEFAULT_SPORT,
+    solo_stakazos: bool = False,
+) -> dict[str, Any]:
+    token, chat_id = telegram_config()
+    forced_live = RuntimeSettings(
+        environment=RUNTIME_SETTINGS.environment,
+        shadow_mode=False,
+    )
+    return publish_telegram_predictions(
+        runtime_settings=forced_live,
+        publication_guard=lambda: {
+            "allow_live_publication": True,
+            "mode": "manual_lab",
+            "reasons": ["manual_lab_publish"],
+            "stats": {},
+        },
+        pronosticos_fn=pronosticos_compactos_para_apuestas,
+        save_unique_recommendations=guardar_recomendaciones_unicas,
+        read_raw_pick=_raw_pick,
+        enrich_with_ai=lambda picks: picks,
+        build_ai_summary=lambda *args, **kwargs: None,
+        ai_available=lambda: False,
+        format_summary=format_summary_message,
+        format_pick_message=formatear_mensaje_telegram_pick,
+        telegram_keyboard_for_pick=telegram_keyboard_for_pick,
+        send_message=enviar_mensaje_telegram,
+        register_publication=registrar_publicacion_telegram,
+        perfil_label=perfil_es,
+        modo_label=modo_es,
+        perfiles_stake=PERFILES_STAKE,
+        modos_informe=MODOS_INFORME,
+        bankroll=bankroll,
+        perfil=perfil,
+        modo=modo,
+        mercados=mercados,
+        partido=partido,
+        deporte=deporte,
+        solo_stakazos=solo_stakazos,
+        token=token,
+        chat_id=chat_id,
+        publication_type="lab",
+    )
+
+
 def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
     token, chat_id = telegram_config()
     picks_publicables = list(payload.get("pronosticos", []))
@@ -1847,7 +1939,7 @@ def lanzar_apuestas_telegram_async() -> str:
                     TELEGRAM_APUESTAS_BUILD_TIMEOUT_SECONDS,
                     TELEGRAM_APUESTAS_PUBLISH_TIMEOUT_SECONDS,
                 ),
-                fn=lambda: publicar_pronosticos_lab(**TELEGRAM_APUESTAS_DEFAULTS),
+                fn=lambda: publicar_pronosticos_lab_compacto(**TELEGRAM_APUESTAS_DEFAULTS),
             )
             usage = provider_layer.get_odds_api_usage_tracking()
             telegram_command_jobs[job_id] = {
