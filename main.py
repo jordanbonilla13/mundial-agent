@@ -1607,35 +1607,9 @@ def publicar_pronosticos_lab_compacto(
     partido: str = "todos",
     deporte: str = DEFAULT_SPORT,
     solo_stakazos: bool = False,
-    ) -> dict[str, Any]:
+) -> dict[str, Any]:
     token, chat_id = telegram_config()
-    forced_live = RuntimeSettings(
-        environment=RUNTIME_SETTINGS.environment,
-        shadow_mode=False,
-    )
-    return publish_telegram_predictions(
-        runtime_settings=forced_live,
-        publication_guard=lambda: {
-            "allow_live_publication": True,
-            "mode": "manual_lab",
-            "reasons": ["manual_lab_publish"],
-            "stats": {},
-        },
-        pronosticos_fn=pronosticos_compactos_para_apuestas,
-        save_unique_recommendations=guardar_recomendaciones_directas_para_apuestas,
-        read_raw_pick=_raw_pick,
-        enrich_with_ai=lambda picks: picks,
-        build_ai_summary=lambda *args, **kwargs: None,
-        ai_available=lambda: False,
-        format_summary=format_summary_message,
-        format_pick_message=formatear_mensaje_telegram_pick,
-        telegram_keyboard_for_pick=telegram_keyboard_for_pick,
-        send_message=enviar_mensaje_telegram,
-        register_publication=registrar_publicacion_telegram_compacta,
-        perfil_label=perfil_es,
-        modo_label=modo_es,
-        perfiles_stake=PERFILES_STAKE,
-        modos_informe=MODOS_INFORME,
+    payload = pronosticos_compactos_para_apuestas(
         bankroll=bankroll,
         perfil=perfil,
         modo=modo,
@@ -1643,10 +1617,106 @@ def publicar_pronosticos_lab_compacto(
         partido=partido,
         deporte=deporte,
         solo_stakazos=solo_stakazos,
-        token=token,
-        chat_id=chat_id,
-        publication_type="lab",
     )
+    picks_publicables = list(payload.get("pronosticos") or [])
+    diagnostics = {
+        "analizadas": int(payload.get("total_analizadas") or 0),
+        "recomendadas": int(payload.get("total_recomendadas") or 0),
+        "descartadas_preview": len(list(payload.get("descartadas") or [])),
+        "partidos_disponibles": len(list(payload.get("partidos_disponibles") or [])),
+        "snapshots_guardados": int(payload.get("snapshots_guardados") or 0),
+        "coverage_notice": str(payload.get("aviso_cobertura") or "").strip(),
+        "base_criteria": str(payload.get("criterio") or "").strip(),
+        "blocked_summary": dict(payload.get("blocked_summary") or {}),
+        "top_discard_reasons": _build_apuestas_zero_diagnostics_from_lab(
+            {
+                "forecast_summary": {
+                    "total_analizadas": int(payload.get("total_analizadas") or 0),
+                    "total_recomendadas": int(payload.get("total_recomendadas") or 0),
+                    "total_descartadas_preview": len(list(payload.get("descartadas") or [])),
+                },
+                "forecast": {
+                    "descartadas": list(payload.get("descartadas") or []),
+                    "partidos_disponibles": list(payload.get("partidos_disponibles") or []),
+                    "snapshots_guardados": int(payload.get("snapshots_guardados") or 0),
+                    "aviso_cobertura": payload.get("aviso_cobertura"),
+                    "criterio": payload.get("criterio"),
+                    "blocked_summary": dict(payload.get("blocked_summary") or {}),
+                },
+            }
+        ).get("top_discard_reasons", []),
+    }
+    if not picks_publicables:
+        return {
+            "ok": True,
+            "picks_guardados": 0,
+            "mensajes_enviados": 0,
+            "publication_id": None,
+            "zero_picks_diagnostics": diagnostics,
+        }
+
+    summary_text = str(payload.get("resumen_telegram") or "").strip()
+    pick_messages = list(payload.get("mensajes_telegram") or [])
+    if len(pick_messages) != len(picks_publicables):
+        pick_messages = [formatear_mensaje_telegram_pick(pick) for pick in picks_publicables]
+    messages = ([summary_text] if summary_text else []) + pick_messages
+
+    sent_messages = []
+    publication_items = []
+    for index, text in enumerate(messages):
+        result = enviar_mensaje_telegram(
+            text,
+            token=token,
+            chat_id=chat_id,
+            reply_markup=None,
+        )
+        sent_messages.append(result)
+        publication_items.append(
+            {
+                "telegram_message_id": ((result.get("result") or {}).get("message_id")),
+                "message_kind": "summary" if summary_text and index == 0 else "pick",
+                "text": text,
+                "pick_id": None,
+            }
+        )
+
+    # Persistencia en segundo plano: no debe bloquear la publicacion del canal.
+    def _persist_async() -> None:
+        try:
+            picks_guardados = guardar_recomendaciones_directas_para_apuestas(picks_publicables)
+            picks_por_fingerprint = {
+                fingerprint_pick_service(item): item
+                for item in picks_guardados
+            }
+            items = []
+            for index, item in enumerate(publication_items):
+                copied = dict(item)
+                if copied.get("message_kind") == "pick":
+                    pick_idx = index - 1 if summary_text else index
+                    if 0 <= pick_idx < len(picks_publicables):
+                        pick = picks_publicables[pick_idx]
+                        saved = picks_por_fingerprint.get(fingerprint_pick_service(pick))
+                        if saved is not None:
+                            copied["pick_id"] = saved.get("id")
+                items.append(copied)
+            registrar_publicacion_telegram_compacta(
+                publication_type="lab",
+                payload=payload,
+                items=items,
+            )
+        except Exception:
+            pass
+
+    threading.Thread(target=_persist_async, daemon=True).start()
+
+    return {
+        "ok": True,
+        "picks_guardados": len(picks_publicables),
+        "mensajes_enviados": len(sent_messages),
+        "publication_id": None,
+        "zero_picks_diagnostics": diagnostics,
+        "persistence_deferred": True,
+    }
 
 
 def guardar_recomendaciones_directas_para_apuestas(
