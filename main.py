@@ -689,6 +689,25 @@ def deportes_agregados_para_todo_ultracompacta(
     seleccionados: list[str] = []
     por_familia: dict[str, int] = {}
 
+    # Primera pasada: asegurar variedad minima entre familias para que
+    # el modo compacto no se cierre demasiado pronto sobre una sola familia.
+    vistos_primera_pasada: set[str] = set()
+    for contexto in candidatos:
+        if len(seleccionados) >= max_total:
+            break
+        family = family_from_sport_key(contexto.get("sport_key", ""))
+        if family in vistos_primera_pasada:
+            continue
+        limite = TODO_LIMITS_BY_FAMILY.get(family, 0)
+        if por_familia.get(family, 0) >= limite:
+            continue
+        catalog_key = str(contexto.get("catalog_key") or "").strip().lower()
+        if not catalog_key:
+            continue
+        seleccionados.append(catalog_key)
+        por_familia[family] = por_familia.get(family, 0) + 1
+        vistos_primera_pasada.add(family)
+
     for contexto in candidatos:
         if len(seleccionados) >= max_total:
             break
@@ -697,7 +716,7 @@ def deportes_agregados_para_todo_ultracompacta(
         if por_familia.get(family, 0) >= limite:
             continue
         catalog_key = str(contexto.get("catalog_key") or "").strip().lower()
-        if not catalog_key:
+        if not catalog_key or catalog_key in seleccionados:
             continue
         seleccionados.append(catalog_key)
         por_familia[family] = por_familia.get(family, 0) + 1
@@ -1596,37 +1615,18 @@ def pronosticos_compactos_para_apuestas(
     deporte: str = DEFAULT_SPORT,
     solo_stakazos: bool = False,
 ) -> dict[str, Any]:
-    forecast = apuestas_hoy_para_telegram_ultracompacta(
+    built = construir_publicacion_apuestas_lab(
         bankroll=bankroll,
         perfil=perfil,
         modo=modo,
         mercados=mercados,
         partido=partido,
-        guardar=False,
         deporte=deporte,
-        solo_elite=False,
         solo_stakazos=solo_stakazos,
-        historical_mode=False,
-        historical_date=None,
-        historical_from=None,
-        historical_to=None,
     )
-    return build_prediction_payload(
-        data=forecast,
-        solo_stakazos=solo_stakazos,
-        ai_available=lambda: False,
-        select_picks_for_telegram=seleccionar_picks_para_apuestas_lab,
-        enrich_with_ai=lambda picks: picks,
-        build_ai_summary=lambda *args, **kwargs: None,
-        format_pick_message=formatear_mensaje_telegram_pick,
-        format_summary_message=format_summary_message,
-        perfil=perfil,
-        modo=modo,
-        perfiles_stake=PERFILES_STAKE,
-        modos_informe=MODOS_INFORME,
-        perfil_label=perfil_es,
-        modo_label=modo_es,
-    )
+    payload = dict(built.get("payload") or {})
+    payload["zero_picks_diagnostics"] = dict(built.get("zero_picks_diagnostics") or {})
+    return payload
 
 
 def publicar_pronosticos_lab_compacto(
@@ -1638,8 +1638,7 @@ def publicar_pronosticos_lab_compacto(
     deporte: str = DEFAULT_SPORT,
     solo_stakazos: bool = False,
 ) -> dict[str, Any]:
-    token, chat_id = telegram_config()
-    payload = pronosticos_compactos_para_apuestas(
+    built = construir_publicacion_apuestas_lab(
         bankroll=bankroll,
         perfil=perfil,
         modo=modo,
@@ -1648,34 +1647,9 @@ def publicar_pronosticos_lab_compacto(
         deporte=deporte,
         solo_stakazos=solo_stakazos,
     )
+    payload = dict(built.get("payload") or {})
     picks_publicables = list(payload.get("pronosticos") or [])
-    diagnostics = {
-        "analizadas": int(payload.get("total_analizadas") or 0),
-        "recomendadas": int(payload.get("total_recomendadas") or 0),
-        "descartadas_preview": len(list(payload.get("descartadas") or [])),
-        "partidos_disponibles": len(list(payload.get("partidos_disponibles") or [])),
-        "snapshots_guardados": int(payload.get("snapshots_guardados") or 0),
-        "coverage_notice": str(payload.get("aviso_cobertura") or "").strip(),
-        "base_criteria": str(payload.get("criterio") or "").strip(),
-        "blocked_summary": dict(payload.get("blocked_summary") or {}),
-        "top_discard_reasons": _build_apuestas_zero_diagnostics_from_lab(
-            {
-                "forecast_summary": {
-                    "total_analizadas": int(payload.get("total_analizadas") or 0),
-                    "total_recomendadas": int(payload.get("total_recomendadas") or 0),
-                    "total_descartadas_preview": len(list(payload.get("descartadas") or [])),
-                },
-                "forecast": {
-                    "descartadas": list(payload.get("descartadas") or []),
-                    "partidos_disponibles": list(payload.get("partidos_disponibles") or []),
-                    "snapshots_guardados": int(payload.get("snapshots_guardados") or 0),
-                    "aviso_cobertura": payload.get("aviso_cobertura"),
-                    "criterio": payload.get("criterio"),
-                    "blocked_summary": dict(payload.get("blocked_summary") or {}),
-                },
-            }
-        ).get("top_discard_reasons", []),
-    }
+    diagnostics = dict(built.get("zero_picks_diagnostics") or {})
     if not picks_publicables:
         return {
             "ok": True,
@@ -1684,69 +1658,9 @@ def publicar_pronosticos_lab_compacto(
             "publication_id": None,
             "zero_picks_diagnostics": diagnostics,
         }
-
-    summary_text = str(payload.get("resumen_telegram") or "").strip()
-    pick_messages = list(payload.get("mensajes_telegram") or [])
-    if len(pick_messages) != len(picks_publicables):
-        pick_messages = [formatear_mensaje_telegram_pick(pick) for pick in picks_publicables]
-    messages = ([summary_text] if summary_text else []) + pick_messages
-
-    sent_messages = []
-    publication_items = []
-    for index, text in enumerate(messages):
-        result = enviar_mensaje_telegram(
-            text,
-            token=token,
-            chat_id=chat_id,
-            reply_markup=None,
-        )
-        sent_messages.append(result)
-        publication_items.append(
-            {
-                "telegram_message_id": ((result.get("result") or {}).get("message_id")),
-                "message_kind": "summary" if summary_text and index == 0 else "pick",
-                "text": text,
-                "pick_id": None,
-            }
-        )
-
-    # Persistencia en segundo plano: no debe bloquear la publicacion del canal.
-    def _persist_async() -> None:
-        try:
-            picks_guardados = guardar_recomendaciones_directas_para_apuestas(picks_publicables)
-            picks_por_fingerprint = {
-                fingerprint_pick_service(item): item
-                for item in picks_guardados
-            }
-            items = []
-            for index, item in enumerate(publication_items):
-                copied = dict(item)
-                if copied.get("message_kind") == "pick":
-                    pick_idx = index - 1 if summary_text else index
-                    if 0 <= pick_idx < len(picks_publicables):
-                        pick = picks_publicables[pick_idx]
-                        saved = picks_por_fingerprint.get(fingerprint_pick_service(pick))
-                        if saved is not None:
-                            copied["pick_id"] = saved.get("id")
-                items.append(copied)
-            registrar_publicacion_telegram_compacta(
-                publication_type="lab",
-                payload=payload,
-                items=items,
-            )
-        except Exception:
-            pass
-
-    threading.Thread(target=_persist_async, daemon=True).start()
-
-    return {
-        "ok": True,
-        "picks_guardados": len(picks_publicables),
-        "mensajes_enviados": len(sent_messages),
-        "publication_id": None,
-        "zero_picks_diagnostics": diagnostics,
-        "persistence_deferred": True,
-    }
+    result = publicar_payload_preparado(payload, publication_type="apuestas")
+    result["zero_picks_diagnostics"] = diagnostics
+    return result
 
 
 def guardar_recomendaciones_directas_para_apuestas(
@@ -1809,7 +1723,7 @@ def registrar_publicacion_telegram_compacta(
     )
 
 
-def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
+def publicar_payload_preparado(payload: dict[str, Any], publication_type: str = "lab") -> dict[str, Any]:
     token, chat_id = telegram_config()
     picks_publicables = list(payload.get("pronosticos", []))
     if not picks_publicables:
@@ -1871,7 +1785,7 @@ def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     publicacion = registrar_publicacion_telegram(
-        publication_type="lab",
+        publication_type=publication_type,
         payload=payload,
         items=publication_items,
     )
@@ -1883,6 +1797,10 @@ def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
         "publication_id": publicacion.get("id"),
         "runtime_mode": "manual_lab",
     }
+
+
+def publicar_payload_preparado_lab(payload: dict[str, Any]) -> dict[str, Any]:
+    return publicar_payload_preparado(payload, publication_type="lab")
 
 
 def _parse_apuestas_compact_commence(value: Any) -> datetime | None:
@@ -1973,69 +1891,70 @@ def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[
 
 
 def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
-    forecast = apuestas_hoy_para_telegram_ultracompacta(
-        bankroll=kwargs["bankroll"],
+    forced_live = RuntimeSettings(
+        environment=RUNTIME_SETTINGS.environment,
+        shadow_mode=False,
+    )
+    lab_data = build_lab_run(
+        runtime_settings=forced_live,
+        publication_guard=lambda: {
+            "allow_live_publication": True,
+            "mode": "apuestas_lab",
+            "reasons": ["manual_lab_publish"],
+            "stats": {},
+        },
+        run_forecast=lambda request: apuestas_hoy_para_telegram_ultracompacta(
+            bankroll=request.bankroll,
+            perfil=request.perfil,
+            modo=request.modo,
+            mercados=request.mercados,
+            partido=request.partido,
+            guardar=request.guardar,
+            deporte=request.deporte,
+            solo_elite=request.solo_elite,
+            solo_stakazos=request.solo_stakazos,
+            historical_mode=request.historical_mode,
+            historical_date=request.historical_date,
+            historical_from=request.historical_from,
+            historical_to=request.historical_to,
+        ),
+        build_prediction_payload=build_prediction_payload,
+        ai_available=lambda: False,
+        select_picks_for_telegram=seleccionar_picks_para_apuestas_lab,
+        enrich_with_ai=lambda picks: picks,
+        build_ai_summary=lambda *args, **inner_kwargs: None,
+        format_pick_message=formatear_mensaje_telegram_pick,
+        format_summary_message=format_summary_message,
+        fetch_scores=scores,
+        load_learning_summary=aprendizaje,
+        load_calibration_snapshot=generate_calibration_snapshot,
+        todo_toggle_panel=build_todo_toggle_groups(),
         perfil=kwargs["perfil"],
         modo=kwargs["modo"],
         mercados=kwargs["mercados"],
         partido=kwargs["partido"],
-        guardar=False,
         deporte=kwargs["deporte"],
-        solo_elite=False,
+        bankroll=kwargs["bankroll"],
         solo_stakazos=kwargs["solo_stakazos"],
-        historical_mode=False,
-        historical_date=None,
-        historical_from=None,
-        historical_to=None,
-    )
-    payload = build_prediction_payload(
-        data=forecast,
-        solo_stakazos=kwargs["solo_stakazos"],
-        ai_available=lambda: False,
-        select_picks_for_telegram=seleccionar_picks_para_apuestas_lab,
-        enrich_with_ai=lambda picks: picks,
-        build_ai_summary=lambda *args, **kwargs: None,
-        format_pick_message=formatear_mensaje_telegram_pick,
-        format_summary_message=format_summary_message,
-        perfil=kwargs["perfil"],
-        modo=kwargs["modo"],
+        simulation_mode="live",
+        historical_snapshot_at=None,
+        historical_range_from=None,
+        historical_range_to=None,
         perfiles_stake=PERFILES_STAKE,
         modos_informe=MODOS_INFORME,
         perfil_label=perfil_es,
         modo_label=modo_es,
     )
+    forecast = dict(lab_data.get("forecast") or {})
+    payload = dict(lab_data.get("telegram_preview") or {})
     payload["pronosticos"] = list(payload.get("pronosticos") or [])
     payload["mensajes_telegram"] = list(payload.get("mensajes_telegram") or [])
     diagnostics = {
-        "analizadas": int(forecast.get("total_analizadas") or 0),
-        "recomendadas": int(forecast.get("total_recomendadas") or 0),
-        "descartadas_preview": len(list(forecast.get("descartadas") or [])),
-        "partidos_disponibles": len(list(forecast.get("partidos_disponibles") or [])),
-        "snapshots_guardados": int(forecast.get("snapshots_guardados") or 0),
-        "coverage_notice": str(forecast.get("aviso_cobertura") or "").strip(),
-        "base_criteria": str(forecast.get("criterio") or "").strip(),
-        "blocked_summary": dict(forecast.get("blocked_summary") or {}),
-        "top_discard_reasons": _build_apuestas_zero_diagnostics_from_lab(
-            {
-                "forecast_summary": {
-                    "total_analizadas": int(forecast.get("total_analizadas") or 0),
-                    "total_recomendadas": int(forecast.get("total_recomendadas") or 0),
-                    "total_descartadas_preview": len(list(forecast.get("descartadas") or [])),
-                },
-                "forecast": forecast,
-            }
-        ).get("top_discard_reasons", []),
+        **_build_apuestas_zero_diagnostics_from_lab(lab_data),
+        "publishable_preview": len(list(payload.get("pronosticos") or [])),
     }
     return {
-        "lab_data": {
-            "forecast": forecast,
-            "forecast_summary": {
-                "total_analizadas": int(forecast.get("total_analizadas") or 0),
-                "total_recomendadas": int(forecast.get("total_recomendadas") or 0),
-                "total_descartadas_preview": len(list(forecast.get("descartadas") or [])),
-            },
-            "telegram_preview": payload,
-        },
+        "lab_data": lab_data,
         "payload": payload,
         "zero_picks_diagnostics": diagnostics,
     }
@@ -2599,8 +2518,14 @@ def aplicar_penalizacion_historica(apuesta: dict, penalizaciones: dict[str, dict
 
 
 def politica_riesgo_actual() -> dict[str, Any]:
-    resumen = estadisticas()
-    aprendizaje_info = aprendizaje()
+    try:
+        resumen = estadisticas()
+    except Exception:
+        resumen = {}
+    try:
+        aprendizaje_info = aprendizaje()
+    except Exception:
+        aprendizaje_info = {}
     evaluated_sample = int(aprendizaje_info.get("picks_evaluadas") or 0)
     clv_positive_pct = aprendizaje_info.get("porcentaje_clv_positivo") if evaluated_sample > 0 else None
     roi = float(resumen.get("roi") or 0) if evaluated_sample >= 12 else 0.0
@@ -2613,6 +2538,42 @@ def politica_riesgo_actual() -> dict[str, Any]:
         clv_positive_pct=clv_positive_pct,
         operating_mode=RISK_OPERATING_MODE,
     )
+
+
+def performance_guard_actual() -> dict[str, Any]:
+    try:
+        return build_performance_guard(
+            load_dashboard=dashboard_data,
+            operating_mode=RISK_OPERATING_MODE,
+        )
+    except Exception:
+        return {
+            "operating_mode": RISK_OPERATING_MODE,
+            "blocked_sports": {},
+            "blocked_leagues": {},
+            "overrides": {
+                "allowed_sports": [],
+                "allowed_leagues": [],
+                "unblocked_sports": [],
+                "unblocked_leagues": [],
+                "performance_guard_disabled": True,
+            },
+            "thresholds": {},
+        }
+
+
+def obtener_bankroll_seguro(default: float = 200.0) -> float:
+    try:
+        return float(obtener_bankroll(default=default))
+    except Exception:
+        return float(default)
+
+
+def actualizar_bankroll_seguro(bankroll: float) -> float:
+    try:
+        return float(actualizar_bankroll(bankroll))
+    except Exception:
+        return float(bankroll)
 
 
 class ResultadoPick(BaseModel):
@@ -3513,6 +3474,18 @@ def deportes_disponibles(provider: str | None = None):
 def resolver_mercados(filtro: str, deporte: str | None = None) -> tuple[list[str], str | None]:
     config = config_mercados_deporte(deporte)
     filtro_raw = str(filtro or "").strip().lower()
+    contexto = resolver_contexto_deporte(deporte)
+    sport_key = str(contexto.get("sport_key") or "").lower()
+
+    def _featured_markets_for_context() -> list[str]:
+        if sport_key.startswith("basketball_"):
+            return ["h2h", "spreads", "totals"]
+        if sport_key.startswith("tennis_"):
+            return ["h2h", "totals"]
+        if sport_key.startswith("soccer_"):
+            return ["h2h", "totals"]
+        return ["h2h"]
+
     mercados_explicitos = [
         mercado.strip()
         for mercado in filtro_raw.split(",")
@@ -3520,17 +3493,23 @@ def resolver_mercados(filtro: str, deporte: str | None = None) -> tuple[list[str
     ]
 
     if mercados_explicitos:
-        return mercados_explicitos, None
+        permitidos = set(_featured_markets_for_context()) | ADDITIONAL_MARKETS
+        mercados_filtrados = [mercado for mercado in mercados_explicitos if mercado in permitidos]
+        if mercados_filtrados:
+            return mercados_filtrados, None
+        return _featured_markets_for_context(), (
+            "Los mercados pedidos no aplican a este deporte; se usan los featured compatibles."
+        )
 
     filtro_normalizado = filtro_raw if filtro_raw in config["allowed_filters"] else config["default_filter"]
-    contexto = resolver_contexto_deporte(deporte)
-    sport_key = str(contexto.get("sport_key") or "").lower()
 
     if filtro_normalizado == "todo":
         if sport_key.startswith("basketball_"):
             return ["h2h", "spreads", "totals", "alternate_totals"], None
         if sport_key.startswith("tennis_"):
-            return ["h2h"], None
+            return ["h2h", "totals"], None
+        if sport_key.startswith("soccer_"):
+            return ["h2h", "totals", "alternate_totals"], None
 
     if filtro_normalizado in FILTROS_MERCADO:
         mercados = FILTROS_MERCADO[filtro_normalizado]
@@ -4005,8 +3984,8 @@ def apuestas_hoy(
         reference_bookmaker=REFERENCE_BOOKMAKER,
         perfiles_stake=PERFILES_STAKE,
         modos_informe=MODOS_INFORME,
-        get_bankroll=obtener_bankroll,
-        update_bankroll=actualizar_bankroll,
+        get_bankroll=obtener_bankroll_seguro,
+        update_bankroll=actualizar_bankroll_seguro,
         resolve_context=resolver_contexto_deporte,
         resolve_markets=resolver_mercados,
         list_sport_options=lambda: opciones_deporte_disponibles(),
@@ -4044,10 +4023,7 @@ def apuestas_hoy(
             policy=policy,
             league_penalties=league_penalties,
         ),
-        build_performance_guard=lambda: build_performance_guard(
-            load_dashboard=dashboard_data,
-            operating_mode=RISK_OPERATING_MODE,
-        ),
+        build_performance_guard=performance_guard_actual,
         apply_performance_guard_to_pick=apply_performance_guard_to_pick,
         apply_exposure_limits=lambda picks, max_total=None: apply_exposure_limits(
             picks,
@@ -4112,8 +4088,8 @@ def apuestas_hoy_para_telegram_lab(
         reference_bookmaker=REFERENCE_BOOKMAKER,
         perfiles_stake=PERFILES_STAKE,
         modos_informe=MODOS_INFORME,
-        get_bankroll=obtener_bankroll,
-        update_bankroll=actualizar_bankroll,
+        get_bankroll=obtener_bankroll_seguro,
+        update_bankroll=actualizar_bankroll_seguro,
         resolve_context=resolver_contexto_deporte,
         resolve_markets=resolver_mercados,
         list_sport_options=lambda: opciones_deporte_disponibles(),
@@ -4151,10 +4127,7 @@ def apuestas_hoy_para_telegram_lab(
             policy=policy,
             league_penalties=league_penalties,
         ),
-        build_performance_guard=lambda: build_performance_guard(
-            load_dashboard=dashboard_data,
-            operating_mode=RISK_OPERATING_MODE,
-        ),
+        build_performance_guard=performance_guard_actual,
         apply_performance_guard_to_pick=apply_performance_guard_to_pick,
         apply_exposure_limits=lambda picks, max_total=None: apply_exposure_limits(
             picks,
@@ -4273,10 +4246,7 @@ def apuestas_hoy_para_telegram_ultracompacta(
             policy=policy,
             league_penalties=league_penalties,
         ),
-        build_performance_guard=lambda: build_performance_guard(
-            load_dashboard=dashboard_data,
-            operating_mode=RISK_OPERATING_MODE,
-        ),
+        build_performance_guard=performance_guard_actual,
         apply_performance_guard_to_pick=apply_performance_guard_to_pick,
         apply_exposure_limits=lambda picks, max_total=None: apply_exposure_limits(
             picks,

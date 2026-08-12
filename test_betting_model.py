@@ -92,6 +92,18 @@ class BettingModelTests(unittest.TestCase):
     def test_event_time_label_convierte_utc_a_hora_madrid(self):
         self.assertEqual(_event_time_label("2026-07-29T17:00:00Z"), "19:00")
 
+    def test_resolver_mercados_explicitos_filtra_spreads_en_tenis(self):
+        mercados, aviso = resolver_mercados("h2h,spreads,totals", deporte="tennis_atp_canadian_open")
+
+        self.assertEqual(mercados, ["h2h", "totals"])
+        self.assertIsNone(aviso)
+
+    def test_resolver_mercados_explicitos_filtra_spreads_en_futbol(self):
+        mercados, aviso = resolver_mercados("h2h,spreads,totals", deporte="soccer_spain_la_liga")
+
+        self.assertEqual(mercados, ["h2h", "totals"])
+        self.assertIsNone(aviso)
+
     def test_normalizar_probabilidades_suma_uno(self):
         outcomes = PARTIDOS_FAKE[0]["bookmakers"][0]["markets"][0]["outcomes"]
         normalizadas = normalizar_probabilidades(outcomes)
@@ -4627,32 +4639,45 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(main.telegram_command_jobs[job_id]["state"], "completed")
         self.assertEqual(main.telegram_command_jobs[job_id]["phase"], "completed")
 
-    def test_construir_publicacion_apuestas_lab_usa_forecast_ultracompacto_para_telegram(self):
+    def test_construir_publicacion_apuestas_lab_usa_build_lab_run(self):
         import main
 
-        original_forecast_compacto = main.apuestas_hoy_para_telegram_ultracompacta
+        original_build_lab_run = main.build_lab_run
 
         captured: dict[str, object] = {}
 
         try:
-            def fake_forecast_compacto(**kwargs):
+            def fake_build_lab_run(**kwargs):
                 captured["called"] = True
                 captured["kwargs"] = kwargs
                 return {
-                    "sport_label": "Todo",
-                    "league_label": "Todas las ligas base",
-                    "criterio": "Agregado multi-deporte sobre deportes base soportados",
-                    "total_analizadas": 12,
-                    "total_recomendadas": 1,
-                    "snapshots_guardados": 30,
-                    "partidos_disponibles": [{"id": "1"}],
-                    "mejores_apuestas": [],
-                    "picks_elite": [],
-                    "descartadas": [],
-                    "blocked_summary": {},
+                    "forecast": {
+                        "sport_label": "Todo",
+                        "league_label": "Todas las ligas base",
+                        "criterio": "Agregado multi-deporte sobre deportes base soportados",
+                        "total_analizadas": 12,
+                        "total_recomendadas": 1,
+                        "snapshots_guardados": 30,
+                        "partidos_disponibles": [{"id": "1"}],
+                        "mejores_apuestas": [],
+                        "picks_elite": [],
+                        "descartadas": [],
+                        "blocked_summary": {},
+                    },
+                    "forecast_summary": {
+                        "total_analizadas": 12,
+                        "total_recomendadas": 1,
+                        "total_descartadas_preview": 0,
+                    },
+                    "telegram_preview": {
+                        "deporte": "Todo",
+                        "liga": "Todas las ligas base",
+                        "pronosticos": [],
+                        "mensajes_telegram": [],
+                    },
                 }
 
-            main.apuestas_hoy_para_telegram_ultracompacta = fake_forecast_compacto
+            main.build_lab_run = fake_build_lab_run
 
             result = main.construir_publicacion_apuestas_lab(
                 bankroll=200.0,
@@ -4664,11 +4689,12 @@ class BettingModelTests(unittest.TestCase):
                 solo_stakazos=False,
             )
         finally:
-            main.apuestas_hoy_para_telegram_ultracompacta = original_forecast_compacto
+            main.build_lab_run = original_build_lab_run
 
         self.assertTrue(captured.get("called"))
         self.assertEqual(captured["kwargs"]["deporte"], "todo")
         self.assertEqual(captured["kwargs"]["perfil"], "agresivo")
+        self.assertEqual(captured["kwargs"]["simulation_mode"], "live")
         self.assertIn("payload", result)
         self.assertIn("zero_picks_diagnostics", result)
 
