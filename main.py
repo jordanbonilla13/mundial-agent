@@ -1832,11 +1832,18 @@ def seleccionar_picks_para_apuestas_lab(
         return base[:4]
 
     now = datetime.now(timezone.utc)
+    max_hours_ahead = 48.0
 
     def _is_reasonable_pick(pick: dict[str, Any]) -> bool:
         cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or pick.get("cuota") or 0)
         quality = float(pick.get("quality_score") or 0)
         reliability = float(pick.get("reliability_score") or 0)
+        commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
+        if commence is None:
+            return False
+        delta_hours = (commence - now).total_seconds() / 3600
+        if delta_hours < 0 or delta_hours > max_hours_ahead:
+            return False
         if cuota <= 0 or cuota > 3.4:
             return False
         return quality >= 55 or reliability >= 68
@@ -1846,16 +1853,16 @@ def seleccionar_picks_para_apuestas_lab(
         if commence is None:
             return (3, 9999.0, -float(pick.get("quality_score") or 0), -float(pick.get("reliability_score") or 0))
         delta_hours = (commence - now).total_seconds() / 3600
-        if delta_hours < -2:
-            bucket = 4
-        elif delta_hours <= 12:
+        if delta_hours <= 6:
             bucket = 0
         elif delta_hours <= 24:
             bucket = 1
         elif delta_hours <= 36:
             bucket = 2
-        else:
+        elif delta_hours <= max_hours_ahead:
             bucket = 3
+        else:
+            bucket = 4
         return (bucket, max(delta_hours, 0.0), -float(pick.get("quality_score") or 0), -float(pick.get("reliability_score") or 0))
 
     reasonable = [pick for pick in base if _is_reasonable_pick(pick)]
@@ -1904,6 +1911,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
     penalty_map = penalizaciones_historicas_seguras()
     risk_policy = politica_riesgo_actual()
     performance_guard = performance_guard_actual()
+    max_pick_hours = 48.0
 
     if deporte == "todo":
         deportes_objetivo = deportes_agregados_para_todo(
@@ -2021,7 +2029,12 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
             }
         )
 
-    recomendadas_ordenadas = sorted(recomendadas_total, key=prioridad_pick_todo, reverse=True)
+    recomendadas_ordenadas = []
+    for pick in sorted(recomendadas_total, key=prioridad_pick_todo, reverse=True):
+        delta_hours = hours_until_pick(pick)
+        if delta_hours is None or delta_hours < 0 or delta_hours > max_pick_hours:
+            continue
+        recomendadas_ordenadas.append(pick)
     max_publicables = min(telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos), 4)
     recomendadas_ordenadas = apply_exposure_limits(
         recomendadas_ordenadas,
@@ -2075,7 +2088,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         "partidos_disponibles": list({item["id"]: item for item in partidos_total if item.get("id")}.values()),
         "aviso_mercados": None,
         "aviso_cobertura": (
-            f"Modo ampliado /apuestas: {len(deportes_objetivo)} ligas revisadas con mercados featured y filtro final de mejores picks."
+            f"Modo ampliado /apuestas: {len(deportes_objetivo)} ligas revisadas con mercados featured y filtro final de mejores picks en las proximas 48h."
         ),
         "cobertura_deportes": cobertura,
         "errores_cobertura": errores_cobertura,

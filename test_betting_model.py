@@ -4639,6 +4639,45 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(main.telegram_command_jobs[job_id]["state"], "completed")
         self.assertEqual(main.telegram_command_jobs[job_id]["phase"], "completed")
 
+    def test_seleccionar_picks_para_apuestas_lab_limita_a_48_horas(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_selector = main.seleccionar_picks_para_telegram
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 12, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            main.seleccionar_picks_para_telegram = lambda *args, **kwargs: [
+                {
+                    "partido": "Near Match",
+                    "commence_time": "2026-08-13T10:00:00Z",
+                    "cuota_apuesta": 1.95,
+                    "quality_score": 80,
+                    "reliability_score": 80,
+                },
+                {
+                    "partido": "Far Match",
+                    "commence_time": "2026-08-15T18:30:00Z",
+                    "cuota_apuesta": 1.95,
+                    "quality_score": 88,
+                    "reliability_score": 84,
+                },
+            ]
+
+            picks = main.seleccionar_picks_para_apuestas_lab({"mejores_apuestas": []})
+        finally:
+            main.seleccionar_picks_para_telegram = original_selector
+            main.datetime = original_datetime
+
+        partidos = [pick["partido"] for pick in picks]
+        self.assertEqual(partidos, ["Near Match"])
+
     def test_construir_publicacion_apuestas_lab_usa_analisis_directo(self):
         import main
 
@@ -4761,6 +4800,129 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("payload", result)
         self.assertIn("zero_picks_diagnostics", result)
         self.assertGreaterEqual(len(result["payload"].get("pronosticos") or []), 1)
+
+    def test_construir_publicacion_apuestas_lab_descarta_picks_mas_alla_de_48_horas(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_cuotas = main.cuotas
+        original_analizar = main.analizar_comparador_casas
+        original_penalizaciones = main.penalizaciones_historicas_seguras
+        original_riesgo = main.politica_riesgo_actual
+        original_performance = main.performance_guard_actual
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 12, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+
+            main.cuotas = lambda **kwargs: [
+                {
+                    "id": "evt1",
+                    "commence_time": "2026-08-13T22:00:00Z",
+                    "home_team": "Team A",
+                    "away_team": "Team B",
+                    "bookmakers": [],
+                },
+                {
+                    "id": "evt2",
+                    "commence_time": "2026-08-15T18:30:00Z",
+                    "home_team": "Team C",
+                    "away_team": "Team D",
+                    "bookmakers": [],
+                },
+            ]
+
+            def fake_analizar(partidos, elos, **kwargs):
+                return [
+                    {
+                        "event_id": partido["id"],
+                        "commence_time": partido["commence_time"],
+                        "sport_key": "soccer_spain_la_liga",
+                        "sport_label": "Futbol",
+                        "league_key": "spain_la_liga",
+                        "league_label": "Spain La Liga",
+                        "partido": f"{partido['home_team']} vs {partido['away_team']}",
+                        "casa": "Coolbet",
+                        "mercado": "totals",
+                        "equipo": "Under 3",
+                        "tipo_resultado": "totals",
+                        "cuota_pinnacle": 1.9,
+                        "cuota_minima_aceptable": 1.8,
+                        "margen_cuota": 1.05,
+                        "probabilidad_mercado": 0.5,
+                        "probabilidad_modelo": 0.58,
+                        "valor_esperado": 0.12,
+                        "kelly_fraccional": 0.03,
+                        "stake_pct_bankroll": 3.0,
+                        "importe_sugerido": 6.0,
+                        "stake": 2.0,
+                        "recomendacion": "Value moderado",
+                        "motivo": "Filtro de valor y margen superado",
+                        "cuota_apuesta": 2.0,
+                        "casa_referencia": "Pinnacle",
+                        "cuota_referencia_pinnacle": 1.9,
+                        "ventaja_sobre_pinnacle": 0.03,
+                        "outcome_point": 3.0,
+                        "outcome_description": "Under",
+                        "confianza": "Media",
+                        "puntuacion_confianza": 70,
+                        "quality_score": 88,
+                        "reliability_score": 74,
+                        "reliability_tier": "alta",
+                        "elite_pick": True,
+                        "elite_tier": "elite",
+                        "source_strength": "market+model",
+                        "market_support_count": 3,
+                        "market_consensus_odds": 1.94,
+                        "market_best_odds": 2.0,
+                        "market_worst_odds": 1.87,
+                        "market_width_pct": 0.03,
+                        "market_edge_vs_consensus": 0.02,
+                    }
+                    for partido in partidos
+                ]
+
+            main.analizar_comparador_casas = fake_analizar
+            main.penalizaciones_historicas_seguras = lambda: {}
+            main.politica_riesgo_actual = lambda: {
+                "sample_stage": "seed",
+                "stake_multiplier": 1.0,
+                "max_stake_units": 5.0,
+                "block_new_picks": False,
+                "block_fragile_markets": False,
+                "only_elite_when_cautious": False,
+                "reason": "normal",
+            }
+            main.performance_guard_actual = lambda: {
+                "blocked_sports": {},
+                "blocked_leagues": {},
+            }
+
+            result = main.construir_publicacion_apuestas_lab(
+                bankroll=200.0,
+                perfil="agresivo",
+                modo="comparador",
+                mercados="h2h,totals",
+                partido="todos",
+                deporte="soccer_spain_la_liga",
+                solo_stakazos=False,
+            )
+        finally:
+            main.cuotas = original_cuotas
+            main.analizar_comparador_casas = original_analizar
+            main.penalizaciones_historicas_seguras = original_penalizaciones
+            main.politica_riesgo_actual = original_riesgo
+            main.performance_guard_actual = original_performance
+            main.datetime = original_datetime
+
+        pronosticos = result["payload"].get("pronosticos") or []
+        partidos = [pick["partido"] for pick in pronosticos]
+        self.assertEqual(partidos, ["Team A vs Team B"])
 
     def test_deportes_agregados_para_todo_ultracompacta_respeta_ligas_desactivadas(self):
         import main
