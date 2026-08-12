@@ -42,9 +42,11 @@ from app.calibration import (
 from app.engine import ForecastEngine, ForecastRequest
 from app.forecast_service import ForecastDependencies, run_forecast_request
 from app.forecasting import (
+    apply_market_regime_guard,
     attach_context_to_pick,
     enrich_pick_ranking,
     execution_score_for_pick,
+    market_signal_label,
     ranking_score_for_pick,
     source_strength_for_context,
     stake_limit_text,
@@ -1891,70 +1893,258 @@ def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[
 
 
 def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
-    forced_live = RuntimeSettings(
-        environment=RUNTIME_SETTINGS.environment,
-        shadow_mode=False,
+    bankroll = float(kwargs.get("bankroll") or TELEGRAM_APUESTAS_DEFAULTS.get("bankroll") or 200.0)
+    perfil = str(kwargs.get("perfil") or "agresivo").strip() or "agresivo"
+    modo = str(kwargs.get("modo") or "comparador").strip() or "comparador"
+    mercados = str(kwargs.get("mercados") or "h2h,spreads,totals").strip() or "h2h,spreads,totals"
+    partido = str(kwargs.get("partido") or "todos").strip() or "todos"
+    deporte = str(kwargs.get("deporte") or "todo").strip() or "todo"
+    solo_stakazos = bool(kwargs.get("solo_stakazos"))
+
+    penalty_map = penalizaciones_historicas_seguras()
+    risk_policy = politica_riesgo_actual()
+    performance_guard = performance_guard_actual()
+
+    if deporte == "todo":
+        deportes_objetivo = deportes_agregados_para_todo(
+            max_total=12,
+            strict_family_limits=False,
+        )
+        sport_label = "Todo"
+        league_label = "Todas las ligas base"
+        criterio = "Agregado ampliado multi-deporte para Telegram"
+    else:
+        contexto = resolver_contexto_deporte(deporte)
+        deportes_objetivo = [str(contexto.get("catalog_key") or deporte).strip().lower()]
+        sport_label = str(contexto.get("sport_label") or "General")
+        league_label = str(contexto.get("league_label") or sport_label)
+        criterio = f"Analisis compacto de {league_label}"
+
+    cobertura: list[dict[str, Any]] = []
+    errores_cobertura: list[dict[str, str]] = []
+    partidos_total: list[dict[str, Any]] = []
+    recomendadas_total: list[dict[str, Any]] = []
+    descartadas_total: list[dict[str, Any]] = []
+    total_analizadas = 0
+    elo_cache: dict[str, int] | None = None
+
+    for deporte_item in deportes_objetivo:
+        contexto = resolver_contexto_deporte(deporte_item)
+        mercados_lista, aviso_mercados = resolver_mercados(mercados, deporte=deporte_item)
+        mercados_featured = [market for market in mercados_lista if market in FEATURED_MARKETS] or ["h2h"]
+
+        try:
+            data_partidos = cuotas(
+                mercados=",".join(mercados_featured),
+                deporte=deporte_item,
+            )
+            partidos = filtrar_partidos(data_partidos, partido)
+            partidos_dispo = partidos_disponibles(partidos)
+            partidos_total.extend(
+                [
+                    {
+                        **item,
+                        "label": f"{contexto.get('league_label')} | {item.get('label')}",
+                    }
+                    for item in partidos_dispo
+                ]
+            )
+
+            if source_strength_for_context(
+                str(contexto.get("catalog_key") or ""),
+                bool(contexto.get("supports_elo")),
+            ) == "market+model":
+                if elo_cache is None:
+                    try:
+                        elo_cache = obtener_elos()
+                    except Exception:
+                        elo_cache = {}
+            elos = elo_cache or {}
+
+            recomendaciones_crudas = analizar_comparador_casas(
+                partidos,
+                elos,
+                bankroll=bankroll,
+                perfil=perfil,
+                casa_referencia=REFERENCE_BOOKMAKER,
+                incluir_referencia=False,
+                mercados=mercados_featured,
+                source_strength=source_strength_for_context(
+                    str(contexto.get("catalog_key") or ""),
+                    bool(contexto.get("supports_elo")),
+                ),
+            )
+        except Exception as exc:
+            errores_cobertura.append({"deporte": deporte_item, "detail": str(exc)})
+            continue
+
+        procesadas: list[dict[str, Any]] = []
+        for rec in recomendaciones_crudas:
+            pick = traducir_apuesta(rec)
+            pick = attach_context_to_pick(
+                pick,
+                perfil=perfil,
+                perfil_label=perfil_es(perfil),
+                modo=modo,
+                modo_label=modo_es(modo),
+                filtro_mercados=mercados,
+                contexto_deporte=contexto,
+            )
+            pick = aplicar_penalizacion_historica_segura_pick(pick, penalty_map)
+            pick = apply_risk_policy_to_pick(
+                pick,
+                policy=risk_policy,
+                league_penalties=None,
+            )
+            pick = apply_performance_guard_to_pick(pick, performance_guard)
+            pick = enriquecer_pick_ranking_seguro(pick)
+            procesadas.append(pick)
+
+        total_analizadas += len(procesadas)
+        recomendadas = [
+            pick
+            for pick in procesadas
+            if float(pick.get("stake") or 0) > 0
+            and str(pick.get("recomendacion") or "").strip().lower() != "no apostar"
+        ]
+        descartadas = [pick for pick in procesadas if pick not in recomendadas]
+        recomendadas_total.extend(recomendadas)
+        descartadas_total.extend(descartadas)
+        cobertura.append(
+            {
+                "deporte": deporte_item,
+                "sport_label": contexto.get("sport_label"),
+                "league_label": contexto.get("league_label"),
+                "partidos": len(partidos_dispo),
+                "recomendadas": len(recomendadas),
+                "aviso_mercados": aviso_mercados,
+            }
+        )
+
+    recomendadas_ordenadas = sorted(recomendadas_total, key=prioridad_pick_todo, reverse=True)
+    max_publicables = min(telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos), 4)
+    recomendadas_ordenadas = apply_exposure_limits(
+        recomendadas_ordenadas,
+        operating_mode=RISK_OPERATING_MODE,
+        max_total=max_publicables,
     )
-    lab_data = build_lab_run(
-        runtime_settings=forced_live,
-        publication_guard=lambda: {
-            "allow_live_publication": True,
-            "mode": "apuestas_lab",
-            "reasons": ["manual_lab_publish"],
-            "stats": {},
-        },
-        run_forecast=lambda request: apuestas_hoy_para_telegram_ultracompacta(
-            bankroll=request.bankroll,
-            perfil=request.perfil,
-            modo=request.modo,
-            mercados=request.mercados,
-            partido=request.partido,
-            guardar=request.guardar,
-            deporte=request.deporte,
-            solo_elite=request.solo_elite,
-            solo_stakazos=request.solo_stakazos,
-            historical_mode=request.historical_mode,
-            historical_date=request.historical_date,
-            historical_from=request.historical_from,
-            historical_to=request.historical_to,
+    recomendadas_ordenadas = limitar_picks_todo(
+        recomendadas_ordenadas,
+        max_total=max_publicables,
+        operating_mode=RISK_OPERATING_MODE,
+    )
+
+    elite = [pick for pick in recomendadas_ordenadas if bool(pick.get("elite_pick"))]
+    stakazos = [pick for pick in elite if str(pick.get("elite_tier") or "").lower() == "stakazo"]
+    premium = [pick for pick in recomendadas_ordenadas if str(pick.get("elite_tier") or "").lower() == "premium"]
+    seguimiento = [pick for pick in recomendadas_ordenadas if str(pick.get("elite_tier") or "").lower() == "seguimiento"]
+
+    blocked_summary = {
+        "risk_count": len([pick for pick in descartadas_total if bool(pick.get("risk_guard_blocked"))]),
+        "performance_count": len([pick for pick in descartadas_total if bool(pick.get("performance_guard_blocked"))]),
+        "risk_reasons": [],
+        "performance_reasons": [],
+    }
+
+    forecast = {
+        "criterio": criterio,
+        "aviso": standard_risk_disclaimer(),
+        "proveedor_cuotas": ODDS_PROVIDER,
+        "casa_referencia": REFERENCE_BOOKMAKER,
+        "casa_referencia_fallback": False,
+        "bankroll": bankroll,
+        "perfil": perfil,
+        "perfil_es": perfil_es(perfil),
+        "modo": modo,
+        "sport_key": "multi_sport" if deporte == "todo" else resolver_contexto_deporte(deporte).get("sport_key"),
+        "sport_label": sport_label,
+        "league_key": "multi_league" if deporte == "todo" else resolver_contexto_deporte(deporte).get("league_key"),
+        "league_label": league_label,
+        "deporte": "todo" if deporte == "todo" else deporte,
+        "solo_elite": False,
+        "solo_stakazos": solo_stakazos,
+        "simulation_mode": "live",
+        "historical_mode": False,
+        "historical_snapshot_at": None,
+        "historical_range_from": None,
+        "historical_range_to": None,
+        "source_strength": "mixed" if deporte == "todo" else source_strength_for_context(deporte, bool(resolver_contexto_deporte(deporte).get("supports_elo"))),
+        "mercados": mercados,
+        "filtro_mercados": mercados,
+        "partido": partido,
+        "partidos_disponibles": list({item["id"]: item for item in partidos_total if item.get("id")}.values()),
+        "aviso_mercados": None,
+        "aviso_cobertura": (
+            f"Modo ampliado /apuestas: {len(deportes_objetivo)} ligas revisadas con mercados featured y filtro final de mejores picks."
         ),
-        build_prediction_payload=build_prediction_payload,
+        "cobertura_deportes": cobertura,
+        "errores_cobertura": errores_cobertura,
+        "snapshots_guardados": 0,
+        "modo_es": modo_es(modo),
+        "stake_maximo_por_pick": stake_limit_text(perfil),
+        "total_analizadas": total_analizadas,
+        "total_recomendadas": len(recomendadas_ordenadas),
+        "total_elite": len(elite),
+        "total_stakazos": len(stakazos),
+        "total_premium": len(premium),
+        "total_seguimiento": len(seguimiento),
+        "total_guardadas": 0,
+        "mejores_apuestas": recomendadas_ordenadas,
+        "picks_elite": stakazos[:10] if solo_stakazos else elite[:10],
+        "descartadas": sorted(descartadas_total, key=prioridad_pick, reverse=True)[:5],
+        "descartadas_operativas": sorted(descartadas_total, key=prioridad_pick, reverse=True)[:25],
+        "blocked_summary": blocked_summary,
+    }
+
+    payload = build_prediction_payload(
+        data=forecast,
+        solo_stakazos=solo_stakazos,
         ai_available=lambda: False,
         select_picks_for_telegram=seleccionar_picks_para_apuestas_lab,
         enrich_with_ai=lambda picks: picks,
         build_ai_summary=lambda *args, **inner_kwargs: None,
         format_pick_message=formatear_mensaje_telegram_pick,
         format_summary_message=format_summary_message,
-        fetch_scores=scores,
-        load_learning_summary=aprendizaje,
-        load_calibration_snapshot=generate_calibration_snapshot,
-        todo_toggle_panel=build_todo_toggle_groups(),
-        perfil=kwargs["perfil"],
-        modo=kwargs["modo"],
-        mercados=kwargs["mercados"],
-        partido=kwargs["partido"],
-        deporte=kwargs["deporte"],
-        bankroll=kwargs["bankroll"],
-        solo_stakazos=kwargs["solo_stakazos"],
-        simulation_mode="live",
-        historical_snapshot_at=None,
-        historical_range_from=None,
-        historical_range_to=None,
+        perfil=perfil,
+        modo=modo,
         perfiles_stake=PERFILES_STAKE,
         modos_informe=MODOS_INFORME,
         perfil_label=perfil_es,
         modo_label=modo_es,
     )
-    forecast = dict(lab_data.get("forecast") or {})
-    payload = dict(lab_data.get("telegram_preview") or {})
     payload["pronosticos"] = list(payload.get("pronosticos") or [])
     payload["mensajes_telegram"] = list(payload.get("mensajes_telegram") or [])
     diagnostics = {
-        **_build_apuestas_zero_diagnostics_from_lab(lab_data),
+        "analizadas": int(forecast.get("total_analizadas") or 0),
+        "recomendadas": int(forecast.get("total_recomendadas") or 0),
+        "descartadas_preview": len(list(forecast.get("descartadas") or [])),
+        "partidos_disponibles": len(list(forecast.get("partidos_disponibles") or [])),
+        "snapshots_guardados": 0,
+        "coverage_notice": str(forecast.get("aviso_cobertura") or "").strip(),
+        "base_criteria": str(forecast.get("criterio") or "").strip(),
+        "blocked_summary": dict(forecast.get("blocked_summary") or {}),
+        "top_discard_reasons": _build_apuestas_zero_diagnostics_from_lab(
+            {
+                "forecast_summary": {
+                    "total_analizadas": int(forecast.get("total_analizadas") or 0),
+                    "total_recomendadas": int(forecast.get("total_recomendadas") or 0),
+                    "total_descartadas_preview": len(list(forecast.get("descartadas") or [])),
+                },
+                "forecast": forecast,
+            }
+        ).get("top_discard_reasons", []),
         "publishable_preview": len(list(payload.get("pronosticos") or [])),
     }
     return {
-        "lab_data": lab_data,
+        "lab_data": {
+            "forecast": forecast,
+            "forecast_summary": {
+                "total_analizadas": int(forecast.get("total_analizadas") or 0),
+                "total_recomendadas": int(forecast.get("total_recomendadas") or 0),
+                "total_descartadas_preview": len(list(forecast.get("descartadas") or [])),
+            },
+            "telegram_preview": payload,
+        },
         "payload": payload,
         "zero_picks_diagnostics": diagnostics,
     }
@@ -2574,6 +2764,79 @@ def actualizar_bankroll_seguro(bankroll: float) -> float:
         return float(actualizar_bankroll(bankroll))
     except Exception:
         return float(bankroll)
+
+
+def penalizaciones_historicas_seguras() -> dict[str, Any]:
+    try:
+        return penalizaciones_historicas()
+    except Exception:
+        return {}
+
+
+def enriquecer_pick_ranking_seguro(apuesta: dict[str, Any]) -> dict[str, Any]:
+    ajustada = apply_market_regime_guard(apuesta.copy())
+    ajustada["market_signal"] = market_signal_label(
+        ajustada.get("market_support_count"),
+        ajustada.get("market_width_pct"),
+        ajustada.get("market_edge_vs_consensus"),
+    )
+    ajustada["execution_score"] = execution_score_for_pick(ajustada)
+    ajustada["ranking_score"] = ranking_score_for_pick(ajustada)
+    return ajustada
+
+
+def aplicar_penalizacion_historica_segura_pick(
+    apuesta: dict[str, Any],
+    penalizaciones: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    apuesta = apuesta.copy()
+    league_label = str(apuesta.get("league_label") or "")
+    market_label = str(apuesta.get("mercado") or "")
+    elite_tier = str(apuesta.get("elite_tier") or "seguimiento")
+    penalty_items = []
+
+    liga_penalty = penalizaciones.get("ligas", {}).get(league_label)
+    if liga_penalty:
+        penalty_items.append(("liga", league_label, liga_penalty))
+
+    league_market_key = f"{league_label}::{market_label}"
+    league_market_penalty = penalizaciones.get("ligas_mercados", {}).get(league_market_key)
+    if league_market_penalty:
+        penalty_items.append(("liga_mercado", league_market_key, league_market_penalty))
+
+    tier_penalty = penalizaciones.get("tiers", {}).get(elite_tier)
+    if tier_penalty:
+        penalty_items.append(("tier", elite_tier, tier_penalty))
+
+    if not penalty_items:
+        apuesta["historical_penalty_score"] = 0
+        apuesta["historical_penalty_level"] = "none"
+        apuesta["historical_penalty_reasons"] = []
+        return enriquecer_pick_ranking_seguro(apuesta)
+
+    total_penalty = sum(item[2]["penalty_score"] for item in penalty_items)
+    reasons = []
+
+    for scope, name, item in penalty_items:
+        for reason in item.get("reasons", []):
+            reasons.append(f"{scope}:{name}:{reason}")
+
+    apuesta["quality_score"] = max(0, int(apuesta.get("quality_score") or 0) - total_penalty)
+    apuesta["reliability_score"] = max(0, int(apuesta.get("reliability_score") or 0) - total_penalty)
+    apuesta["historical_penalty_score"] = total_penalty
+    apuesta["historical_penalty_level"] = "alta" if total_penalty >= 18 else "media" if total_penalty >= 12 else "moderada"
+    apuesta["historical_penalty_reasons"] = reasons
+
+    if total_penalty >= 18:
+        apuesta["elite_pick"] = False
+        apuesta["elite_tier"] = "seguimiento"
+    elif total_penalty >= 10 and str(apuesta.get("elite_tier") or "").lower() == "stakazo":
+        apuesta["elite_tier"] = "elite"
+
+    if reasons:
+        apuesta["historical_penalty_summary_es"] = resumir_penalizacion_historica(reasons)
+
+    return enriquecer_pick_ranking_seguro(apuesta)
 
 
 class ResultadoPick(BaseModel):
@@ -4001,7 +4264,7 @@ def apuestas_hoy(
         select_reference_house=seleccionar_casa_referencia,
         analyze_comparison=analizar_comparador_casas,
         translate_pick=traducir_apuesta,
-        historical_penalties=penalizaciones_historicas,
+        historical_penalties=penalizaciones_historicas_seguras,
         apply_historical_penalty=aplicar_penalizacion_historica,
         sort_key_pick=prioridad_pick,
         sort_key_todo=prioridad_pick_todo,
@@ -4105,7 +4368,7 @@ def apuestas_hoy_para_telegram_lab(
         select_reference_house=seleccionar_casa_referencia,
         analyze_comparison=analizar_comparador_casas,
         translate_pick=traducir_apuesta,
-        historical_penalties=penalizaciones_historicas,
+        historical_penalties=penalizaciones_historicas_seguras,
         apply_historical_penalty=aplicar_penalizacion_historica,
         sort_key_pick=prioridad_pick,
         sort_key_todo=prioridad_pick_todo,
@@ -4224,7 +4487,7 @@ def apuestas_hoy_para_telegram_ultracompacta(
         select_reference_house=seleccionar_casa_referencia,
         analyze_comparison=analizar_comparador_casas,
         translate_pick=traducir_apuesta,
-        historical_penalties=penalizaciones_historicas,
+        historical_penalties=penalizaciones_historicas_seguras,
         apply_historical_penalty=aplicar_penalizacion_historica,
         sort_key_pick=prioridad_pick,
         sort_key_todo=prioridad_pick_todo,

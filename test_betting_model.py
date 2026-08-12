@@ -4639,45 +4639,104 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(main.telegram_command_jobs[job_id]["state"], "completed")
         self.assertEqual(main.telegram_command_jobs[job_id]["phase"], "completed")
 
-    def test_construir_publicacion_apuestas_lab_usa_build_lab_run(self):
+    def test_construir_publicacion_apuestas_lab_usa_analisis_directo(self):
         import main
 
-        original_build_lab_run = main.build_lab_run
+        original_cuotas = main.cuotas
+        original_analizar = main.analizar_comparador_casas
+        original_penalizaciones = main.penalizaciones_historicas_seguras
+        original_riesgo = main.politica_riesgo_actual
+        original_performance = main.performance_guard_actual
 
         captured: dict[str, object] = {}
 
         try:
-            def fake_build_lab_run(**kwargs):
-                captured["called"] = True
-                captured["kwargs"] = kwargs
-                return {
-                    "forecast": {
-                        "sport_label": "Todo",
-                        "league_label": "Todas las ligas base",
-                        "criterio": "Agregado multi-deporte sobre deportes base soportados",
-                        "total_analizadas": 12,
-                        "total_recomendadas": 1,
-                        "snapshots_guardados": 30,
-                        "partidos_disponibles": [{"id": "1"}],
-                        "mejores_apuestas": [],
-                        "picks_elite": [],
-                        "descartadas": [],
-                        "blocked_summary": {},
-                    },
-                    "forecast_summary": {
-                        "total_analizadas": 12,
-                        "total_recomendadas": 1,
-                        "total_descartadas_preview": 0,
-                    },
-                    "telegram_preview": {
-                        "deporte": "Todo",
-                        "liga": "Todas las ligas base",
-                        "pronosticos": [],
-                        "mensajes_telegram": [],
-                    },
-                }
+            def fake_cuotas(**kwargs):
+                captured["cuotas"] = kwargs
+                return [
+                    {
+                        "id": "evt1",
+                        "commence_time": "2026-08-12T22:00:00Z",
+                        "home_team": "Rafael Jodar",
+                        "away_team": "Brandon Nakashima",
+                        "bookmakers": [],
+                    }
+                ]
 
-            main.build_lab_run = fake_build_lab_run
+            def fake_analizar(partidos, elos, **kwargs):
+                captured["analizar"] = {
+                    "partidos": partidos,
+                    "elos": elos,
+                    "kwargs": kwargs,
+                }
+                return [
+                    {
+                        "event_id": "evt1",
+                        "commence_time": "2026-08-12T22:00:00Z",
+                        "sport_key": "tennis_atp_canadian_open",
+                        "sport_label": "Tenis",
+                        "league_key": "atp_canadian_open",
+                        "league_label": "Atp Canadian Open",
+                        "partido": "Rafael Jodar vs Brandon Nakashima",
+                        "casa": "Matchbook",
+                        "mercado": "totals",
+                        "equipo": "Under 22",
+                        "tipo_resultado": "totals",
+                        "cuota_pinnacle": 1.9,
+                        "cuota_minima_aceptable": 1.8,
+                        "margen_cuota": 1.05,
+                        "probabilidad_mercado": 0.5,
+                        "probabilidad_elo": None,
+                        "probabilidad_modelo": 0.58,
+                        "elo_equipo": None,
+                        "elo_rival": None,
+                        "valor_esperado": 0.12,
+                        "kelly_fraccional": 0.03,
+                        "stake_pct_bankroll": 3.0,
+                        "importe_sugerido": 6.0,
+                        "stake": 2.0,
+                        "recomendacion": "Value moderado",
+                        "motivo": "Filtro de valor y margen superado",
+                        "cuota_apuesta": 2.0,
+                        "casa_referencia": "Pinnacle",
+                        "cuota_referencia_pinnacle": 1.9,
+                        "ventaja_sobre_pinnacle": 0.03,
+                        "outcome_point": 22.0,
+                        "outcome_description": "Under",
+                        "modelo_mercado": None,
+                        "confianza": "Media",
+                        "puntuacion_confianza": 70,
+                        "quality_score": 88,
+                        "reliability_score": 74,
+                        "reliability_tier": "alta",
+                        "elite_pick": True,
+                        "elite_tier": "elite",
+                        "source_strength": "tennis_model",
+                        "market_support_count": 3,
+                        "market_consensus_odds": 1.94,
+                        "market_best_odds": 2.0,
+                        "market_worst_odds": 1.87,
+                        "market_width_pct": 0.03,
+                        "market_edge_vs_consensus": 0.02,
+                    }
+                ]
+
+            main.cuotas = fake_cuotas
+            main.analizar_comparador_casas = fake_analizar
+            main.penalizaciones_historicas_seguras = lambda: {}
+            main.politica_riesgo_actual = lambda: {
+                "sample_stage": "seed",
+                "stake_multiplier": 1.0,
+                "max_stake_units": 5.0,
+                "block_new_picks": False,
+                "block_fragile_markets": False,
+                "only_elite_when_cautious": False,
+                "reason": "normal",
+            }
+            main.performance_guard_actual = lambda: {
+                "blocked_sports": {},
+                "blocked_leagues": {},
+            }
 
             result = main.construir_publicacion_apuestas_lab(
                 bankroll=200.0,
@@ -4685,18 +4744,23 @@ class BettingModelTests(unittest.TestCase):
                 modo="comparador",
                 mercados="h2h,spreads,totals",
                 partido="todos",
-                deporte="todo",
+                deporte="tennis_atp_canadian_open",
                 solo_stakazos=False,
             )
         finally:
-            main.build_lab_run = original_build_lab_run
+            main.cuotas = original_cuotas
+            main.analizar_comparador_casas = original_analizar
+            main.penalizaciones_historicas_seguras = original_penalizaciones
+            main.politica_riesgo_actual = original_riesgo
+            main.performance_guard_actual = original_performance
 
-        self.assertTrue(captured.get("called"))
-        self.assertEqual(captured["kwargs"]["deporte"], "todo")
-        self.assertEqual(captured["kwargs"]["perfil"], "agresivo")
-        self.assertEqual(captured["kwargs"]["simulation_mode"], "live")
+        self.assertIn("cuotas", captured)
+        self.assertIn("analizar", captured)
+        self.assertEqual(captured["cuotas"]["deporte"], "tennis_atp_canadian_open")
+        self.assertEqual(captured["analizar"]["kwargs"]["perfil"], "agresivo")
         self.assertIn("payload", result)
         self.assertIn("zero_picks_diagnostics", result)
+        self.assertGreaterEqual(len(result["payload"].get("pronosticos") or []), 1)
 
     def test_deportes_agregados_para_todo_ultracompacta_respeta_ligas_desactivadas(self):
         import main
