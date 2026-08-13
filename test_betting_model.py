@@ -5145,6 +5145,59 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 3 goles"])
 
+    def test_seleccionar_picks_para_apuestas_lab_sustituye_under_futbol_por_siguiente_linea_si_cumple_cuota(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        selected_pick = {
+            "event_id": "evt-3",
+            "sport_key": "soccer_concacaf_leagues_cup",
+            "partido": "Portland Timbers vs Tijuana",
+            "equipo": "Menos de 3 goles",
+            "mercado": "totals",
+            "outcome_point": 3.0,
+            "elite_tier": "elite",
+            "commence_time": "2026-08-14T10:00:00Z",
+            "cuota_apuesta": 1.96,
+            "quality_score": 62,
+            "reliability_score": 46,
+            "valor_esperado": 0.064,
+        }
+        safer_pick = {
+            "event_id": "evt-3",
+            "sport_key": "soccer_concacaf_leagues_cup",
+            "partido": "Portland Timbers vs Tijuana",
+            "equipo": "Menos de 4 goles",
+            "mercado": "alternate_totals",
+            "outcome_point": 4.0,
+            "elite_tier": "seguimiento",
+            "commence_time": "2026-08-14T10:00:00Z",
+            "cuota_apuesta": 1.57,
+            "quality_score": 50,
+            "reliability_score": 44,
+            "valor_esperado": 0.025,
+        }
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [selected_pick],
+                    "mejores_apuestas_ampliadas": [selected_pick, safer_pick],
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 4 goles"])
+
     def test_construir_publicacion_apuestas_lab_no_mete_seguimiento_en_picks_elite(self):
         import main
 

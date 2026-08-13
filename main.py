@@ -2111,6 +2111,69 @@ def _prefer_conservative_totals_pick(current: dict[str, Any], candidate: dict[st
     return candidate_balance >= current_balance - 8
 
 
+def _find_conservative_soccer_totals_alternative(
+    selected_pick: dict[str, Any],
+    candidate_pool: list[dict[str, Any]],
+    *,
+    min_odds: float = 1.4,
+) -> dict[str, Any] | None:
+    sport_key = str(selected_pick.get("sport_key") or "").strip().lower()
+    market = str(selected_pick.get("mercado") or "").strip().lower()
+    direction = _totals_direction_for_pick(selected_pick)
+    if not sport_key.startswith("soccer_") or market not in {"totals", "alternate_totals"} or direction != "under":
+        return None
+
+    group_key = _conservative_totals_group_key(selected_pick)
+    if not group_key:
+        return None
+
+    try:
+        selected_point = float(selected_pick.get("outcome_point"))
+        selected_odds = float(
+            selected_pick.get("cuota_apuesta") or selected_pick.get("cuota_pinnacle") or selected_pick.get("cuota") or 0
+        )
+    except (TypeError, ValueError):
+        return None
+
+    alternatives: list[dict[str, Any]] = []
+    for candidate in candidate_pool:
+        if candidate is selected_pick:
+            continue
+        if _conservative_totals_group_key(candidate) != group_key:
+            continue
+        try:
+            candidate_point = float(candidate.get("outcome_point"))
+            candidate_odds = float(
+                candidate.get("cuota_apuesta") or candidate.get("cuota_pinnacle") or candidate.get("cuota") or 0
+            )
+        except (TypeError, ValueError):
+            continue
+        if candidate_point <= selected_point:
+            continue
+        if candidate_odds < min_odds:
+            continue
+        if candidate_odds + 0.7 < selected_odds:
+            continue
+        if float(candidate.get("quality_score") or 0) < 45:
+            continue
+        if float(candidate.get("reliability_score") or 0) < 40:
+            continue
+        alternatives.append(candidate)
+
+    if not alternatives:
+        return None
+
+    alternatives.sort(
+        key=lambda pick: (
+            float(pick.get("outcome_point") or 0),
+            -float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or pick.get("cuota") or 0),
+            -float(pick.get("reliability_score") or 0),
+            -float(pick.get("quality_score") or 0),
+        )
+    )
+    return alternatives[0]
+
+
 def seleccionar_picks_para_apuestas_lab(
     data: dict[str, Any],
     solo_stakazos: bool = False,
@@ -2262,7 +2325,29 @@ def seleccionar_picks_para_apuestas_lab(
 
     reasonable = collapsed_reasonable + list(grouped_totals.values())
     reasonable.sort(key=_pick_sort_key)
-    return reasonable[:3]
+    selected = reasonable[:3]
+    candidate_pool = list(data.get("mejores_apuestas_ampliadas") or data.get("mejores_apuestas") or [])
+    refined_selected: list[dict[str, Any]] = []
+    for pick in selected:
+        alternative = _find_conservative_soccer_totals_alternative(pick, candidate_pool)
+        refined_selected.append(alternative or pick)
+
+    deduped_selected: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str, str, str, str]] = set()
+    for pick in refined_selected:
+        key = (
+            str(pick.get("event_id") or "").strip().lower(),
+            str(pick.get("mercado") or "").strip().lower(),
+            str(pick.get("tipo_resultado") or "").strip().lower(),
+            str(pick.get("equipo") or "").strip().lower(),
+            str(pick.get("casa") or "").strip().lower(),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped_selected.append(pick)
+
+    return deduped_selected[:3]
 
 
 def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[str, Any]:
