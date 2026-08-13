@@ -5275,6 +5275,59 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 4 goles"])
 
+    def test_seleccionar_picks_para_apuestas_lab_no_degrada_under_futbol_a_seguimiento(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        selected_pick = {
+            "event_id": "evt-3b",
+            "sport_key": "soccer_concacaf_leagues_cup",
+            "partido": "Portland Timbers vs Tijuana",
+            "equipo": "Menos de 3 goles",
+            "mercado": "totals",
+            "outcome_point": 3.0,
+            "elite_tier": "elite",
+            "commence_time": "2026-08-14T10:00:00Z",
+            "cuota_apuesta": 1.96,
+            "quality_score": 62,
+            "reliability_score": 52,
+            "valor_esperado": 0.064,
+        }
+        weaker_safer_pick = {
+            "event_id": "evt-3b",
+            "sport_key": "soccer_concacaf_leagues_cup",
+            "partido": "Portland Timbers vs Tijuana",
+            "equipo": "Menos de 4 goles",
+            "mercado": "alternate_totals",
+            "outcome_point": 4.0,
+            "elite_tier": "seguimiento",
+            "commence_time": "2026-08-14T10:00:00Z",
+            "cuota_apuesta": 1.57,
+            "quality_score": 50,
+            "reliability_score": 44,
+            "valor_esperado": 0.025,
+        }
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [selected_pick],
+                    "mejores_apuestas_ampliadas": [selected_pick, weaker_safer_pick],
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 3 goles"])
+
     def test_seleccionar_picks_para_apuestas_lab_sustituye_under_futbol_desde_cuotas_crudas(self):
         import main
         from datetime import datetime, timezone
@@ -5342,6 +5395,109 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual([pick["mercado"] for pick in picks], ["alternate_totals"])
         self.assertEqual([pick["cuota_apuesta"] for pick in picks], [1.57])
 
+    def test_seleccionar_picks_para_apuestas_lab_filtra_pick_final_por_quality_y_reliability(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [
+                        {
+                            "partido": "Pick floja pero elite",
+                            "elite_tier": "elite",
+                            "sport_key": "soccer_spain_la_liga",
+                            "mercado": "totals",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.95,
+                            "quality_score": 54,
+                            "reliability_score": 80,
+                        },
+                        {
+                            "partido": "Pick buena",
+                            "elite_tier": "elite",
+                            "sport_key": "soccer_spain_la_liga",
+                            "mercado": "h2h",
+                            "commence_time": "2026-08-14T11:00:00Z",
+                            "cuota_apuesta": 1.80,
+                            "quality_score": 70,
+                            "reliability_score": 62,
+                        },
+                    ]
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["partido"] for pick in picks], ["Pick buena"])
+
+    def test_seleccionar_picks_para_apuestas_lab_ordena_universo_elite_antes_del_recorte(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        elite_picks = []
+        for index in range(24):
+            elite_picks.append(
+                {
+                    "event_id": f"evt-{index}",
+                    "sport_key": "soccer_spain_la_liga",
+                    "partido": f"Total {index}",
+                    "equipo": "Menos de 3 goles",
+                    "mercado": "totals",
+                    "outcome_point": 3.0,
+                    "elite_tier": "elite",
+                    "commence_time": f"2026-08-13T{13 + (index % 8):02d}:00:00Z",
+                    "cuota_apuesta": 1.80,
+                    "quality_score": 60,
+                    "reliability_score": 55,
+                    "ranking_score": 60 - index,
+                }
+            )
+
+        elite_picks.append(
+            {
+                "event_id": "evt-h2h-strong",
+                "sport_key": "soccer_spain_la_liga",
+                "partido": "Sevilla vs Valencia",
+                "equipo": "Sevilla",
+                "mercado": "h2h",
+                "tipo_resultado": "home",
+                "elite_tier": "elite",
+                "commence_time": "2026-08-14T11:00:00Z",
+                "cuota_apuesta": 1.82,
+                "quality_score": 74,
+                "reliability_score": 62,
+                "ranking_score": 95,
+            }
+        )
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": elite_picks,
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertIn(("Sevilla vs Valencia", "h2h"), [(pick["partido"], pick["mercado"]) for pick in picks])
+
     def test_seleccionar_picks_para_apuestas_lab_desde_cuotas_crudas_prioriza_linea_mas_conservadora_sobre_minimo(self):
         import main
         from datetime import datetime, timezone
@@ -5403,6 +5559,223 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 3 goles"])
         self.assertEqual([pick["cuota_apuesta"] for pick in picks], [1.95])
+
+    def test_seleccionar_picks_para_apuestas_lab_inyecta_h2h_fuerte_de_futbol(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [
+                        {
+                            "event_id": "evt-a1",
+                            "sport_key": "soccer_concacaf_leagues_cup",
+                            "partido": "Match 1",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T13:00:00Z",
+                            "cuota_apuesta": 1.96,
+                            "quality_score": 66,
+                            "reliability_score": 55,
+                            "ranking_score": 76,
+                        },
+                        {
+                            "event_id": "evt-a2",
+                            "sport_key": "soccer_brazil_campeonato",
+                            "partido": "Match 2",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T14:00:00Z",
+                            "cuota_apuesta": 1.91,
+                            "quality_score": 65,
+                            "reliability_score": 54,
+                            "ranking_score": 75,
+                        },
+                        {
+                            "event_id": "evt-a3",
+                            "sport_key": "soccer_germany_bundesliga2",
+                            "partido": "Match 3",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T15:00:00Z",
+                            "cuota_apuesta": 1.88,
+                            "quality_score": 64,
+                            "reliability_score": 53,
+                            "ranking_score": 74,
+                        },
+                        {
+                            "event_id": "evt-a4",
+                            "sport_key": "soccer_usa_mls",
+                            "partido": "Match 4",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T16:00:00Z",
+                            "cuota_apuesta": 1.85,
+                            "quality_score": 63,
+                            "reliability_score": 52,
+                            "ranking_score": 73,
+                        },
+                        {
+                            "event_id": "evt-a5",
+                            "sport_key": "soccer_spain_la_liga",
+                            "partido": "Match 5",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T17:00:00Z",
+                            "cuota_apuesta": 1.82,
+                            "quality_score": 62,
+                            "reliability_score": 51,
+                            "ranking_score": 72,
+                        },
+                        {
+                            "event_id": "evt-b",
+                            "sport_key": "soccer_spain_la_liga",
+                            "partido": "Sevilla vs Valencia",
+                            "equipo": "Sevilla",
+                            "mercado": "h2h",
+                            "tipo_resultado": "home",
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T11:00:00Z",
+                            "cuota_apuesta": 1.82,
+                            "quality_score": 70,
+                            "reliability_score": 60,
+                            "ranking_score": 70,
+                        },
+                    ]
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertEqual(len(picks), 5)
+        self.assertIn(("Sevilla vs Valencia", "h2h"), [(pick["partido"], pick["mercado"]) for pick in picks])
+
+    def test_seleccionar_picks_para_apuestas_lab_no_inyecta_h2h_futbol_si_es_flojo(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [
+                        {
+                            "event_id": "evt-a1",
+                            "sport_key": "soccer_concacaf_leagues_cup",
+                            "partido": "Match 1",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T13:00:00Z",
+                            "cuota_apuesta": 1.96,
+                            "quality_score": 66,
+                            "reliability_score": 55,
+                            "ranking_score": 76,
+                        },
+                        {
+                            "event_id": "evt-a2",
+                            "sport_key": "soccer_brazil_campeonato",
+                            "partido": "Match 2",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T14:00:00Z",
+                            "cuota_apuesta": 1.91,
+                            "quality_score": 65,
+                            "reliability_score": 54,
+                            "ranking_score": 75,
+                        },
+                        {
+                            "event_id": "evt-a3",
+                            "sport_key": "soccer_germany_bundesliga2",
+                            "partido": "Match 3",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T15:00:00Z",
+                            "cuota_apuesta": 1.88,
+                            "quality_score": 64,
+                            "reliability_score": 53,
+                            "ranking_score": 74,
+                        },
+                        {
+                            "event_id": "evt-a4",
+                            "sport_key": "soccer_usa_mls",
+                            "partido": "Match 4",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T16:00:00Z",
+                            "cuota_apuesta": 1.85,
+                            "quality_score": 63,
+                            "reliability_score": 52,
+                            "ranking_score": 73,
+                        },
+                        {
+                            "event_id": "evt-a5",
+                            "sport_key": "soccer_spain_la_liga",
+                            "partido": "Match 5",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-13T17:00:00Z",
+                            "cuota_apuesta": 1.82,
+                            "quality_score": 62,
+                            "reliability_score": 51,
+                            "ranking_score": 72,
+                        },
+                        {
+                            "event_id": "evt-b",
+                            "sport_key": "soccer_spain_la_liga",
+                            "partido": "Sevilla vs Valencia",
+                            "equipo": "Sevilla",
+                            "mercado": "h2h",
+                            "tipo_resultado": "home",
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T11:00:00Z",
+                            "cuota_apuesta": 1.82,
+                            "quality_score": 55,
+                            "reliability_score": 49,
+                            "ranking_score": 69,
+                        },
+                    ]
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertNotIn(("Sevilla vs Valencia", "h2h"), [(pick["partido"], pick["mercado"]) for pick in picks])
 
     def test_construir_publicacion_apuestas_lab_no_mete_seguimiento_en_picks_elite(self):
         import main
@@ -5500,6 +5873,70 @@ class BettingModelTests(unittest.TestCase):
             main.performance_guard_actual = original_performance
 
         self.assertEqual((result.get("lab_data") or {}).get("forecast", {}).get("picks_elite"), [])
+
+    def test_construir_publicacion_apuestas_lab_alias_futbol_expande_ligas_activas(self):
+        import main
+
+        original_catalog = main.discover_available_catalog
+        original_cuotas = main.cuotas
+        original_analizar = main.analizar_comparador_casas
+        original_penalizaciones = main.penalizaciones_historicas_seguras
+        original_riesgo = main.politica_riesgo_actual
+        original_performance = main.performance_guard_actual
+
+        deportes_consultados: list[str] = []
+
+        try:
+            main.discover_available_catalog = lambda provider=None: {
+                "sports": [
+                    {"sport_key": "soccer_spain_la_liga", "active": True, "has_outrights": False},
+                    {"sport_key": "soccer_italy_serie_a", "active": True, "has_outrights": False},
+                    {"sport_key": "tennis_atp_canadian_open", "active": True, "has_outrights": False},
+                ]
+            }
+
+            def fake_cuotas(**kwargs):
+                deportes_consultados.append(str(kwargs.get("deporte") or ""))
+                return []
+
+            main.cuotas = fake_cuotas
+            main.analizar_comparador_casas = lambda *args, **kwargs: []
+            main.penalizaciones_historicas_seguras = lambda: {}
+            main.politica_riesgo_actual = lambda: {
+                "sample_stage": "seed",
+                "stake_multiplier": 1.0,
+                "max_stake_units": 5.0,
+                "block_new_picks": False,
+                "block_fragile_markets": False,
+                "only_elite_when_cautious": False,
+                "reason": "normal",
+            }
+            main.performance_guard_actual = lambda: {"blocked_sports": {}, "blocked_leagues": {}}
+
+            result = main.construir_publicacion_apuestas_lab(
+                bankroll=200.0,
+                perfil="agresivo",
+                modo="comparador",
+                mercados="todo",
+                partido="todos",
+                deporte="futbol",
+                solo_stakazos=False,
+            )
+        finally:
+            main.discover_available_catalog = original_catalog
+            main.cuotas = original_cuotas
+            main.analizar_comparador_casas = original_analizar
+            main.penalizaciones_historicas_seguras = original_penalizaciones
+            main.politica_riesgo_actual = original_riesgo
+            main.performance_guard_actual = original_performance
+
+        self.assertEqual(
+            deportes_consultados,
+            ["soccer_spain_la_liga", "soccer_italy_serie_a"],
+        )
+        forecast = ((result.get("lab_data") or {}).get("forecast") or {})
+        self.assertEqual(forecast.get("sport_label"), "Futbol")
+        self.assertEqual(forecast.get("league_label"), "Todas las ligas de Futbol")
 
     def test_aplicar_penalizacion_historica_segura_pick_conserva_tier_fuerte_en_agresivo(self):
         import main

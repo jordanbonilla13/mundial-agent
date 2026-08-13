@@ -813,6 +813,48 @@ def deportes_agregados_para_todo_ultracompacta(
     return seleccionados
 
 
+def contextos_activos_para_alias_generico(
+    deporte: str | None,
+    *,
+    provider: str | None = None,
+) -> list[dict[str, Any]]:
+    alias = str(deporte or "").strip().lower()
+    if not _is_generic_sport_alias(alias):
+        return []
+
+    fallback = sports_layer.resolver_contexto_deporte(alias)
+    target_family = family_from_sport_key(fallback.get("sport_key", ""))
+    if not target_family:
+        return []
+
+    try:
+        catalogo = discover_available_catalog(provider=provider)
+    except Exception:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in list(catalogo.get("sports") or []):
+        sport_key = str(item.get("sport_key") or "").strip().lower()
+        if not sport_key or sport_key in seen:
+            continue
+        if family_from_sport_key(sport_key) != target_family:
+            continue
+        if item.get("active", True) is False:
+            continue
+        if bool(item.get("has_outrights")):
+            continue
+        if "winner" in sport_key or "championship" in sport_key or "outright" in sport_key:
+            continue
+        context = build_dynamic_context_from_sport_key(sport_key)
+        context["catalog_key"] = sport_key
+        candidates.append(context)
+        seen.add(sport_key)
+
+    candidates.sort(key=prioridad_contexto_todo)
+    return candidates
+
+
 def enriquecer_eventos_contexto(eventos: list[dict], contexto: dict) -> list[dict]:
     return sports_layer.enriquecer_eventos_contexto(eventos, contexto)
 
@@ -2149,6 +2191,8 @@ def _find_conservative_soccer_totals_alternative(
     except (TypeError, ValueError):
         return None
 
+    selected_tier = str(selected_pick.get("elite_tier") or "").strip().lower()
+
     alternatives: list[dict[str, Any]] = []
     for candidate in candidate_pool:
         if candidate is selected_pick:
@@ -2165,6 +2209,9 @@ def _find_conservative_soccer_totals_alternative(
         if candidate_point <= selected_point:
             continue
         if candidate_odds < min_odds:
+            continue
+        candidate_tier = str(candidate.get("elite_tier") or "").strip().lower()
+        if selected_tier in {"stakazo", "elite"} and candidate_tier not in {"stakazo", "elite"}:
             continue
         if float(candidate.get("quality_score") or 0) < 45:
             continue
@@ -2278,6 +2325,14 @@ def seleccionar_picks_para_apuestas_lab(
     data: dict[str, Any],
     solo_stakazos: bool = False,
 ) -> list[dict[str, Any]]:
+    def _preselect_strength_key(pick: dict[str, Any]) -> tuple[float, float, float, float]:
+        return (
+            float(pick.get("ranking_score") or ranking_score_for_pick(pick)),
+            float(pick.get("reliability_score") or 0),
+            float(pick.get("quality_score") or 0),
+            float(pick.get("valor_esperado") or 0),
+        )
+
     allowed_tiers = {"stakazo"} if solo_stakazos else {"stakazo", "elite"}
     premium_fill_universe: list[dict[str, Any]] = []
     if solo_stakazos:
@@ -2285,7 +2340,9 @@ def seleccionar_picks_para_apuestas_lab(
             pick
             for pick in list(data.get("picks_elite") or [])
             if str(pick.get("elite_tier") or "").strip().lower() == "stakazo"
-        ][:8]
+        ]
+        base.sort(key=_preselect_strength_key, reverse=True)
+        base = base[:8]
     else:
         elite_universe = [
             pick
@@ -2293,18 +2350,22 @@ def seleccionar_picks_para_apuestas_lab(
             if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"}
         ]
         if elite_universe:
+            elite_universe.sort(key=_preselect_strength_key, reverse=True)
             base = elite_universe[:24]
             premium_fill_universe = [
                 pick
                 for pick in list(data.get("mejores_apuestas_ampliadas") or data.get("mejores_apuestas") or [])
                 if str(pick.get("elite_tier") or "").strip().lower() == "premium"
-            ][:24]
+            ]
+            premium_fill_universe.sort(key=_preselect_strength_key, reverse=True)
+            premium_fill_universe = premium_fill_universe[:24]
         else:
             premium_fill_universe = [
                 pick
                 for pick in list(data.get("mejores_apuestas_ampliadas") or data.get("mejores_apuestas") or [])
                 if str(pick.get("elite_tier") or "").strip().lower() == "premium"
             ]
+            premium_fill_universe.sort(key=_preselect_strength_key, reverse=True)
             base = premium_fill_universe[:24]
             allowed_tiers = {"premium"}
     if solo_stakazos:
@@ -2313,6 +2374,8 @@ def seleccionar_picks_para_apuestas_lab(
     now = datetime.now(timezone.utc)
     max_hours_ahead = 48.0
     selector_reasons: dict[str, int] = {}
+    min_final_quality = 55.0
+    min_final_reliability = 50.0
 
     def _bump_reason(reason: str) -> None:
         label = str(reason).strip()
@@ -2380,6 +2443,9 @@ def seleccionar_picks_para_apuestas_lab(
     def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, int, float, float, float, float, str, str, str]:
         tier = str(pick.get("elite_tier") or "").strip().lower()
         tier_priority = 0 if tier == "stakazo" else 1 if tier == "elite" else 2 if tier == "premium" else 3
+        sport_key = str(pick.get("sport_key") or "").strip().lower()
+        market = str(pick.get("mercado") or "").strip().lower()
+        market_bias = -1 if sport_key.startswith("soccer_") and market == "h2h" else 0
         try:
             point = float(pick.get("outcome_point") or 0)
         except (TypeError, ValueError):
@@ -2413,6 +2479,7 @@ def seleccionar_picks_para_apuestas_lab(
             bucket = 4
         return (
             bucket,
+            market_bias,
             tier_priority,
             -float(pick.get("reliability_score") or 0),
             -float(pick.get("quality_score") or 0),
@@ -2422,6 +2489,76 @@ def seleccionar_picks_para_apuestas_lab(
             mercado,
             casa,
         )
+
+    def _pick_strength_key(pick: dict[str, Any]) -> tuple[int, float, float, float]:
+        tier = str(pick.get("elite_tier") or "").strip().lower()
+        tier_priority = 3 if tier == "stakazo" else 2 if tier == "elite" else 1 if tier == "premium" else 0
+        return (
+            tier_priority,
+            float(pick.get("ranking_score") or ranking_score_for_pick(pick)),
+            float(pick.get("reliability_score") or 0),
+            float(pick.get("quality_score") or 0),
+        )
+
+    def _is_soccer_h2h_pick(pick: dict[str, Any]) -> bool:
+        sport_key = str(pick.get("sport_key") or "").strip().lower()
+        market = str(pick.get("mercado") or "").strip().lower()
+        return sport_key.startswith("soccer_") and market == "h2h"
+
+    def _is_soccer_totals_pick(pick: dict[str, Any]) -> bool:
+        sport_key = str(pick.get("sport_key") or "").strip().lower()
+        market = str(pick.get("mercado") or "").strip().lower()
+        return sport_key.startswith("soccer_") and market in {"totals", "alternate_totals"}
+
+    def _inject_soccer_h2h_diversity(
+        selected_picks: list[dict[str, Any]],
+        candidate_picks: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not selected_picks or any(_is_soccer_h2h_pick(pick) for pick in selected_picks):
+            return selected_picks
+
+        strong_h2h_candidates = [
+            pick
+            for pick in candidate_picks
+            if _is_soccer_h2h_pick(pick)
+            and float(pick.get("quality_score") or 0) >= 58
+            and float(pick.get("reliability_score") or 0) >= 52
+        ]
+        if not strong_h2h_candidates:
+            return selected_picks
+
+        best_h2h = max(strong_h2h_candidates, key=_pick_strength_key)
+        replaceable_indexes = [
+            index for index, pick in enumerate(selected_picks) if _is_soccer_totals_pick(pick)
+        ]
+        if not replaceable_indexes:
+            return selected_picks
+
+        weakest_index = min(replaceable_indexes, key=lambda index: _pick_strength_key(selected_picks[index]))
+        weakest_pick = selected_picks[weakest_index]
+        best_h2h_strength = _pick_strength_key(best_h2h)
+        weakest_strength = _pick_strength_key(weakest_pick)
+        if best_h2h_strength[0] < weakest_strength[0]:
+            return selected_picks
+        if best_h2h_strength[1] + 6 < weakest_strength[1]:
+            return selected_picks
+
+        updated = list(selected_picks)
+        updated[weakest_index] = best_h2h
+        return updated
+
+    def _passes_final_floor(pick: dict[str, Any]) -> bool:
+        quality = float(pick.get("quality_score") or 0)
+        reliability = float(pick.get("reliability_score") or 0)
+        if quality < min_final_quality:
+            _bump_reason(f"Filtro final Telegram: Quality por debajo del minimo ({int(quality)}/{int(min_final_quality)})")
+            return False
+        if reliability < min_final_reliability:
+            _bump_reason(
+                f"Filtro final Telegram: Reliability por debajo del minimo ({int(reliability)}/{int(min_final_reliability)})"
+            )
+            return False
+        return True
 
     reasonable = [pick for pick in base if _is_reasonable_pick(pick)]
     data["_apuestas_selector_candidates"] = len(base)
@@ -2499,7 +2636,9 @@ def seleccionar_picks_para_apuestas_lab(
             if len(deduped_selected) >= 5:
                 break
 
-    return deduped_selected[:5]
+    final_selected = _inject_soccer_h2h_diversity(deduped_selected[:5], reasonable)
+    final_selected = [pick for pick in final_selected if _passes_final_floor(pick)]
+    return final_selected[:5]
 
 
 def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[str, Any]:
@@ -2553,10 +2692,21 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         criterio = "Agregado ampliado multi-deporte para Telegram"
     else:
         contexto = resolver_contexto_deporte(deporte)
-        deportes_objetivo = [str(contexto.get("catalog_key") or deporte).strip().lower()]
-        sport_label = str(contexto.get("sport_label") or "General")
-        league_label = str(contexto.get("league_label") or sport_label)
-        criterio = f"Analisis compacto de {league_label}"
+        generic_contexts = contextos_activos_para_alias_generico(deporte)
+        if generic_contexts:
+            deportes_objetivo = [
+                str(item.get("catalog_key") or item.get("sport_key") or "").strip().lower()
+                for item in generic_contexts
+                if str(item.get("catalog_key") or item.get("sport_key") or "").strip()
+            ]
+            sport_label = str(contexto.get("sport_label") or "General")
+            league_label = f"Todas las ligas de {sport_label}"
+            criterio = f"Analisis compacto multi-liga de {sport_label}"
+        else:
+            deportes_objetivo = [str(contexto.get("catalog_key") or deporte).strip().lower()]
+            sport_label = str(contexto.get("sport_label") or "General")
+            league_label = str(contexto.get("league_label") or sport_label)
+            criterio = f"Analisis compacto de {league_label}"
 
     cobertura: list[dict[str, Any]] = []
     errores_cobertura: list[dict[str, str]] = []
