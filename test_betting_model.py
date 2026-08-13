@@ -566,6 +566,34 @@ class BettingModelTests(unittest.TestCase):
         self.assertTrue(adjusted["risk_guard_blocked"])
         self.assertIn("guard de mercado", adjusted["motivo"])
 
+    def test_apply_risk_policy_agresivo_no_bloquea_no_elite_en_modo_cautela(self):
+        pick = {
+            "stake": 2,
+            "importe_sugerido": 8,
+            "stake_pct_bankroll": 0.03,
+            "kelly_fraccional": 0.025,
+            "market_signal": "consenso_medio",
+            "elite_pick": False,
+            "league_label": "Liga X",
+            "motivo": "Valor positivo con exposicion controlada",
+        }
+        policy = {
+            "operating_mode": "agresivo",
+            "sample_stage": "growing",
+            "stake_multiplier": 0.8,
+            "max_stake_units": 3.0,
+            "block_new_picks": False,
+            "block_fragile_markets": False,
+            "only_elite_when_cautious": True,
+            "reason": "roi_negativo",
+        }
+
+        adjusted = apply_risk_policy_to_pick(pick, policy=policy, league_penalties={})
+
+        self.assertFalse(adjusted["risk_guard_blocked"])
+        self.assertLessEqual(adjusted["stake"], 0.75)
+        self.assertIn("modo agresivo permite no-elite", adjusted["motivo"])
+
     def test_build_risk_policy_agresivo_relaja_frenos_con_muestra_corta(self):
         policy = build_risk_policy(
             total_closed=6,

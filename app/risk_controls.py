@@ -163,14 +163,28 @@ def apply_risk_policy_to_pick(
         return adjusted
 
     if policy.get("only_elite_when_cautious") and not bool(adjusted.get("elite_pick")):
-        adjusted["stake"] = 0
-        adjusted["importe_sugerido"] = 0
-        adjusted["stake_pct_bankroll"] = 0
-        adjusted["kelly_fraccional"] = 0
-        adjusted["recomendacion"] = "No apostar"
-        adjusted["motivo"] = "Modo cautela: solo se permiten picks elite hasta mejorar el rendimiento."
-        adjusted["risk_guard_blocked"] = True
-        return adjusted
+        if _aggressive_risk_mode(policy.get("operating_mode")):
+            adjusted["risk_policy_reason"] = "cautela_no_elite_omitida_agresivo"
+            adjusted["stake"] = min(float(adjusted.get("stake") or 0), 0.75)
+            if adjusted.get("importe_sugerido") is not None:
+                adjusted["importe_sugerido"] = min(float(adjusted.get("importe_sugerido") or 0), 4.0)
+            if adjusted.get("stake_pct_bankroll") is not None:
+                adjusted["stake_pct_bankroll"] = min(float(adjusted.get("stake_pct_bankroll") or 0), 0.015)
+            if adjusted.get("kelly_fraccional") is not None:
+                adjusted["kelly_fraccional"] = min(float(adjusted.get("kelly_fraccional") or 0), 0.01)
+            motivo = str(adjusted.get("motivo") or "").strip()
+            sufijo = " | Stake recortado: modo agresivo permite no-elite con exposicion minima."
+            adjusted["motivo"] = f"{motivo}{sufijo}".strip()
+            return adjusted
+        else:
+            adjusted["stake"] = 0
+            adjusted["importe_sugerido"] = 0
+            adjusted["stake_pct_bankroll"] = 0
+            adjusted["kelly_fraccional"] = 0
+            adjusted["recomendacion"] = "No apostar"
+            adjusted["motivo"] = "Modo cautela: solo se permiten picks elite hasta mejorar el rendimiento."
+            adjusted["risk_guard_blocked"] = True
+            return adjusted
 
     league_label = str(adjusted.get("league_label") or "")
     league_penalty = (league_penalties or {}).get(league_label)
