@@ -4695,7 +4695,7 @@ class BettingModelTests(unittest.TestCase):
                 return [
                     {
                         "id": "evt1",
-                        "commence_time": "2026-08-12T22:00:00Z",
+                        "commence_time": "2026-08-14T22:00:00Z",
                         "home_team": "Rafael Jodar",
                         "away_team": "Brandon Nakashima",
                         "bookmakers": [],
@@ -4711,7 +4711,7 @@ class BettingModelTests(unittest.TestCase):
                 return [
                     {
                         "event_id": "evt1",
-                        "commence_time": "2026-08-12T22:00:00Z",
+                        "commence_time": "2026-08-14T22:00:00Z",
                         "sport_key": "tennis_atp_canadian_open",
                         "sport_label": "Tenis",
                         "league_key": "atp_canadian_open",
@@ -4995,6 +4995,116 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertNotIn("basketball_nba_championship_winner", seleccionados)
         self.assertIn("tennis_atp_canadian_open", seleccionados)
+
+    def test_resolver_mercados_para_todo_filtrado_omite_markets_desactivados(self):
+        import main
+
+        original_resolver = main.resolver_mercados
+        original_cargar = main.cargar_filtros_todo
+
+        try:
+            main.resolver_mercados = lambda filtro, deporte=None: (["h2h", "totals", "spreads"], None)
+            main.cargar_filtros_todo = lambda: {
+                "disabled_sports": set(),
+                "disabled_leagues": set(),
+                "disabled_markets": {"totals"},
+            }
+
+            mercados, aviso = main.resolver_mercados_para_todo_filtrado("todo", deporte="tennis_atp_canadian_open")
+        finally:
+            main.resolver_mercados = original_resolver
+            main.cargar_filtros_todo = original_cargar
+
+        self.assertEqual(mercados, ["h2h", "spreads"])
+        self.assertIsNone(aviso)
+
+    def test_build_todo_toggle_groups_incluye_markets(self):
+        import main
+
+        original_cargar = main.cargar_filtros_todo
+        original_opciones = main.opciones_deporte_disponibles
+
+        try:
+            main.cargar_filtros_todo = lambda: {
+                "disabled_sports": set(),
+                "disabled_leagues": set(),
+                "disabled_markets": {"totals"},
+            }
+            main.opciones_deporte_disponibles = lambda provider=None: []
+
+            panel = main.build_todo_toggle_groups()
+        finally:
+            main.cargar_filtros_todo = original_cargar
+            main.opciones_deporte_disponibles = original_opciones
+
+        market_map = {item["key"]: item for item in panel["markets"]}
+        self.assertIn("totals", market_map)
+        self.assertFalse(market_map["totals"]["enabled"])
+
+    def test_construir_publicacion_apuestas_lab_respeta_markets_desactivados_en_todo(self):
+        import main
+
+        original_deportes = main.deportes_agregados_para_todo
+        original_resolver_markets = main.resolver_mercados_para_todo_filtrado
+        original_resolver_contexto = main.resolver_contexto_deporte
+        original_cuotas = main.cuotas
+        original_analizar = main.analizar_comparador_casas
+        original_penalizaciones = main.penalizaciones_historicas_seguras
+        original_riesgo = main.politica_riesgo_actual
+        original_performance = main.performance_guard_actual
+
+        captured = {}
+
+        try:
+            main.deportes_agregados_para_todo = lambda **kwargs: ["tennis_atp_canadian_open"]
+            main.resolver_mercados_para_todo_filtrado = lambda filtro, deporte=None: (["h2h"], "totals apagado")
+            main.resolver_contexto_deporte = lambda value: {
+                "catalog_key": value,
+                "sport_key": "tennis_atp_canadian_open",
+                "sport_label": "Tenis",
+                "league_label": "Atp Canadian Open",
+                "supports_elo": True,
+            }
+            main.cuotas = lambda **kwargs: [{"id": "evt1", "commence_time": "2026-08-13T22:00:00Z", "home_team": "A", "away_team": "B", "bookmakers": []}]
+
+            def fake_analizar(partidos, elos, **kwargs):
+                captured["mercados"] = list(kwargs.get("mercados") or [])
+                return []
+
+            main.analizar_comparador_casas = fake_analizar
+            main.penalizaciones_historicas_seguras = lambda: {}
+            main.politica_riesgo_actual = lambda: {
+                "sample_stage": "seed",
+                "stake_multiplier": 1.0,
+                "max_stake_units": 5.0,
+                "block_new_picks": False,
+                "block_fragile_markets": False,
+                "only_elite_when_cautious": False,
+                "reason": "normal",
+            }
+            main.performance_guard_actual = lambda: {"blocked_sports": {}, "blocked_leagues": {}}
+
+            result = main.construir_publicacion_apuestas_lab(
+                bankroll=200.0,
+                perfil="agresivo",
+                modo="comparador",
+                mercados="todo",
+                partido="todos",
+                deporte="todo",
+                solo_stakazos=False,
+            )
+        finally:
+            main.deportes_agregados_para_todo = original_deportes
+            main.resolver_mercados_para_todo_filtrado = original_resolver_markets
+            main.resolver_contexto_deporte = original_resolver_contexto
+            main.cuotas = original_cuotas
+            main.analizar_comparador_casas = original_analizar
+            main.penalizaciones_historicas_seguras = original_penalizaciones
+            main.politica_riesgo_actual = original_riesgo
+            main.performance_guard_actual = original_performance
+
+        self.assertEqual(captured["mercados"], ["h2h"])
+        self.assertIn("48h", result["lab_data"]["forecast"]["aviso_cobertura"])
 
     def test_build_the_odds_query_params_usa_bookmakers_recomendados_por_defecto(self):
         import app.providers as providers

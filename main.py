@@ -266,21 +266,29 @@ def cargar_filtros_todo() -> dict[str, set[str]]:
         for item in (data.get("disabled_leagues") or [])
         if str(item).strip()
     }
+    mercados = {
+        str(item).strip().lower()
+        for item in (data.get("disabled_markets") or [])
+        if str(item).strip()
+    }
     return {
         "disabled_sports": deportes,
         "disabled_leagues": ligas,
+        "disabled_markets": mercados,
     }
 
 
-def guardar_filtros_todo(*, disabled_sports: set[str], disabled_leagues: set[str]) -> dict[str, set[str]]:
+def guardar_filtros_todo(*, disabled_sports: set[str], disabled_leagues: set[str], disabled_markets: set[str]) -> dict[str, set[str]]:
     payload = {
         "disabled_sports": sorted({str(item).strip().lower() for item in disabled_sports if str(item).strip()}),
         "disabled_leagues": sorted({str(item).strip().lower() for item in disabled_leagues if str(item).strip()}),
+        "disabled_markets": sorted({str(item).strip().lower() for item in disabled_markets if str(item).strip()}),
     }
     guardar_setting(TODO_FILTERS_SETTING, json.dumps(payload, ensure_ascii=False))
     return {
         "disabled_sports": set(payload["disabled_sports"]),
         "disabled_leagues": set(payload["disabled_leagues"]),
+        "disabled_markets": set(payload["disabled_markets"]),
     }
 
 
@@ -288,6 +296,7 @@ def build_todo_toggle_groups(provider: str | None = None) -> dict[str, Any]:
     filtros = cargar_filtros_todo()
     disabled_sports = filtros["disabled_sports"]
     disabled_leagues = filtros["disabled_leagues"]
+    disabled_markets = filtros["disabled_markets"]
     sports_items = [
         {"key": key, "label": info.get("sport_label", key), "enabled": key not in disabled_sports}
         for key, info in SPORT_CATALOG.items()
@@ -310,11 +319,21 @@ def build_todo_toggle_groups(provider: str | None = None) -> dict[str, Any]:
             }
         )
     league_items.sort(key=lambda item: item["label"])
+    market_items = [
+        {
+            "key": market,
+            "label": etiqueta_mercado_toggle(market),
+            "enabled": market not in disabled_markets,
+        }
+        for market in sorted(MERCADOS_DISPONIBLES)
+    ]
     return {
         "disabled_sports": disabled_sports,
         "disabled_leagues": disabled_leagues,
+        "disabled_markets": disabled_markets,
         "sports": sports_items,
         "leagues": league_items,
+        "markets": market_items,
     }
 
 
@@ -738,8 +757,41 @@ def etiqueta_filtro_mercado(filtro: str) -> str:
     return sports_layer.etiqueta_filtro_mercado(filtro)
 
 
+def etiqueta_mercado_toggle(mercado: str | None) -> str:
+    market = str(mercado or "").strip().lower()
+    labels = {
+        "h2h": "Ganador",
+        "spreads": "Handicap",
+        "totals": "Totales",
+        "alternate_totals": "Totales alternativos",
+        "team_totals": "Totales por equipo",
+        "alternate_team_totals": "Totales alternativos por equipo",
+        "double_chance": "Doble oportunidad",
+        "btts": "Ambos anotan",
+        "totals_h1": "Totales 1a mitad / 1er set",
+        "totals_h2": "Totales 2a mitad / 2o set",
+        "corners_1x2": "Corners 1X2",
+        "alternate_totals_corners": "Totales de corners",
+        "alternate_team_totals_corners": "Corners por equipo",
+        "alternate_totals_cards": "Totales de tarjetas",
+        "alternate_spreads_cards": "Handicap de tarjetas",
+        "alternate_spreads_corners": "Handicap de corners",
+    }
+    return labels.get(market, market or "Mercado")
+
+
 def etiqueta_mercado_visible(mercado: str | None) -> str:
-    return etiqueta_filtro_mercado(str(mercado or "").strip().lower())
+    market = str(mercado or "").strip().lower()
+    return etiqueta_mercado_toggle(market)
+
+
+def aplicar_filtros_mercados_todo(mercados: list[str]) -> list[str]:
+    filtros = cargar_filtros_todo()
+    disabled_markets = {str(item).strip().lower() for item in (filtros.get("disabled_markets") or set()) if str(item).strip()}
+    if not disabled_markets:
+        return list(mercados)
+    filtrados = [mercado for mercado in mercados if str(mercado).strip().lower() not in disabled_markets]
+    return filtrados
 
 
 def telegram_text(value: Any) -> str:
@@ -1938,7 +1990,22 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
 
     for deporte_item in deportes_objetivo:
         contexto = resolver_contexto_deporte(deporte_item)
-        mercados_lista, aviso_mercados = resolver_mercados(mercados, deporte=deporte_item)
+        if deporte == "todo":
+            mercados_lista, aviso_mercados = resolver_mercados_para_todo_filtrado(mercados, deporte=deporte_item)
+        else:
+            mercados_lista, aviso_mercados = resolver_mercados(mercados, deporte=deporte_item)
+        if not mercados_lista:
+            cobertura.append(
+                {
+                    "deporte": deporte_item,
+                    "sport_label": contexto.get("sport_label"),
+                    "league_label": contexto.get("league_label"),
+                    "partidos": 0,
+                    "recomendadas": 0,
+                    "aviso_mercados": aviso_mercados,
+                }
+            )
+            continue
         mercados_featured = [market for market in mercados_lista if market in FEATURED_MARKETS] or ["h2h"]
 
         try:
@@ -3808,6 +3875,16 @@ def resolver_mercados(filtro: str, deporte: str | None = None) -> tuple[list[str
     return mercados, aviso
 
 
+def resolver_mercados_para_todo_filtrado(filtro: str, deporte: str | None = None) -> tuple[list[str], str | None]:
+    mercados, aviso = resolver_mercados(filtro, deporte=deporte)
+    filtrados = aplicar_filtros_mercados_todo(mercados)
+    if filtrados:
+        return filtrados, aviso
+    return [], (
+        "Todos los mercados compatibles para este contexto estan desactivados en el panel de deporte=todo."
+    )
+
+
 def estimar_probabilidad_basica(cuota: float) -> float:
     prob = probabilidad_implicita(cuota)
 
@@ -4359,6 +4436,7 @@ def apuestas_hoy_para_telegram_lab(
     historical_from: str | None = None,
     historical_to: str | None = None,
 ):
+    resolve_markets_fn = resolver_mercados_para_todo_filtrado if str(deporte).strip().lower() == "todo" else resolver_mercados
     deps = ForecastDependencies(
         provider_name=ODDS_PROVIDER,
         reference_bookmaker=REFERENCE_BOOKMAKER,
@@ -4367,7 +4445,7 @@ def apuestas_hoy_para_telegram_lab(
         get_bankroll=obtener_bankroll_seguro,
         update_bankroll=actualizar_bankroll_seguro,
         resolve_context=resolver_contexto_deporte,
-        resolve_markets=resolver_mercados,
+        resolve_markets=resolve_markets_fn,
         list_sport_options=lambda: opciones_deporte_disponibles(),
         aggregate_sports=lambda: deportes_agregados_para_todo(
             max_total=10,
@@ -5178,27 +5256,34 @@ async def lab_run_todo_filters(request: Request):
     key = str(form.get("key") or "").strip().lower()
     enabled = str(form.get("enabled") or "").strip().lower() == "true"
 
-    if scope not in {"sport", "league"} or not key:
+    if scope not in {"sport", "league", "market"} or not key:
         raise HTTPException(status_code=400, detail="Filtro no valido")
 
     filtros = cargar_filtros_todo()
     disabled_sports = set(filtros["disabled_sports"])
     disabled_leagues = set(filtros["disabled_leagues"])
+    disabled_markets = set(filtros.get("disabled_markets") or set())
 
     if scope == "sport":
         if enabled:
             disabled_sports.discard(key)
         else:
             disabled_sports.add(key)
-    else:
+    elif scope == "league":
         if enabled:
             disabled_leagues.discard(key)
         else:
             disabled_leagues.add(key)
+    else:
+        if enabled:
+            disabled_markets.discard(key)
+        else:
+            disabled_markets.add(key)
 
     guardar_filtros_todo(
         disabled_sports=disabled_sports,
         disabled_leagues=disabled_leagues,
+        disabled_markets=disabled_markets,
     )
 
     query = _redirect_query_for_lab_filters(form)
