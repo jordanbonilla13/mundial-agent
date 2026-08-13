@@ -2289,7 +2289,11 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
                 filtro_mercados=mercados,
                 contexto_deporte=contexto,
             )
-            pick = aplicar_penalizacion_historica_segura_pick(pick, penalty_map)
+            pick = aplicar_penalizacion_historica_segura_pick(
+                pick,
+                penalty_map,
+                preserve_tier_for_aggressive=perfil in {"agresivo", "alto_riesgo"},
+            )
             pick = apply_risk_policy_to_pick(
                 pick,
                 policy=risk_policy,
@@ -3139,11 +3143,15 @@ def enriquecer_pick_ranking_seguro(apuesta: dict[str, Any]) -> dict[str, Any]:
 def aplicar_penalizacion_historica_segura_pick(
     apuesta: dict[str, Any],
     penalizaciones: dict[str, dict[str, Any]],
+    *,
+    preserve_tier_for_aggressive: bool = False,
 ) -> dict[str, Any]:
     apuesta = apuesta.copy()
     league_label = str(apuesta.get("league_label") or "")
     market_label = str(apuesta.get("mercado") or "")
     elite_tier = str(apuesta.get("elite_tier") or "seguimiento")
+    original_tier = elite_tier
+    original_elite_pick = bool(apuesta.get("elite_pick"))
     penalty_items = []
 
     liga_penalty = penalizaciones.get("ligas", {}).get(league_label)
@@ -3179,8 +3187,12 @@ def aplicar_penalizacion_historica_segura_pick(
     apuesta["historical_penalty_reasons"] = reasons
 
     if total_penalty >= 18:
-        apuesta["elite_pick"] = False
-        apuesta["elite_tier"] = "seguimiento"
+        if preserve_tier_for_aggressive and original_tier in {"stakazo", "elite", "premium"}:
+            apuesta["elite_tier"] = "elite" if original_tier == "stakazo" else original_tier
+            apuesta["elite_pick"] = original_elite_pick and apuesta["elite_tier"] in {"stakazo", "elite"}
+        else:
+            apuesta["elite_pick"] = False
+            apuesta["elite_tier"] = "seguimiento"
     elif total_penalty >= 10 and str(apuesta.get("elite_tier") or "").lower() == "stakazo":
         apuesta["elite_tier"] = "elite"
 

@@ -5106,6 +5106,40 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual((result.get("lab_data") or {}).get("forecast", {}).get("picks_elite"), [])
 
+    def test_aplicar_penalizacion_historica_segura_pick_conserva_tier_fuerte_en_agresivo(self):
+        import main
+
+        pick = {
+            "elite_pick": True,
+            "elite_tier": "elite",
+            "quality_score": 91,
+            "reliability_score": 87,
+            "league_label": "Spain La Liga",
+            "mercado": "h2h",
+        }
+        penalizaciones = {
+            "ligas": {
+                "Spain La Liga": {
+                    "penalty_score": 18,
+                    "level": "alta",
+                    "reasons": ["Historico malo"],
+                    "sample_closed": 12,
+                }
+            },
+            "ligas_mercados": {},
+            "tiers": {},
+        }
+
+        adjusted = main.aplicar_penalizacion_historica_segura_pick(
+            pick,
+            penalizaciones,
+            preserve_tier_for_aggressive=True,
+        )
+
+        self.assertEqual(adjusted["elite_tier"], "elite")
+        self.assertTrue(adjusted["elite_pick"])
+        self.assertEqual(adjusted["historical_penalty_level"], "alta")
+
     def test_construir_publicacion_apuestas_lab_usa_analisis_directo(self):
         import main
 
