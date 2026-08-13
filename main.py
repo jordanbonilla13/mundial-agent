@@ -2174,6 +2174,73 @@ def _find_conservative_soccer_totals_alternative(
     return alternatives[0]
 
 
+def _find_conservative_soccer_totals_from_event_odds(
+    selected_pick: dict[str, Any],
+    event_data: dict[str, Any] | None,
+    *,
+    min_odds: float = 1.4,
+) -> dict[str, Any] | None:
+    if not event_data:
+        return None
+    sport_key = str(selected_pick.get("sport_key") or "").strip().lower()
+    market = str(selected_pick.get("mercado") or "").strip().lower()
+    direction = _totals_direction_for_pick(selected_pick)
+    casa = str(selected_pick.get("casa") or "").strip().lower()
+    if not sport_key.startswith("soccer_") or market not in {"totals", "alternate_totals"} or direction != "under":
+        return None
+
+    try:
+        selected_point = float(selected_pick.get("outcome_point"))
+        selected_odds = float(
+            selected_pick.get("cuota_apuesta") or selected_pick.get("cuota_pinnacle") or selected_pick.get("cuota") or 0
+        )
+    except (TypeError, ValueError):
+        return None
+
+    best: tuple[float, float, dict[str, Any]] | None = None
+    for bookmaker in list(event_data.get("bookmakers") or []):
+        title = str(bookmaker.get("title") or "").strip().lower()
+        if casa and title != casa:
+            continue
+        for market_data in list(bookmaker.get("markets") or []):
+            market_key = str(market_data.get("key") or "").strip().lower()
+            if market_key not in {"totals", "alternate_totals"}:
+                continue
+            for outcome in list(market_data.get("outcomes") or []):
+                name = str(outcome.get("name") or "").strip().lower()
+                if name != "under":
+                    continue
+                try:
+                    point = float(outcome.get("point"))
+                    price = float(outcome.get("price"))
+                except (TypeError, ValueError):
+                    continue
+                if point <= selected_point or price < min_odds or price + 0.7 < selected_odds:
+                    continue
+                candidate = dict(selected_pick)
+                candidate["mercado"] = market_key
+                candidate["equipo_raw"] = "Under"
+                candidate["equipo"] = apuesta_es(
+                    "Under",
+                    market_key,
+                    point,
+                    candidate.get("outcome_description"),
+                    candidate.get("sport_key"),
+                    candidate.get("sport_label"),
+                )
+                candidate["equipo_es"] = candidate["equipo"]
+                candidate["outcome_point"] = point
+                candidate["cuota_apuesta"] = price
+                candidate["cuota"] = price
+                candidate["casa"] = bookmaker.get("title") or candidate.get("casa")
+                candidate["motivo"] = str(candidate.get("motivo") or "").strip()
+                candidate["motivo_es"] = candidate["motivo"]
+                sort_key = (point, -price)
+                if best is None or sort_key < (best[0], best[1]):
+                    best = (sort_key[0], sort_key[1], candidate)
+    return best[2] if best else None
+
+
 def seleccionar_picks_para_apuestas_lab(
     data: dict[str, Any],
     solo_stakazos: bool = False,
@@ -2327,9 +2394,16 @@ def seleccionar_picks_para_apuestas_lab(
     reasonable.sort(key=_pick_sort_key)
     selected = reasonable[:3]
     candidate_pool = list(data.get("mejores_apuestas_ampliadas") or data.get("mejores_apuestas") or [])
+    event_odds_map = dict(data.get("_event_odds_map") or {})
     refined_selected: list[dict[str, Any]] = []
     for pick in selected:
         alternative = _find_conservative_soccer_totals_alternative(pick, candidate_pool)
+        if alternative is None:
+            event_id = str(pick.get("event_id") or "").strip()
+            alternative = _find_conservative_soccer_totals_from_event_odds(
+                pick,
+                event_odds_map.get(event_id),
+            )
         refined_selected.append(alternative or pick)
 
     deduped_selected: list[dict[str, Any]] = []
@@ -2409,6 +2483,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
     cobertura: list[dict[str, Any]] = []
     errores_cobertura: list[dict[str, str]] = []
     partidos_total: list[dict[str, Any]] = []
+    raw_event_odds_map: dict[str, dict[str, Any]] = {}
     recomendadas_total: list[dict[str, Any]] = []
     descartadas_total: list[dict[str, Any]] = []
     total_analizadas = 0
@@ -2441,6 +2516,10 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
                 deporte=deporte_item,
             )
             partidos = filtrar_partidos(data_partidos, partido)
+            for evento in partidos:
+                event_id = str(evento.get("id") or "").strip()
+                if event_id:
+                    raw_event_odds_map[event_id] = evento
             partidos_dispo = partidos_disponibles(partidos)
             partidos_total.extend(
                 [
@@ -2617,6 +2696,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         "mejores_apuestas": recomendadas_ordenadas,
         "mejores_apuestas_ampliadas": recomendadas_ordenadas_full[:120],
         "picks_elite": stakazos_full[:20] if solo_stakazos else elite_full[:40],
+        "_event_odds_map": raw_event_odds_map,
         "descartadas": sorted(descartadas_total, key=prioridad_pick, reverse=True)[:5],
         "descartadas_operativas": sorted(descartadas_total, key=prioridad_pick, reverse=True)[:120],
         "blocked_summary": blocked_summary,
