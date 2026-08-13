@@ -2279,6 +2279,7 @@ def seleccionar_picks_para_apuestas_lab(
     solo_stakazos: bool = False,
 ) -> list[dict[str, Any]]:
     allowed_tiers = {"stakazo"} if solo_stakazos else {"stakazo", "elite"}
+    premium_fill_universe: list[dict[str, Any]] = []
     if solo_stakazos:
         base = [
             pick
@@ -2293,13 +2294,18 @@ def seleccionar_picks_para_apuestas_lab(
         ]
         if elite_universe:
             base = elite_universe[:24]
+            premium_fill_universe = [
+                pick
+                for pick in list(data.get("mejores_apuestas_ampliadas") or data.get("mejores_apuestas") or [])
+                if str(pick.get("elite_tier") or "").strip().lower() == "premium"
+            ][:24]
         else:
-            premium_universe = [
+            premium_fill_universe = [
                 pick
                 for pick in list(data.get("mejores_apuestas_ampliadas") or data.get("mejores_apuestas") or [])
                 if str(pick.get("elite_tier") or "").strip().lower() == "premium"
             ]
-            base = premium_universe[:24]
+            base = premium_fill_universe[:24]
             allowed_tiers = {"premium"}
     if solo_stakazos:
         return base[:4]
@@ -2474,6 +2480,24 @@ def seleccionar_picks_para_apuestas_lab(
             continue
         seen_keys.add(key)
         deduped_selected.append(pick)
+
+    if not solo_stakazos and len(deduped_selected) < 5 and premium_fill_universe:
+        premium_candidates = [pick for pick in premium_fill_universe if _is_reasonable_pick(pick)]
+        premium_candidates.sort(key=_pick_sort_key)
+        for pick in premium_candidates:
+            key = (
+                str(pick.get("event_id") or "").strip().lower(),
+                str(pick.get("mercado") or "").strip().lower(),
+                str(pick.get("tipo_resultado") or "").strip().lower(),
+                str(pick.get("equipo") or "").strip().lower(),
+                str(pick.get("casa") or "").strip().lower(),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            deduped_selected.append(pick)
+            if len(deduped_selected) >= 5:
+                break
 
     return deduped_selected[:5]
 

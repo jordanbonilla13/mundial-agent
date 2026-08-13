@@ -5009,6 +5009,83 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual([pick["partido"] for pick in picks], ["Premium Pick"])
 
+    def test_seleccionar_picks_para_apuestas_lab_completa_hasta_cinco_con_premium_fuertes(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [
+                        {
+                            "partido": "Elite 1",
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.95,
+                            "quality_score": 68,
+                            "reliability_score": 60,
+                        },
+                        {
+                            "partido": "Elite 2",
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T11:00:00Z",
+                            "cuota_apuesta": 1.91,
+                            "quality_score": 70,
+                            "reliability_score": 58,
+                        },
+                        {
+                            "partido": "Elite 3",
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T12:00:00Z",
+                            "cuota_apuesta": 1.88,
+                            "quality_score": 66,
+                            "reliability_score": 55,
+                        },
+                    ],
+                    "mejores_apuestas_ampliadas": [
+                        {
+                            "partido": "Premium 1",
+                            "elite_tier": "premium",
+                            "commence_time": "2026-08-14T13:00:00Z",
+                            "cuota_apuesta": 1.83,
+                            "quality_score": 66,
+                            "reliability_score": 52,
+                        },
+                        {
+                            "partido": "Premium 2",
+                            "elite_tier": "premium",
+                            "commence_time": "2026-08-14T14:00:00Z",
+                            "cuota_apuesta": 1.8,
+                            "quality_score": 64,
+                            "reliability_score": 50,
+                        },
+                        {
+                            "partido": "Seguimiento",
+                            "elite_tier": "seguimiento",
+                            "commence_time": "2026-08-14T15:00:00Z",
+                            "cuota_apuesta": 1.9,
+                            "quality_score": 90,
+                            "reliability_score": 90,
+                        },
+                    ],
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertEqual(
+            [pick["partido"] for pick in picks],
+            ["Elite 1", "Elite 2", "Elite 3", "Premium 1", "Premium 2"],
+        )
+
     def test_seleccionar_picks_para_apuestas_lab_relaja_umbral_para_elite(self):
         import main
         from datetime import datetime, timezone
