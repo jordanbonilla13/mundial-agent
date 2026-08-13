@@ -4860,6 +4860,46 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual([pick["partido"] for pick in picks], ["Strong Reliability"])
 
+    def test_seleccionar_picks_para_apuestas_lab_excluye_tiers_fuera_objetivo(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_selector = main.seleccionar_picks_para_telegram
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            main.seleccionar_picks_para_telegram = lambda *args, **kwargs: [
+                {
+                    "partido": "Seguimiento Pick",
+                    "elite_tier": "seguimiento",
+                    "commence_time": "2026-08-14T10:00:00Z",
+                    "cuota_apuesta": 1.95,
+                    "quality_score": 80,
+                    "reliability_score": 80,
+                },
+                {
+                    "partido": "Elite Pick",
+                    "elite_tier": "elite",
+                    "commence_time": "2026-08-14T11:00:00Z",
+                    "cuota_apuesta": 1.95,
+                    "quality_score": 68,
+                    "reliability_score": 70,
+                },
+            ]
+
+            picks = main.seleccionar_picks_para_apuestas_lab({"mejores_apuestas": []})
+        finally:
+            main.seleccionar_picks_para_telegram = original_selector
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["partido"] for pick in picks], ["Elite Pick"])
+
     def test_construir_publicacion_apuestas_lab_usa_analisis_directo(self):
         import main
 
@@ -5403,6 +5443,7 @@ class BettingModelTests(unittest.TestCase):
                 {
                     "partido": "Fallback Match",
                     "equipo": "Fallback Pick",
+                    "elite_tier": "elite",
                     "mercado": "h2h",
                     "casa": "Pinnacle",
                     "cuota_apuesta": 1.8,
@@ -5441,6 +5482,53 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(result["zero_picks_diagnostics"]["compact_fallback_used"], "operational")
         self.assertEqual(len(captured["payload"]["pronosticos"]), 1)
         self.assertIn("Fallback Match", captured["payload"]["mensajes_telegram"][0])
+
+    def test_publicar_pronosticos_lab_compacto_no_rescata_tier_fuera_objetivo(self):
+        import main
+
+        original_construir = main.construir_publicacion_apuestas_lab
+        original_operational = main._build_operational_fallback_picks
+        original_emergency = main._build_emergency_fallback_picks
+        original_last_resort = main._build_last_resort_picks
+        original_publish = main.publicar_payload_preparado
+
+        try:
+            main.construir_publicacion_apuestas_lab = lambda **kwargs: {
+                "payload": {"pronosticos": [], "mensajes_telegram": [], "resumen_telegram": "resumen"},
+                "lab_data": {"forecast": {"descartadas_operativas": [], "descartadas": []}},
+                "zero_picks_diagnostics": {"analizadas": 10, "recomendadas": 1},
+            }
+            main._build_operational_fallback_picks = lambda data, **kwargs: [
+                {"partido": "Premium Match", "elite_tier": "premium", "quality_score": 70, "reliability_score": 70}
+            ]
+            main._build_emergency_fallback_picks = lambda data, **kwargs: []
+            main._build_last_resort_picks = lambda data, **kwargs: []
+            main.publicar_payload_preparado = lambda payload, publication_type="apuestas": {
+                "ok": True,
+                "mensajes_enviados": 99,
+                "picks_guardados": 99,
+                "publication_id": 99,
+            }
+
+            result = main.publicar_pronosticos_lab_compacto(
+                bankroll=200.0,
+                perfil="agresivo",
+                modo="comparador",
+                mercados="todo",
+                partido="todos",
+                deporte="todo",
+                solo_stakazos=False,
+            )
+        finally:
+            main.construir_publicacion_apuestas_lab = original_construir
+            main._build_operational_fallback_picks = original_operational
+            main._build_emergency_fallback_picks = original_emergency
+            main._build_last_resort_picks = original_last_resort
+            main.publicar_payload_preparado = original_publish
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["picks_guardados"], 0)
+        self.assertEqual(result["mensajes_enviados"], 0)
 
     def test_build_the_odds_query_params_usa_bookmakers_recomendados_por_defecto(self):
         import app.providers as providers

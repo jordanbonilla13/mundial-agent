@@ -1778,6 +1778,10 @@ def publicar_pronosticos_lab_compacto(
                 bankroll=bankroll,
                 max_items=3,
             )
+            fallback_candidates = [
+                pick for pick in fallback_candidates
+                if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"}
+            ]
             if fallback_candidates:
                 fallback_used = "operational"
             else:
@@ -1786,6 +1790,10 @@ def publicar_pronosticos_lab_compacto(
                     bankroll=bankroll,
                     max_items=2,
                 )
+                fallback_candidates = [
+                    pick for pick in fallback_candidates
+                    if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"}
+                ]
                 if fallback_candidates:
                     fallback_used = "emergency"
                 else:
@@ -1794,6 +1802,10 @@ def publicar_pronosticos_lab_compacto(
                         bankroll=bankroll,
                         max_items=1,
                     )
+                    fallback_candidates = [
+                        pick for pick in fallback_candidates
+                        if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"}
+                    ]
                     if fallback_candidates:
                         fallback_used = "last_resort"
         if fallback_candidates:
@@ -2005,9 +2017,13 @@ def seleccionar_picks_para_apuestas_lab(
         selector_reasons[label] = selector_reasons.get(label, 0) + 1
 
     def _is_reasonable_pick(pick: dict[str, Any]) -> bool:
+        tier = str(pick.get("elite_tier") or "").strip().lower()
         cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or pick.get("cuota") or 0)
         quality = float(pick.get("quality_score") or 0)
         reliability = float(pick.get("reliability_score") or 0)
+        if tier not in {"stakazo", "elite"}:
+            _bump_reason(f"Tier fuera del objetivo ({tier or 'sin tier'})")
+            return False
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
         if commence is None:
             _bump_reason("Sin hora valida para publicacion")
@@ -2034,10 +2050,12 @@ def seleccionar_picks_para_apuestas_lab(
             return False
         return True
 
-    def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, float, float, float]:
+    def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, int, float, float, float]:
+        tier = str(pick.get("elite_tier") or "").strip().lower()
+        tier_priority = 0 if tier == "stakazo" else 1 if tier == "elite" else 2
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
         if commence is None:
-            return (3, -float(pick.get("reliability_score") or 0), -float(pick.get("quality_score") or 0), 9999.0)
+            return (3, tier_priority, -float(pick.get("reliability_score") or 0), -float(pick.get("quality_score") or 0), 9999.0)
         delta_hours = (commence - now).total_seconds() / 3600
         if delta_hours <= 6:
             bucket = 0
@@ -2051,6 +2069,7 @@ def seleccionar_picks_para_apuestas_lab(
             bucket = 4
         return (
             bucket,
+            tier_priority,
             -float(pick.get("reliability_score") or 0),
             -float(pick.get("quality_score") or 0),
             max(delta_hours, 0.0),
