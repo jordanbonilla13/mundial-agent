@@ -2040,6 +2040,7 @@ def seleccionar_picks_para_apuestas_lab(
     data: dict[str, Any],
     solo_stakazos: bool = False,
 ) -> list[dict[str, Any]]:
+    allowed_tiers = {"stakazo"} if solo_stakazos else {"stakazo", "elite"}
     if solo_stakazos:
         base = [
             pick
@@ -2052,7 +2053,16 @@ def seleccionar_picks_para_apuestas_lab(
             for pick in list(data.get("picks_elite") or [])
             if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"}
         ]
-        base = elite_universe[:24]
+        if elite_universe:
+            base = elite_universe[:24]
+        else:
+            premium_universe = [
+                pick
+                for pick in list(data.get("mejores_apuestas_ampliadas") or data.get("mejores_apuestas") or [])
+                if str(pick.get("elite_tier") or "").strip().lower() == "premium"
+            ]
+            base = premium_universe[:24]
+            allowed_tiers = {"premium"}
     if solo_stakazos:
         return base[:4]
 
@@ -2071,7 +2081,7 @@ def seleccionar_picks_para_apuestas_lab(
         cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or pick.get("cuota") or 0)
         quality = float(pick.get("quality_score") or 0)
         reliability = float(pick.get("reliability_score") or 0)
-        if tier not in {"stakazo", "elite"}:
+        if tier not in allowed_tiers:
             _bump_reason(f"Tier fuera del objetivo ({tier or 'sin tier'})")
             return False
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
@@ -2102,7 +2112,7 @@ def seleccionar_picks_para_apuestas_lab(
 
     def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, int, float, float, float]:
         tier = str(pick.get("elite_tier") or "").strip().lower()
-        tier_priority = 0 if tier == "stakazo" else 1 if tier == "elite" else 2
+        tier_priority = 0 if tier == "stakazo" else 1 if tier == "elite" else 2 if tier == "premium" else 3
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
         if commence is None:
             return (3, tier_priority, -float(pick.get("reliability_score") or 0), -float(pick.get("quality_score") or 0), 9999.0)

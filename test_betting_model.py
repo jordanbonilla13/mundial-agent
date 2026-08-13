@@ -4959,6 +4959,49 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(picks, [])
 
+    def test_seleccionar_picks_para_apuestas_lab_acepta_premium_si_no_hay_elite(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_selector = main.seleccionar_picks_para_telegram
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [],
+                    "mejores_apuestas_ampliadas": [
+                        {
+                            "partido": "Premium Pick",
+                            "elite_tier": "premium",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.95,
+                            "quality_score": 68,
+                            "reliability_score": 60,
+                        },
+                        {
+                            "partido": "Seguimiento Pick",
+                            "elite_tier": "seguimiento",
+                            "commence_time": "2026-08-14T11:00:00Z",
+                            "cuota_apuesta": 1.95,
+                            "quality_score": 90,
+                            "reliability_score": 90,
+                        },
+                    ],
+                }
+            )
+        finally:
+            main.seleccionar_picks_para_telegram = original_selector
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["partido"] for pick in picks], ["Premium Pick"])
+
     def test_construir_publicacion_apuestas_lab_no_mete_seguimiento_en_picks_elite(self):
         import main
 
