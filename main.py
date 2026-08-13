@@ -2112,7 +2112,7 @@ def _prefer_conservative_totals_pick(current: dict[str, Any], candidate: dict[st
     current_value = float(current.get("valor_esperado") or 0)
     candidate_value = float(candidate.get("valor_esperado") or 0)
 
-    if candidate_cuota < 1.4:
+    if candidate_cuota < 1.3:
         return False
     if candidate_cuota + 0.45 < current_cuota:
         return False
@@ -2132,7 +2132,7 @@ def _find_conservative_soccer_totals_alternative(
     selected_pick: dict[str, Any],
     candidate_pool: list[dict[str, Any]],
     *,
-    min_odds: float = 1.4,
+    min_odds: float = 1.3,
 ) -> dict[str, Any] | None:
     sport_key = str(selected_pick.get("sport_key") or "").strip().lower()
     market = str(selected_pick.get("mercado") or "").strip().lower()
@@ -2190,7 +2190,7 @@ def _find_conservative_soccer_totals_from_event_odds(
     selected_pick: dict[str, Any],
     event_data: dict[str, Any] | None,
     *,
-    min_odds: float = 1.4,
+    min_odds: float = 1.3,
 ) -> dict[str, Any] | None:
     if not event_data:
         return None
