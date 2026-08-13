@@ -2095,19 +2095,42 @@ def seleccionar_picks_para_apuestas_lab(
         if cuota <= 0 or cuota > 3.4:
             _bump_reason("Cuota fuera del rango operativo")
             return False
-        if quality < 58:
-            _bump_reason(f"Quality por debajo del minimo ({int(quality)}/58)")
-            return False
-        if reliability < 52:
-            _bump_reason(
-                f"Reliability por debajo del minimo ({int(reliability)}/52)"
-            )
-            return False
-        if (quality + reliability) < 120:
-            _bump_reason(
-                f"Filtro final Telegram insuficiente (quality {int(quality)} + reliability {int(reliability)} < 120)"
-            )
-            return False
+        if tier == "stakazo":
+            if quality < 62:
+                _bump_reason(f"Quality por debajo del minimo ({int(quality)}/62)")
+                return False
+            if reliability < 55:
+                _bump_reason(f"Reliability por debajo del minimo ({int(reliability)}/55)")
+                return False
+            if (quality + reliability) < 125:
+                _bump_reason(
+                    f"Filtro final Telegram insuficiente (quality {int(quality)} + reliability {int(reliability)} < 125)"
+                )
+                return False
+        elif tier == "elite":
+            if quality < 52:
+                _bump_reason(f"Quality por debajo del minimo ({int(quality)}/52)")
+                return False
+            if reliability < 40:
+                _bump_reason(f"Reliability por debajo del minimo ({int(reliability)}/40)")
+                return False
+            if (quality + reliability) < 98:
+                _bump_reason(
+                    f"Filtro final Telegram insuficiente (quality {int(quality)} + reliability {int(reliability)} < 98)"
+                )
+                return False
+        elif tier == "premium":
+            if quality < 58:
+                _bump_reason(f"Quality por debajo del minimo ({int(quality)}/58)")
+                return False
+            if reliability < 48:
+                _bump_reason(f"Reliability por debajo del minimo ({int(reliability)}/48)")
+                return False
+            if (quality + reliability) < 112:
+                _bump_reason(
+                    f"Filtro final Telegram insuficiente (quality {int(quality)} + reliability {int(reliability)} < 112)"
+                )
+                return False
         return True
 
     def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, int, float, float, float]:
