@@ -5243,6 +5243,16 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(mercados, ["h2h", "spreads"])
         self.assertIsNone(aviso)
 
+    def test_filtrar_mercados_apuestas_compactas_excluye_totals_tenis(self):
+        import main
+
+        mercados = main.filtrar_mercados_apuestas_compactas(
+            ["h2h", "totals", "alternate_totals", "spreads"],
+            deporte="tennis_atp_canadian_open",
+        )
+
+        self.assertEqual(mercados, ["h2h", "spreads"])
+
     def test_build_todo_toggle_groups_incluye_markets(self):
         import main
 

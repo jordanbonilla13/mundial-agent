@@ -634,24 +634,54 @@ def deportes_agregados_para_todo(
     candidatos: list[dict] = []
     fallback_genericos: list[dict] = []
 
-    for item in opciones_deporte_disponibles(provider=provider):
-        valor = str(item.get("value") or "").strip().lower()
-        if not valor or valor == "todo":
-            continue
-        contexto = resolver_contexto_deporte(valor)
-        catalog_key = str(contexto.get("catalog_key") or valor).strip().lower()
-        family = family_from_sport_key(contexto.get("sport_key", ""))
-        if family not in TODO_LIMITS_BY_FAMILY:
-            continue
-        sport_bucket = str(SPORT_ALIASES.get(family, family)).strip().lower()
-        if sport_bucket in disabled_sports:
-            continue
-        if _is_generic_sport_alias(valor):
-            fallback_genericos.append(contexto)
-            continue
-        if catalog_key in disabled_leagues:
-            continue
-        candidatos.append(contexto)
+    try:
+        catalogo = discover_available_catalog(provider=provider)
+        source_items = [
+            item
+            for item in list(catalogo.get("sports") or [])
+            if item.get("active", True) is not False
+            and not bool(item.get("has_outrights"))
+        ]
+    except Exception:
+        source_items = []
+
+    if source_items:
+        for contexto in source_items:
+            valor = str(contexto.get("catalog_key") or contexto.get("sport_key") or "").strip().lower()
+            if not valor or valor == "todo":
+                continue
+            catalog_key = str(contexto.get("catalog_key") or valor).strip().lower()
+            family = family_from_sport_key(contexto.get("sport_key", ""))
+            if family not in TODO_LIMITS_BY_FAMILY:
+                continue
+            sport_bucket = str(SPORT_ALIASES.get(family, family)).strip().lower()
+            if sport_bucket in disabled_sports:
+                continue
+            if "winner" in catalog_key or "championship" in catalog_key or "outright" in catalog_key:
+                continue
+            if catalog_key in disabled_leagues:
+                continue
+            candidatos.append(contexto)
+    else:
+        for item in opciones_deporte_disponibles(provider=provider):
+            valor = str(item.get("value") or "").strip().lower()
+            if not valor or valor == "todo":
+                continue
+            preferred = _prefer_active_context_for_generic_alias(valor, provider=provider)
+            contexto = preferred or resolver_contexto_deporte(valor)
+            catalog_key = str(contexto.get("catalog_key") or valor).strip().lower()
+            family = family_from_sport_key(contexto.get("sport_key", ""))
+            if family not in TODO_LIMITS_BY_FAMILY:
+                continue
+            sport_bucket = str(SPORT_ALIASES.get(family, family)).strip().lower()
+            if sport_bucket in disabled_sports:
+                continue
+            if _is_generic_sport_alias(valor):
+                fallback_genericos.append(contexto)
+                continue
+            if catalog_key in disabled_leagues:
+                continue
+            candidatos.append(contexto)
 
     if not candidatos:
         candidatos = [
@@ -851,6 +881,18 @@ def aplicar_filtros_mercados_todo_por_deporte(mercados: list[str], deporte: str 
         if f"{family}::{str(mercado).strip().lower()}" not in disabled_pairs
     ]
     return filtrados
+
+
+def filtrar_mercados_apuestas_compactas(mercados: list[str], deporte: str | None = None) -> list[str]:
+    contexto = resolver_contexto_deporte(deporte)
+    sport_key = str(contexto.get("sport_key") or "").strip().lower()
+    if sport_key.startswith("tennis_"):
+        return [
+            mercado
+            for mercado in mercados
+            if str(mercado).strip().lower() not in {"totals", "alternate_totals"}
+        ]
+    return list(mercados)
 
 
 def telegram_text(value: Any) -> str:
@@ -2171,6 +2213,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
             mercados_lista, aviso_mercados = resolver_mercados_para_todo_filtrado(mercados, deporte=deporte_item)
         else:
             mercados_lista, aviso_mercados = resolver_mercados(mercados, deporte=deporte_item)
+        mercados_lista = filtrar_mercados_apuestas_compactas(mercados_lista, deporte=deporte_item)
         if not mercados_lista:
             cobertura.append(
                 {
