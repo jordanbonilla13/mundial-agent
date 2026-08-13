@@ -5041,7 +5041,7 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual([pick["partido"] for pick in picks], ["Elite Ajustada"])
 
-    def test_seleccionar_picks_para_apuestas_lab_prefiere_total_conservador_si_sigue_fuerte(self):
+    def test_seleccionar_picks_para_apuestas_lab_prefiere_total_conservador_mas_alto_si_supera_cuota_minima(self):
         import main
         from datetime import datetime, timezone
 
@@ -5075,12 +5075,12 @@ class BettingModelTests(unittest.TestCase):
                             "event_id": "evt-1",
                             "sport_key": "soccer_concacaf_leagues_cup",
                             "partido": "Portland Timbers vs Tijuana",
-                            "equipo": "Menos de 4 goles",
+                            "equipo": "Menos de 4.5 goles",
                             "mercado": "alternate_totals",
-                            "outcome_point": 4.0,
+                            "outcome_point": 4.5,
                             "elite_tier": "elite",
                             "commence_time": "2026-08-14T10:00:00Z",
-                            "cuota_apuesta": 1.57,
+                            "cuota_apuesta": 1.42,
                             "quality_score": 58,
                             "reliability_score": 50,
                             "valor_esperado": 0.038,
@@ -5091,7 +5091,7 @@ class BettingModelTests(unittest.TestCase):
         finally:
             main.datetime = original_datetime
 
-        self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 4 goles"])
+        self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 4.5 goles"])
 
     def test_seleccionar_picks_para_apuestas_lab_no_fuerza_total_conservador_si_cuota_cae_demasiado(self):
         import main
@@ -5264,6 +5264,68 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 4 goles"])
         self.assertEqual([pick["mercado"] for pick in picks], ["alternate_totals"])
         self.assertEqual([pick["cuota_apuesta"] for pick in picks], [1.57])
+
+    def test_seleccionar_picks_para_apuestas_lab_desde_cuotas_crudas_prioriza_linea_mas_conservadora_sobre_minimo(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        selected_pick = {
+            "event_id": "evt-5",
+            "sport_key": "soccer_concacaf_leagues_cup",
+            "sport_label": "Futbol",
+            "partido": "Santos vs Macara",
+            "equipo": "Menos de 2 goles",
+            "equipo_raw": "Under",
+            "mercado": "alternate_totals",
+            "outcome_point": 2.0,
+            "elite_tier": "elite",
+            "commence_time": "2026-08-14T10:00:00Z",
+            "cuota_apuesta": 2.95,
+            "quality_score": 62,
+            "reliability_score": 46,
+            "valor_esperado": 0.064,
+            "casa": "Coolbet",
+        }
+        raw_event = {
+            "id": "evt-5",
+            "bookmakers": [
+                {
+                    "title": "Coolbet",
+                    "markets": [
+                        {
+                            "key": "alternate_totals",
+                            "outcomes": [
+                                {"name": "Under", "point": 2.0, "price": 2.95},
+                                {"name": "Under", "point": 3.0, "price": 1.95},
+                                {"name": "Under", "point": 4.0, "price": 1.33},
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [selected_pick],
+                    "mejores_apuestas_ampliadas": [selected_pick],
+                    "_event_odds_map": {"evt-5": raw_event},
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 3 goles"])
+        self.assertEqual([pick["cuota_apuesta"] for pick in picks], [1.95])
 
     def test_construir_publicacion_apuestas_lab_no_mete_seguimiento_en_picks_elite(self):
         import main

@@ -2095,7 +2095,7 @@ def _prefer_conservative_totals_pick(current: dict[str, Any], candidate: dict[st
     current_value = float(current.get("valor_esperado") or 0)
     candidate_value = float(candidate.get("valor_esperado") or 0)
 
-    if candidate_cuota < 1.5:
+    if candidate_cuota < 1.4:
         return False
     if candidate_cuota + 0.45 < current_cuota:
         return False
@@ -2129,9 +2129,6 @@ def _find_conservative_soccer_totals_alternative(
 
     try:
         selected_point = float(selected_pick.get("outcome_point"))
-        selected_odds = float(
-            selected_pick.get("cuota_apuesta") or selected_pick.get("cuota_pinnacle") or selected_pick.get("cuota") or 0
-        )
     except (TypeError, ValueError):
         return None
 
@@ -2152,8 +2149,6 @@ def _find_conservative_soccer_totals_alternative(
             continue
         if candidate_odds < min_odds:
             continue
-        if candidate_odds + 0.7 < selected_odds:
-            continue
         if float(candidate.get("quality_score") or 0) < 45:
             continue
         if float(candidate.get("reliability_score") or 0) < 40:
@@ -2165,7 +2160,7 @@ def _find_conservative_soccer_totals_alternative(
 
     alternatives.sort(
         key=lambda pick: (
-            float(pick.get("outcome_point") or 0),
+            -float(pick.get("outcome_point") or 0),
             -float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or pick.get("cuota") or 0),
             -float(pick.get("reliability_score") or 0),
             -float(pick.get("quality_score") or 0),
@@ -2191,9 +2186,6 @@ def _find_conservative_soccer_totals_from_event_odds(
 
     try:
         selected_point = float(selected_pick.get("outcome_point"))
-        selected_odds = float(
-            selected_pick.get("cuota_apuesta") or selected_pick.get("cuota_pinnacle") or selected_pick.get("cuota") or 0
-        )
     except (TypeError, ValueError):
         return None
 
@@ -2215,7 +2207,7 @@ def _find_conservative_soccer_totals_from_event_odds(
                     price = float(outcome.get("price"))
                 except (TypeError, ValueError):
                     continue
-                if point <= selected_point or price < min_odds or price + 0.7 < selected_odds:
+                if point <= selected_point or price < min_odds:
                     continue
                 candidate = dict(selected_pick)
                 candidate["mercado"] = market_key
@@ -2235,7 +2227,7 @@ def _find_conservative_soccer_totals_from_event_odds(
                 candidate["casa"] = bookmaker.get("title") or candidate.get("casa")
                 candidate["motivo"] = str(candidate.get("motivo") or "").strip()
                 candidate["motivo_es"] = candidate["motivo"]
-                sort_key = (point, -price)
+                sort_key = (-point, -price)
                 if best is None or sort_key < (best[0], best[1]):
                     best = (sort_key[0], sort_key[1], candidate)
     return best[2] if best else None
