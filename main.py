@@ -2197,7 +2197,6 @@ def _find_conservative_soccer_totals_from_event_odds(
     sport_key = str(selected_pick.get("sport_key") or "").strip().lower()
     market = str(selected_pick.get("mercado") or "").strip().lower()
     direction = _totals_direction_for_pick(selected_pick)
-    casa = str(selected_pick.get("casa") or "").strip().lower()
     if not sport_key.startswith("soccer_") or market not in {"totals", "alternate_totals"} or direction != "under":
         return None
 
@@ -2208,9 +2207,6 @@ def _find_conservative_soccer_totals_from_event_odds(
 
     best: tuple[float, float, dict[str, Any]] | None = None
     for bookmaker in list(event_data.get("bookmakers") or []):
-        title = str(bookmaker.get("title") or "").strip().lower()
-        if casa and title != casa:
-            continue
         for market_data in list(bookmaker.get("markets") or []):
             market_key = str(market_data.get("key") or "").strip().lower()
             if market_key not in {"totals", "alternate_totals"}:
@@ -2257,13 +2253,24 @@ def _apply_final_conservative_soccer_totals_overrides(
 ) -> list[dict[str, Any]]:
     resolved_map = dict(event_odds_map or {})
     adjusted: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str, str, str]] = set()
     for pick in list(picks or []):
         event_id = str(pick.get("event_id") or "").strip()
         alternative = _find_conservative_soccer_totals_from_event_odds(
             pick,
             resolved_map.get(event_id),
         )
-        adjusted.append(alternative or pick)
+        final_pick = alternative or pick
+        dedupe_key = (
+            str(final_pick.get("event_id") or "").strip().lower(),
+            str(final_pick.get("mercado") or "").strip().lower(),
+            str(final_pick.get("equipo_raw") or final_pick.get("equipo") or "").strip().lower(),
+            str(final_pick.get("tipo_resultado_raw") or final_pick.get("tipo_resultado") or "").strip().lower(),
+        )
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        adjusted.append(final_pick)
     return adjusted
 
 
