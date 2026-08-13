@@ -391,6 +391,8 @@ def _build_zero_picks_diagnostics(
         "analizadas": int(data.get("total_analizadas") or 0),
         "recomendadas": int(data.get("total_recomendadas") or 0),
         "descartadas_preview": len(descartadas),
+        "selector_candidates": int(data.get("selector_candidates") or 0),
+        "selector_rejections": list(data.get("selector_rejections") or []),
         "shadow_mode": bool(shadow_mode),
         "guard_blocking": not guard.get("allow_live_publication", False),
         "guard_reasons": blocked_reasons[:3] if not guard.get("allow_live_publication", False) else [],

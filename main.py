@@ -1941,6 +1941,13 @@ def seleccionar_picks_para_apuestas_lab(
 
     now = datetime.now(timezone.utc)
     max_hours_ahead = 48.0
+    selector_reasons: dict[str, int] = {}
+
+    def _bump_reason(reason: str) -> None:
+        label = str(reason).strip()
+        if not label:
+            return
+        selector_reasons[label] = selector_reasons.get(label, 0) + 1
 
     def _is_reasonable_pick(pick: dict[str, Any]) -> bool:
         cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or pick.get("cuota") or 0)
@@ -1948,15 +1955,24 @@ def seleccionar_picks_para_apuestas_lab(
         reliability = float(pick.get("reliability_score") or 0)
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
         if commence is None:
+            _bump_reason("Sin hora valida para publicacion")
             return False
         delta_hours = (commence - now).total_seconds() / 3600
         if delta_hours < 0 or delta_hours > max_hours_ahead:
+            _bump_reason("Fuera de la ventana de 48h")
             return False
         if cuota <= 0 or cuota > 3.4:
+            _bump_reason("Cuota fuera del rango operativo")
             return False
         if quality < 50:
+            _bump_reason(f"Quality por debajo del minimo ({int(quality)}/50)")
             return False
-        return quality >= 55 or reliability >= 68
+        if not (quality >= 55 or reliability >= 68):
+            _bump_reason(
+                f"Filtro final Telegram insuficiente (quality {int(quality)} / reliability {int(reliability)})"
+            )
+            return False
+        return True
 
     def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, float, float, float]:
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
@@ -1976,6 +1992,11 @@ def seleccionar_picks_para_apuestas_lab(
         return (bucket, max(delta_hours, 0.0), -float(pick.get("quality_score") or 0), -float(pick.get("reliability_score") or 0))
 
     reasonable = [pick for pick in base if _is_reasonable_pick(pick)]
+    data["_apuestas_selector_candidates"] = len(base)
+    data["_apuestas_selector_rejections"] = [
+        {"reason": reason, "count": count}
+        for reason, count in sorted(selector_reasons.items(), key=lambda item: item[1], reverse=True)
+    ]
     if not reasonable:
         return []
     reasonable.sort(key=_pick_sort_key)
@@ -2426,6 +2447,8 @@ def lanzar_apuestas_telegram_async() -> str:
                 snapshots = int(diagnostics.get("snapshots_guardados") or 0)
                 guard_reasons = list(diagnostics.get("guard_reasons") or [])
                 discard_reasons = list(diagnostics.get("top_discard_reasons") or [])
+                selector_candidates = int(diagnostics.get("selector_candidates") or 0)
+                selector_rejections = list(diagnostics.get("selector_rejections") or [])
                 coverage_notice = str(diagnostics.get("coverage_notice") or "").strip()
                 base_criteria = str(diagnostics.get("base_criteria") or "").strip()
                 blocked_summary = dict(diagnostics.get("blocked_summary") or {})
@@ -2436,6 +2459,16 @@ def lanzar_apuestas_telegram_async() -> str:
                     f"Partidos disponibles: <b>{available_matches}</b>",
                     f"Snapshots: <b>{snapshots}</b>",
                 ]
+                if selector_candidates:
+                    detail_lines.append(f"Candidatas al filtro final: <b>{selector_candidates}</b>")
+                if selector_rejections:
+                    detail_lines.append(
+                        "Filtro final Telegram: "
+                        + " | ".join(
+                            f"{telegram_text_service(str(item.get('reason') or 'Sin detalle'))} x{int(item.get('count') or 0)}"
+                            for item in selector_rejections[:3]
+                        )
+                    )
                 if guard_reasons:
                     detail_lines.append(
                         "Guard activo: " + " | ".join(telegram_text_service(str(reason)) for reason in guard_reasons)

@@ -4634,6 +4634,10 @@ class BettingModelTests(unittest.TestCase):
                     "descartadas_preview": 5,
                     "partidos_disponibles": 18,
                     "snapshots_guardados": 144,
+                    "selector_candidates": 1,
+                    "selector_rejections": [
+                        {"reason": "Quality por debajo del minimo (40/50)", "count": 1},
+                    ],
                     "guard_reasons": [],
                     "top_discard_reasons": [
                         {"reason": "Bloqueado por guard de mercado", "count": 3},
@@ -4670,6 +4674,8 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Descartadas visibles: <b>5</b>", sent_messages[0])
         self.assertIn("Partidos disponibles: <b>18</b>", sent_messages[0])
         self.assertIn("Snapshots: <b>144</b>", sent_messages[0])
+        self.assertIn("Candidatas al filtro final: <b>1</b>", sent_messages[0])
+        self.assertIn("Quality por debajo del minimo (40/50) x1", sent_messages[0])
         self.assertIn("Bloqueado por guard de mercado x3", sent_messages[0])
         self.assertIn("Valor insuficiente x2", sent_messages[0])
         self.assertIn("Bloqueos: risk <b>7</b> | performance <b>3</b>", sent_messages[0])

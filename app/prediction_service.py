@@ -67,6 +67,8 @@ def build_prediction_payload(
         "descartadas": list(data.get("descartadas") or []),
         "descartadas_operativas": list(data.get("descartadas_operativas") or []),
         "blocked_summary": dict(data.get("blocked_summary") or {}),
+        "selector_candidates": int(data.get("_apuestas_selector_candidates", 0) or 0),
+        "selector_rejections": list(data.get("_apuestas_selector_rejections") or []),
         "solo_stakazos": solo_stakazos,
         "pronosticos": picks_telegram,
         "mensajes_telegram": mensajes,
