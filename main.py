@@ -2322,7 +2322,11 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         if delta_hours is None or delta_hours < 0 or delta_hours > max_pick_hours:
             continue
         recomendadas_ordenadas_full.append(pick)
-    elite_full = [pick for pick in recomendadas_ordenadas_full if bool(pick.get("elite_pick"))]
+    elite_full = [
+        pick
+        for pick in recomendadas_ordenadas_full
+        if str(pick.get("elite_tier") or "").lower() in {"stakazo", "elite"}
+    ]
     stakazos_full = [pick for pick in elite_full if str(pick.get("elite_tier") or "").lower() == "stakazo"]
     premium_full = [pick for pick in recomendadas_ordenadas_full if str(pick.get("elite_tier") or "").lower() == "premium"]
     seguimiento_full = [pick for pick in recomendadas_ordenadas_full if str(pick.get("elite_tier") or "").lower() == "seguimiento"]
@@ -2340,7 +2344,11 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         operating_mode=RISK_OPERATING_MODE,
     )
 
-    elite = [pick for pick in recomendadas_ordenadas if bool(pick.get("elite_pick"))]
+    elite = [
+        pick
+        for pick in recomendadas_ordenadas
+        if str(pick.get("elite_tier") or "").lower() in {"stakazo", "elite"}
+    ]
     stakazos = [pick for pick in elite if str(pick.get("elite_tier") or "").lower() == "stakazo"]
     premium = [pick for pick in recomendadas_ordenadas if str(pick.get("elite_tier") or "").lower() == "premium"]
     seguimiento = [pick for pick in recomendadas_ordenadas if str(pick.get("elite_tier") or "").lower() == "seguimiento"]

@@ -4900,6 +4900,103 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual([pick["partido"] for pick in picks], ["Elite Pick"])
 
+    def test_construir_publicacion_apuestas_lab_no_mete_seguimiento_en_picks_elite(self):
+        import main
+
+        original_cuotas = main.cuotas
+        original_analizar = main.analizar_comparador_casas
+        original_penalizaciones = main.penalizaciones_historicas_seguras
+        original_riesgo = main.politica_riesgo_actual
+        original_performance = main.performance_guard_actual
+
+        try:
+            main.cuotas = lambda **kwargs: [
+                {
+                    "id": "evt1",
+                    "commence_time": "2026-08-14T10:00:00Z",
+                    "home_team": "A",
+                    "away_team": "B",
+                    "bookmakers": [],
+                }
+            ]
+
+            main.analizar_comparador_casas = lambda partidos, elos, **kwargs: [
+                {
+                    "event_id": "evt1",
+                    "commence_time": "2026-08-14T10:00:00Z",
+                    "sport_key": "soccer_spain_la_liga",
+                    "sport_label": "Futbol",
+                    "league_key": "spain_la_liga",
+                    "league_label": "Spain La Liga",
+                    "partido": "A vs B",
+                    "casa": "Coolbet",
+                    "mercado": "totals",
+                    "equipo": "Menos de 3 goles",
+                    "tipo_resultado": "totals",
+                    "cuota_pinnacle": 1.9,
+                    "cuota_minima_aceptable": 1.8,
+                    "margen_cuota": 1.05,
+                    "probabilidad_mercado": 0.5,
+                    "probabilidad_modelo": 0.58,
+                    "valor_esperado": 0.12,
+                    "kelly_fraccional": 0.03,
+                    "stake_pct_bankroll": 3.0,
+                    "importe_sugerido": 6.0,
+                    "stake": 2.0,
+                    "recomendacion": "Value moderado",
+                    "motivo": "Filtro de valor y margen superado",
+                    "cuota_apuesta": 2.0,
+                    "casa_referencia": "Pinnacle",
+                    "cuota_referencia_pinnacle": 1.9,
+                    "ventaja_sobre_pinnacle": 0.03,
+                    "outcome_point": 3.0,
+                    "outcome_description": "Under",
+                    "confianza": "Media",
+                    "puntuacion_confianza": 70,
+                    "quality_score": 88,
+                    "reliability_score": 74,
+                    "reliability_tier": "alta",
+                    "elite_pick": True,
+                    "elite_tier": "seguimiento",
+                    "source_strength": "market+model",
+                    "market_support_count": 3,
+                    "market_consensus_odds": 1.94,
+                    "market_best_odds": 2.0,
+                    "market_worst_odds": 1.87,
+                    "market_width_pct": 0.03,
+                    "market_edge_vs_consensus": 0.02,
+                }
+            ]
+            main.penalizaciones_historicas_seguras = lambda: {}
+            main.politica_riesgo_actual = lambda: {
+                "sample_stage": "seed",
+                "stake_multiplier": 1.0,
+                "max_stake_units": 5.0,
+                "block_new_picks": False,
+                "block_fragile_markets": False,
+                "only_elite_when_cautious": False,
+                "reason": "normal",
+            }
+            main.performance_guard_actual = lambda: {"blocked_sports": {}, "blocked_leagues": {}}
+
+            result = main.construir_publicacion_apuestas_lab(
+                bankroll=200.0,
+                perfil="agresivo",
+                modo="comparador",
+                mercados="todo",
+                partido="todos",
+                deporte="futbol",
+                solo_stakazos=False,
+            )
+        finally:
+            main.cuotas = original_cuotas
+            main.analizar_comparador_casas = original_analizar
+            main.penalizaciones_historicas_seguras = original_penalizaciones
+            main.politica_riesgo_actual = original_riesgo
+            main.performance_guard_actual = original_performance
+
+        self.assertEqual((result.get("lab_data") or {}).get("forecast", {}).get("picks_elite"), [])
+
     def test_construir_publicacion_apuestas_lab_usa_analisis_directo(self):
         import main
 
