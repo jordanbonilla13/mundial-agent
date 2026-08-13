@@ -2364,12 +2364,29 @@ def seleccionar_picks_para_apuestas_lab(
                 return False
         return True
 
-    def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, int, float, float, float]:
+    def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, int, float, float, float, float, str, str, str]:
         tier = str(pick.get("elite_tier") or "").strip().lower()
         tier_priority = 0 if tier == "stakazo" else 1 if tier == "elite" else 2 if tier == "premium" else 3
+        try:
+            point = float(pick.get("outcome_point") or 0)
+        except (TypeError, ValueError):
+            point = 0.0
+        partido = str(pick.get("partido") or "").strip().lower()
+        mercado = str(pick.get("mercado") or "").strip().lower()
+        casa = str(pick.get("casa") or "").strip().lower()
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
         if commence is None:
-            return (3, tier_priority, -float(pick.get("reliability_score") or 0), -float(pick.get("quality_score") or 0), 9999.0)
+            return (
+                3,
+                tier_priority,
+                -float(pick.get("reliability_score") or 0),
+                -float(pick.get("quality_score") or 0),
+                9999.0,
+                -point,
+                partido,
+                mercado,
+                casa,
+            )
         delta_hours = (commence - now).total_seconds() / 3600
         if delta_hours <= 6:
             bucket = 0
@@ -2387,6 +2404,10 @@ def seleccionar_picks_para_apuestas_lab(
             -float(pick.get("reliability_score") or 0),
             -float(pick.get("quality_score") or 0),
             max(delta_hours, 0.0),
+            -point,
+            partido,
+            mercado,
+            casa,
         )
 
     reasonable = [pick for pick in base if _is_reasonable_pick(pick)]
@@ -3262,6 +3283,14 @@ def proximity_score_for_pick(apuesta: dict) -> int:
 
 
 def prioridad_pick_todo(apuesta: dict) -> tuple:
+    partido = str(apuesta.get("partido") or "").strip().lower()
+    mercado = str(apuesta.get("mercado") or "").strip().lower()
+    casa = str(apuesta.get("casa") or "").strip().lower()
+    commence = str(apuesta.get("commence_time") or "").strip().lower()
+    try:
+        point = float(apuesta.get("outcome_point") or 0)
+    except (TypeError, ValueError):
+        point = 0.0
     return (
         prioridad_tier_elite(apuesta.get("elite_tier")),
         int(apuesta.get("ranking_score") or ranking_score_for_pick(apuesta)),
@@ -3271,6 +3300,11 @@ def prioridad_pick_todo(apuesta: dict) -> tuple:
         int(apuesta.get("puntuacion_confianza") or 0),
         float(apuesta.get("valor_esperado") or 0),
         float(apuesta.get("margen_cuota") or 0),
+        -point,
+        commence,
+        partido,
+        mercado,
+        casa,
     )
 
 
