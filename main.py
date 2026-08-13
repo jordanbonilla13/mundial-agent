@@ -2053,12 +2053,6 @@ def seleccionar_picks_para_apuestas_lab(
             if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"}
         ]
         base = elite_universe[:24]
-        if not base:
-            base = seleccionar_picks_para_telegram(
-                data,
-                solo_stakazos=solo_stakazos,
-                max_items=12,
-            )
     if solo_stakazos:
         return base[:4]
 

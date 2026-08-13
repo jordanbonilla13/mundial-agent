@@ -4776,7 +4776,29 @@ class BettingModelTests(unittest.TestCase):
                 },
             ]
 
-            picks = main.seleccionar_picks_para_apuestas_lab({"mejores_apuestas": []})
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "mejores_apuestas": [],
+                    "picks_elite": [
+                        {
+                            "partido": "Seguimiento Pick",
+                            "elite_tier": "seguimiento",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.95,
+                            "quality_score": 80,
+                            "reliability_score": 80,
+                        },
+                        {
+                            "partido": "Elite Pick",
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T11:00:00Z",
+                            "cuota_apuesta": 1.95,
+                            "quality_score": 68,
+                            "reliability_score": 70,
+                        },
+                    ],
+                }
+            )
         finally:
             main.seleccionar_picks_para_telegram = original_selector
             main.datetime = original_datetime
@@ -4874,6 +4896,49 @@ class BettingModelTests(unittest.TestCase):
 
         try:
             main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "mejores_apuestas": [],
+                    "picks_elite": [
+                        {
+                            "partido": "Seguimiento Pick",
+                            "elite_tier": "seguimiento",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.95,
+                            "quality_score": 80,
+                            "reliability_score": 80,
+                        },
+                        {
+                            "partido": "Elite Pick",
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T11:00:00Z",
+                            "cuota_apuesta": 1.95,
+                            "quality_score": 68,
+                            "reliability_score": 70,
+                        },
+                    ],
+                }
+            )
+        finally:
+            main.seleccionar_picks_para_telegram = original_selector
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["partido"] for pick in picks], ["Elite Pick"])
+
+    def test_seleccionar_picks_para_apuestas_lab_no_recurre_a_seguimiento_si_no_hay_elite(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_selector = main.seleccionar_picks_para_telegram
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
             main.seleccionar_picks_para_telegram = lambda *args, **kwargs: [
                 {
                     "partido": "Seguimiento Pick",
@@ -4882,23 +4947,17 @@ class BettingModelTests(unittest.TestCase):
                     "cuota_apuesta": 1.95,
                     "quality_score": 80,
                     "reliability_score": 80,
-                },
-                {
-                    "partido": "Elite Pick",
-                    "elite_tier": "elite",
-                    "commence_time": "2026-08-14T11:00:00Z",
-                    "cuota_apuesta": 1.95,
-                    "quality_score": 68,
-                    "reliability_score": 70,
-                },
+                }
             ]
 
-            picks = main.seleccionar_picks_para_apuestas_lab({"mejores_apuestas": []})
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {"mejores_apuestas": [], "picks_elite": []}
+            )
         finally:
             main.seleccionar_picks_para_telegram = original_selector
             main.datetime = original_datetime
 
-        self.assertEqual([pick["partido"] for pick in picks], ["Elite Pick"])
+        self.assertEqual(picks, [])
 
     def test_construir_publicacion_apuestas_lab_no_mete_seguimiento_en_picks_elite(self):
         import main
