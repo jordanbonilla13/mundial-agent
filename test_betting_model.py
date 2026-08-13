@@ -3039,7 +3039,7 @@ class BettingModelTests(unittest.TestCase):
                         "mercado": "h2h",
                         "tipo_resultado": "home",
                         "casa": "Betfair",
-                        "quality_score": 0,
+                        "quality_score": 50,
                         "reliability_score": 68,
                         "recomendacion": "No apostar",
                         "motivo": "Cuota mejor que Pinnacle, pero sin margen suficiente para apostar",
@@ -3379,7 +3379,76 @@ class BettingModelTests(unittest.TestCase):
         self.assertFalse(result["operational_fallback_used"])
         self.assertFalse(result["emergency_fallback_used"])
         self.assertEqual(result["picks_guardados"], 0)
-        self.assertEqual(len(sent), 1)
+
+    def test_publish_telegram_predictions_ultima_reserva_acepta_margen_corto_si_quality_es_valida(self):
+        sent = []
+        result = publish_telegram_predictions(
+            runtime_settings=RuntimeSettings(environment="production", shadow_mode=False),
+            publication_guard=lambda: {"allow_live_publication": True, "mode": "live", "reasons": []},
+            pronosticos_fn=lambda **kwargs: {
+                "sport_label": "Todo",
+                "league_label": "Todas las ligas base",
+                "deporte": "Todo",
+                "liga": "Todas las ligas base",
+                "criterio": "Agregado multi-deporte sobre deportes base soportados",
+                "pronosticos": [],
+                "descartadas": [],
+                "descartadas_operativas": [
+                    {
+                        "event_id": "evt_last_resort",
+                        "commence_time": "2026-08-14T12:00:00Z",
+                        "partido": "A vs B",
+                        "equipo": "A",
+                        "mercado": "h2h",
+                        "tipo_resultado": "home",
+                        "casa": "Betfair",
+                        "quality_score": 52,
+                        "reliability_score": 66,
+                        "recomendacion": "No apostar",
+                        "motivo": "Cuota mejor que Pinnacle, pero sin margen suficiente para apostar",
+                        "valor_esperado": 0.004,
+                        "margen_cuota": 1.002,
+                        "cuota_apuesta": 1.88,
+                        "stake": 0,
+                        "importe_sugerido": 0,
+                    }
+                ],
+                "total_elite": 0,
+                "total_stakazos": 0,
+                "total_analizadas": 40,
+                "total_recomendadas": 0,
+            },
+            save_unique_recommendations=lambda picks: [{"id": 499, **picks[0]}],
+            read_raw_pick=lambda pick: pick,
+            enrich_with_ai=lambda picks: picks,
+            build_ai_summary=lambda *args, **kwargs: None,
+            ai_available=lambda: False,
+            format_summary=lambda **kwargs: "Resumen",
+            format_pick_message=lambda pick: f"Pick {pick['event_id']} {pick['recomendacion']}",
+            telegram_keyboard_for_pick=lambda pick_id: {"inline_keyboard": [[{"text": "Apostada", "callback_data": f"pick:{pick_id}:bet"}]]},
+            send_message=lambda text, token=None, chat_id=None, reply_markup=None: sent.append((text, reply_markup)) or {"ok": True, "result": {"message_id": len(sent)}},
+            register_publication=lambda publication_type, payload, items: {"id": 657, "items": items},
+            perfil_label=lambda value: value or "agresivo",
+            modo_label=lambda value: value or "comparador",
+            perfiles_stake={"agresivo"},
+            modos_informe={"comparador"},
+            bankroll=200.0,
+            perfil="agresivo",
+            modo="comparador",
+            mercados="h2h,spreads,totals",
+            partido="todos",
+            deporte="todo",
+            solo_stakazos=False,
+            token="token-test",
+            chat_id="chat-test",
+            publication_type="lab",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["operational_fallback_used"])
+        self.assertFalse(result["emergency_fallback_used"])
+        self.assertEqual(result["picks_guardados"], 1)
+        self.assertEqual(len(sent), 2)
 
     def test_pronosticos_completa_con_mejores_si_hay_pocas_elite(self):
         import main
@@ -4709,6 +4778,44 @@ class BettingModelTests(unittest.TestCase):
         partidos = [pick["partido"] for pick in picks]
         self.assertEqual(partidos, ["Near Match"])
 
+    def test_seleccionar_picks_para_apuestas_lab_excluye_quality_baja(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_selector = main.seleccionar_picks_para_telegram
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            main.seleccionar_picks_para_telegram = lambda *args, **kwargs: [
+                {
+                    "partido": "Low Quality",
+                    "commence_time": "2026-08-14T10:00:00Z",
+                    "cuota_apuesta": 1.95,
+                    "quality_score": 40,
+                    "reliability_score": 80,
+                },
+                {
+                    "partido": "Good Quality",
+                    "commence_time": "2026-08-14T11:00:00Z",
+                    "cuota_apuesta": 1.95,
+                    "quality_score": 55,
+                    "reliability_score": 70,
+                },
+            ]
+
+            picks = main.seleccionar_picks_para_apuestas_lab({"mejores_apuestas": []})
+        finally:
+            main.seleccionar_picks_para_telegram = original_selector
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["partido"] for pick in picks], ["Good Quality"])
+
     def test_construir_publicacion_apuestas_lab_usa_analisis_directo(self):
         import main
 
@@ -5139,6 +5246,78 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(captured["mercados"], ["h2h"])
         self.assertIn("48h", result["lab_data"]["forecast"]["aviso_cobertura"])
+
+    def test_construir_publicacion_apuestas_lab_amplia_cobertura_y_mercados(self):
+        import main
+
+        original_deportes = main.deportes_agregados_para_todo
+        original_resolver_markets = main.resolver_mercados_para_todo_filtrado
+        original_resolver_contexto = main.resolver_contexto_deporte
+        original_cuotas = main.cuotas
+        original_analizar = main.analizar_comparador_casas
+        original_penalizaciones = main.penalizaciones_historicas_seguras
+        original_riesgo = main.politica_riesgo_actual
+        original_performance = main.performance_guard_actual
+
+        captured = {}
+
+        try:
+            main.deportes_agregados_para_todo = lambda **kwargs: [f"soccer_league_{i}" for i in range(18)]
+            main.resolver_mercados_para_todo_filtrado = lambda filtro, deporte=None: (["h2h", "totals", "alternate_totals"], None)
+            main.resolver_contexto_deporte = lambda value: {
+                "catalog_key": value,
+                "sport_key": "soccer_spain_la_liga",
+                "sport_label": "Futbol",
+                "league_label": value,
+                "supports_elo": True,
+            }
+            main.cuotas = lambda **kwargs: captured.setdefault("mercados_cuotas", kwargs.get("mercados")) or [{"id": "evt1", "commence_time": "2026-08-14T22:00:00Z", "home_team": "A", "away_team": "B", "bookmakers": []}]
+
+            def fake_cuotas(**kwargs):
+                captured["mercados_cuotas"] = kwargs.get("mercados")
+                return [{"id": "evt1", "commence_time": "2026-08-14T22:00:00Z", "home_team": "A", "away_team": "B", "bookmakers": []}]
+
+            def fake_analizar(partidos, elos, **kwargs):
+                captured["mercados_analizar"] = list(kwargs.get("mercados") or [])
+                return []
+
+            main.cuotas = fake_cuotas
+            main.analizar_comparador_casas = fake_analizar
+            main.penalizaciones_historicas_seguras = lambda: {}
+            main.politica_riesgo_actual = lambda: {
+                "sample_stage": "seed",
+                "stake_multiplier": 1.0,
+                "max_stake_units": 5.0,
+                "block_new_picks": False,
+                "block_fragile_markets": False,
+                "only_elite_when_cautious": False,
+                "reason": "normal",
+            }
+            main.performance_guard_actual = lambda: {"blocked_sports": {}, "blocked_leagues": {}}
+
+            result = main.construir_publicacion_apuestas_lab(
+                bankroll=200.0,
+                perfil="agresivo",
+                modo="comparador",
+                mercados="todo",
+                partido="todos",
+                deporte="todo",
+                solo_stakazos=False,
+            )
+        finally:
+            main.deportes_agregados_para_todo = original_deportes
+            main.resolver_mercados_para_todo_filtrado = original_resolver_markets
+            main.resolver_contexto_deporte = original_resolver_contexto
+            main.cuotas = original_cuotas
+            main.analizar_comparador_casas = original_analizar
+            main.penalizaciones_historicas_seguras = original_penalizaciones
+            main.politica_riesgo_actual = original_riesgo
+            main.performance_guard_actual = original_performance
+
+        self.assertEqual(captured["mercados_cuotas"], "h2h,totals,alternate_totals")
+        self.assertEqual(captured["mercados_analizar"], ["h2h", "totals", "alternate_totals"])
+        self.assertIn("18 ligas", result["lab_data"]["forecast"]["aviso_cobertura"])
+        self.assertIn("mercados completos", result["lab_data"]["forecast"]["aviso_cobertura"])
 
     def test_build_the_odds_query_params_usa_bookmakers_recomendados_por_defecto(self):
         import app.providers as providers

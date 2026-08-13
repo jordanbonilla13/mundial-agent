@@ -131,7 +131,7 @@ def _build_operational_fallback_picks(
                 continue
             if reliability < 60:
                 continue
-            if quality < 45 and reliability < 66:
+            if quality < 50:
                 continue
             if value_pct < 0.35 and margin < 1.003:
                 continue
@@ -223,6 +223,8 @@ def _build_emergency_fallback_picks(
         quality = float(pick.get("quality_score") or 0)
         value_pct = float(pick.get("valor_esperado") or 0) * 100
         margin = float(pick.get("margen_cuota") or 0)
+        if quality < 50:
+            continue
         if reliability < 45 and quality < 45 and value_pct < 0.8 and margin < 1.002:
             continue
 
@@ -291,8 +293,7 @@ def _build_last_resort_picks(
         reason_text = str(pick.get("motivo_es") or pick.get("motivo") or "").strip()
         if not (_promotable_discard_reason(reason_text) or _promotable_discard_reason_loose(reason_text)):
             continue
-        if "sin margen suficiente" in reason_text.lower():
-            continue
+        thin_margin_reason = "sin margen suficiente" in reason_text.lower()
 
         cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or 0)
         if cuota <= 0 or cuota > 2.4:
@@ -306,6 +307,10 @@ def _build_last_resort_picks(
 
         reliability = float(pick.get("reliability_score") or 0)
         quality = float(pick.get("quality_score") or 0)
+        if quality < 50:
+            continue
+        if thin_margin_reason and reliability < 60:
+            continue
         if quality < 55 and reliability < 68:
             continue
 

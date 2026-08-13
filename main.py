@@ -1954,6 +1954,8 @@ def seleccionar_picks_para_apuestas_lab(
             return False
         if cuota <= 0 or cuota > 3.4:
             return False
+        if quality < 50:
+            return False
         return quality >= 55 or reliability >= 68
 
     def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, float, float, float]:
@@ -2023,7 +2025,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
 
     if deporte == "todo":
         deportes_objetivo = deportes_agregados_para_todo(
-            max_total=12,
+            max_total=18,
             strict_family_limits=False,
         )
         sport_label = "Todo"
@@ -2062,11 +2064,11 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
                 }
             )
             continue
-        mercados_featured = [market for market in mercados_lista if market in FEATURED_MARKETS] or ["h2h"]
+        mercados_operativos = list(mercados_lista)
 
         try:
             data_partidos = cuotas(
-                mercados=",".join(mercados_featured),
+                mercados=",".join(mercados_operativos),
                 deporte=deporte_item,
             )
             partidos = filtrar_partidos(data_partidos, partido)
@@ -2099,7 +2101,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
                 perfil=perfil,
                 casa_referencia=REFERENCE_BOOKMAKER,
                 incluir_referencia=False,
-                mercados=mercados_featured,
+                mercados=mercados_operativos,
                 source_strength=source_strength_for_context(
                     str(contexto.get("catalog_key") or ""),
                     bool(contexto.get("supports_elo")),
@@ -2211,7 +2213,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         "partidos_disponibles": list({item["id"]: item for item in partidos_total if item.get("id")}.values()),
         "aviso_mercados": None,
         "aviso_cobertura": (
-            f"Modo ampliado /apuestas: {len(deportes_objetivo)} ligas revisadas con mercados featured y filtro final de mejores picks en las proximas 48h."
+            f"Modo ampliado /apuestas: {len(deportes_objetivo)} ligas revisadas con mercados completos y filtro final de mejores picks en las proximas 48h."
         ),
         "cobertura_deportes": cobertura,
         "errores_cobertura": errores_cobertura,
