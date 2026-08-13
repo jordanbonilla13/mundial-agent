@@ -1780,6 +1780,15 @@ def pronosticos_compactos_para_apuestas(
         solo_stakazos=solo_stakazos,
     )
     payload = dict(built.get("payload") or {})
+    forecast = dict(((built.get("lab_data") or {}).get("forecast")) or {})
+    payload["pronosticos"] = _apply_final_conservative_soccer_totals_overrides(
+        list(payload.get("pronosticos") or []),
+        event_odds_map=dict(forecast.get("_event_odds_map") or {}),
+    )
+    payload["mensajes_telegram"] = [
+        formatear_mensaje_telegram_pick(pick)
+        for pick in list(payload.get("pronosticos") or [])
+    ]
     payload["zero_picks_diagnostics"] = dict(built.get("zero_picks_diagnostics") or {})
     return payload
 
@@ -1803,10 +1812,18 @@ def publicar_pronosticos_lab_compacto(
         solo_stakazos=solo_stakazos,
     )
     payload = dict(built.get("payload") or {})
+    forecast = dict(((built.get("lab_data") or {}).get("forecast")) or {})
+    payload["pronosticos"] = _apply_final_conservative_soccer_totals_overrides(
+        list(payload.get("pronosticos") or []),
+        event_odds_map=dict(forecast.get("_event_odds_map") or {}),
+    )
+    payload["mensajes_telegram"] = [
+        formatear_mensaje_telegram_pick(pick)
+        for pick in list(payload.get("pronosticos") or [])
+    ]
     picks_publicables = list(payload.get("pronosticos") or [])
     diagnostics = dict(built.get("zero_picks_diagnostics") or {})
     fallback_used = None
-    forecast = dict(((built.get("lab_data") or {}).get("forecast")) or {})
     if not picks_publicables:
         fallback_source = {
             **forecast,
@@ -2231,6 +2248,23 @@ def _find_conservative_soccer_totals_from_event_odds(
                 if best is None or sort_key < (best[0], best[1]):
                     best = (sort_key[0], sort_key[1], candidate)
     return best[2] if best else None
+
+
+def _apply_final_conservative_soccer_totals_overrides(
+    picks: list[dict[str, Any]],
+    *,
+    event_odds_map: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    resolved_map = dict(event_odds_map or {})
+    adjusted: list[dict[str, Any]] = []
+    for pick in list(picks or []):
+        event_id = str(pick.get("event_id") or "").strip()
+        alternative = _find_conservative_soccer_totals_from_event_odds(
+            pick,
+            resolved_map.get(event_id),
+        )
+        adjusted.append(alternative or pick)
+    return adjusted
 
 
 def seleccionar_picks_para_apuestas_lab(
