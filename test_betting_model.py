@@ -4810,7 +4810,7 @@ class BettingModelTests(unittest.TestCase):
                     "partido": "Good Quality",
                     "commence_time": "2026-08-14T11:00:00Z",
                     "cuota_apuesta": 1.95,
-                    "quality_score": 55,
+                    "quality_score": 68,
                     "reliability_score": 70,
                 },
             ]
@@ -4821,6 +4821,44 @@ class BettingModelTests(unittest.TestCase):
             main.datetime = original_datetime
 
         self.assertEqual([pick["partido"] for pick in picks], ["Good Quality"])
+
+    def test_seleccionar_picks_para_apuestas_lab_excluye_reliability_baja(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_selector = main.seleccionar_picks_para_telegram
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            main.seleccionar_picks_para_telegram = lambda *args, **kwargs: [
+                {
+                    "partido": "Weak Reliability",
+                    "commence_time": "2026-08-14T10:00:00Z",
+                    "cuota_apuesta": 1.95,
+                    "quality_score": 62,
+                    "reliability_score": 46,
+                },
+                {
+                    "partido": "Strong Reliability",
+                    "commence_time": "2026-08-14T11:00:00Z",
+                    "cuota_apuesta": 1.95,
+                    "quality_score": 61,
+                    "reliability_score": 60,
+                },
+            ]
+
+            picks = main.seleccionar_picks_para_apuestas_lab({"mejores_apuestas": []})
+        finally:
+            main.seleccionar_picks_para_telegram = original_selector
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["partido"] for pick in picks], ["Strong Reliability"])
 
     def test_construir_publicacion_apuestas_lab_usa_analisis_directo(self):
         import main
@@ -5329,8 +5367,8 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(captured["mercados_cuotas"], "h2h,totals,alternate_totals")
         self.assertEqual(captured["mercados_analizar"], ["h2h", "totals", "alternate_totals"])
-        self.assertEqual(captured["aggregate_kwargs"]["max_total"], 30)
-        self.assertIn("30 ligas", result["lab_data"]["forecast"]["aviso_cobertura"])
+        self.assertEqual(captured["aggregate_kwargs"]["max_total"], 42)
+        self.assertIn("42 ligas", result["lab_data"]["forecast"]["aviso_cobertura"])
         self.assertIn("mercados completos", result["lab_data"]["forecast"]["aviso_cobertura"])
 
     def test_build_the_odds_query_params_usa_bookmakers_recomendados_por_defecto(self):

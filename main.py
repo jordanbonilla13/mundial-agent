@@ -1934,7 +1934,7 @@ def seleccionar_picks_para_apuestas_lab(
     base = seleccionar_picks_para_telegram(
         data,
         solo_stakazos=solo_stakazos,
-        max_items=6 if not solo_stakazos else 4,
+        max_items=12 if not solo_stakazos else 4,
     )
     if solo_stakazos:
         return base[:4]
@@ -1964,12 +1964,17 @@ def seleccionar_picks_para_apuestas_lab(
         if cuota <= 0 or cuota > 3.4:
             _bump_reason("Cuota fuera del rango operativo")
             return False
-        if quality < 50:
-            _bump_reason(f"Quality por debajo del minimo ({int(quality)}/50)")
+        if quality < 58:
+            _bump_reason(f"Quality por debajo del minimo ({int(quality)}/58)")
             return False
-        if not (quality >= 55 or reliability >= 68):
+        if reliability < 52:
             _bump_reason(
-                f"Filtro final Telegram insuficiente (quality {int(quality)} / reliability {int(reliability)})"
+                f"Reliability por debajo del minimo ({int(reliability)}/52)"
+            )
+            return False
+        if (quality + reliability) < 120:
+            _bump_reason(
+                f"Filtro final Telegram insuficiente (quality {int(quality)} + reliability {int(reliability)} < 120)"
             )
             return False
         return True
@@ -1977,7 +1982,7 @@ def seleccionar_picks_para_apuestas_lab(
     def _pick_sort_key(pick: dict[str, Any]) -> tuple[int, float, float, float]:
         commence = _parse_apuestas_compact_commence(pick.get("commence_time"))
         if commence is None:
-            return (3, 9999.0, -float(pick.get("quality_score") or 0), -float(pick.get("reliability_score") or 0))
+            return (3, -float(pick.get("reliability_score") or 0), -float(pick.get("quality_score") or 0), 9999.0)
         delta_hours = (commence - now).total_seconds() / 3600
         if delta_hours <= 6:
             bucket = 0
@@ -1989,7 +1994,12 @@ def seleccionar_picks_para_apuestas_lab(
             bucket = 3
         else:
             bucket = 4
-        return (bucket, max(delta_hours, 0.0), -float(pick.get("quality_score") or 0), -float(pick.get("reliability_score") or 0))
+        return (
+            bucket,
+            -float(pick.get("reliability_score") or 0),
+            -float(pick.get("quality_score") or 0),
+            max(delta_hours, 0.0),
+        )
 
     reasonable = [pick for pick in base if _is_reasonable_pick(pick)]
     data["_apuestas_selector_candidates"] = len(base)
@@ -2046,7 +2056,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
 
     if deporte == "todo":
         deportes_objetivo = deportes_agregados_para_todo(
-            max_total=30,
+            max_total=42,
             strict_family_limits=False,
         )
         sport_label = "Todo"
