@@ -1835,7 +1835,7 @@ def publicar_pronosticos_lab_compacto(
             fallback_candidates = _build_operational_fallback_picks(
                 fallback_source,
                 bankroll=bankroll,
-                max_items=3,
+                max_items=5,
             )
             fallback_candidates = [
                 pick for pick in fallback_candidates
@@ -2446,7 +2446,7 @@ def seleccionar_picks_para_apuestas_lab(
 
     reasonable = collapsed_reasonable + list(grouped_totals.values())
     reasonable.sort(key=_pick_sort_key)
-    selected = reasonable[:3]
+    selected = reasonable[:5]
     candidate_pool = list(data.get("mejores_apuestas_ampliadas") or data.get("mejores_apuestas") or [])
     event_odds_map = dict(data.get("_event_odds_map") or {})
     refined_selected: list[dict[str, Any]] = []
@@ -2475,7 +2475,7 @@ def seleccionar_picks_para_apuestas_lab(
         seen_keys.add(key)
         deduped_selected.append(pick)
 
-    return deduped_selected[:3]
+    return deduped_selected[:5]
 
 
 def _build_apuestas_zero_diagnostics_from_lab(lab_data: dict[str, Any]) -> dict[str, Any]:
@@ -2676,7 +2676,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
     seguimiento_full = [pick for pick in recomendadas_ordenadas_full if str(pick.get("elite_tier") or "").lower() == "seguimiento"]
 
     recomendadas_ordenadas = list(recomendadas_ordenadas_full)
-    max_publicables = min(telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos), 4)
+    max_publicables = min(telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos), 5)
     recomendadas_ordenadas = apply_exposure_limits(
         recomendadas_ordenadas,
         operating_mode=RISK_OPERATING_MODE,
@@ -5242,7 +5242,7 @@ def apuestas_hoy_para_telegram_ultracompacta(
             max_total=max_total,
         ),
         single_sport_pick_limit=lambda partido_actual: single_sport_pick_limit(RISK_OPERATING_MODE, partido_actual),
-        multi_sport_pick_limit=lambda: min(telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos), 4),
+        multi_sport_pick_limit=lambda: min(telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos), 5),
         run_single_request=None,
     )
     return run_forecast_request(
