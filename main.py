@@ -64,6 +64,9 @@ from app.lab_service import build_empty_lab_run, build_lab_run, render_lab_run_h
 from app.prediction_service import build_prediction_payload
 from app.performance_guard_service import build_performance_guard, apply_performance_guard_to_pick
 from app.publication_service import (
+    _build_emergency_fallback_picks,
+    _build_last_resort_picks,
+    _build_operational_fallback_picks,
     fingerprint_pick as fingerprint_pick_service,
     publish_telegram_predictions,
     select_picks_for_telegram,
@@ -1760,7 +1763,57 @@ def publicar_pronosticos_lab_compacto(
     payload = dict(built.get("payload") or {})
     picks_publicables = list(payload.get("pronosticos") or [])
     diagnostics = dict(built.get("zero_picks_diagnostics") or {})
+    fallback_used = None
+    forecast = dict(((built.get("lab_data") or {}).get("forecast")) or {})
     if not picks_publicables:
+        fallback_source = {
+            **forecast,
+            "descartadas_operativas": list(forecast.get("descartadas_operativas") or []),
+            "descartadas": list(forecast.get("descartadas") or []),
+        }
+        fallback_candidates = []
+        if not solo_stakazos:
+            fallback_candidates = _build_operational_fallback_picks(
+                fallback_source,
+                bankroll=bankroll,
+                max_items=3,
+            )
+            if fallback_candidates:
+                fallback_used = "operational"
+            else:
+                fallback_candidates = _build_emergency_fallback_picks(
+                    fallback_source,
+                    bankroll=bankroll,
+                    max_items=2,
+                )
+                if fallback_candidates:
+                    fallback_used = "emergency"
+                else:
+                    fallback_candidates = _build_last_resort_picks(
+                        fallback_source,
+                        bankroll=bankroll,
+                        max_items=1,
+                    )
+                    if fallback_candidates:
+                        fallback_used = "last_resort"
+        if fallback_candidates:
+            payload["pronosticos"] = fallback_candidates
+            payload["mensajes_telegram"] = [formatear_mensaje_telegram_pick(pick) for pick in fallback_candidates]
+            payload["resumen_telegram"] = format_summary_message(
+                sport_label=payload.get("deporte"),
+                league_label=payload.get("liga"),
+                perfil_label=perfil_es(perfil if perfil in PERFILES_STAKE else "moderado"),
+                modo_label=modo_es(modo if modo in MODOS_INFORME else "comparador"),
+                total_elite=int(payload.get("total_elite", 0) or 0),
+                total_stakazos=int(payload.get("total_stakazos", 0) or 0),
+                total_messages=len(fallback_candidates),
+                solo_stakazos=solo_stakazos,
+                ai_summary=None,
+            )
+            result = publicar_payload_preparado(payload, publication_type="apuestas")
+            diagnostics["compact_fallback_used"] = fallback_used
+            result["zero_picks_diagnostics"] = diagnostics
+            return result
         return {
             "ok": True,
             "picks_guardados": 0,
@@ -1769,6 +1822,8 @@ def publicar_pronosticos_lab_compacto(
             "zero_picks_diagnostics": diagnostics,
         }
     result = publicar_payload_preparado(payload, publication_type="apuestas")
+    if fallback_used:
+        diagnostics["compact_fallback_used"] = fallback_used
     result["zero_picks_diagnostics"] = diagnostics
     return result
 

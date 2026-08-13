@@ -5371,6 +5371,77 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("42 ligas", result["lab_data"]["forecast"]["aviso_cobertura"])
         self.assertIn("mercados completos", result["lab_data"]["forecast"]["aviso_cobertura"])
 
+    def test_publicar_pronosticos_lab_compacto_rescata_fallback_si_selector_final_devuelve_vacio(self):
+        import main
+
+        original_construir = main.construir_publicacion_apuestas_lab
+        original_operational = main._build_operational_fallback_picks
+        original_publish = main.publicar_payload_preparado
+
+        captured = {}
+
+        try:
+            main.construir_publicacion_apuestas_lab = lambda **kwargs: {
+                "payload": {
+                    "deporte": "Todo",
+                    "liga": "Todas las ligas base",
+                    "total_elite": 0,
+                    "total_stakazos": 0,
+                    "pronosticos": [],
+                    "mensajes_telegram": [],
+                    "resumen_telegram": "resumen",
+                },
+                "lab_data": {
+                    "forecast": {
+                        "descartadas_operativas": [{"partido": "Fallback Match"}],
+                        "descartadas": [{"partido": "Fallback Match"}],
+                    }
+                },
+                "zero_picks_diagnostics": {"analizadas": 10, "recomendadas": 1},
+            }
+            main._build_operational_fallback_picks = lambda data, **kwargs: [
+                {
+                    "partido": "Fallback Match",
+                    "equipo": "Fallback Pick",
+                    "mercado": "h2h",
+                    "casa": "Pinnacle",
+                    "cuota_apuesta": 1.8,
+                    "stake": 0.75,
+                    "importe_sugerido": 4.0,
+                    "quality_score": 60,
+                    "reliability_score": 58,
+                    "sport_label": "Futbol",
+                    "league_label": "Liga Test",
+                }
+            ]
+
+            def fake_publish(payload, publication_type="apuestas"):
+                captured["payload"] = payload
+                captured["publication_type"] = publication_type
+                return {"ok": True, "mensajes_enviados": 2, "picks_guardados": 1, "publication_id": 999}
+
+            main.publicar_payload_preparado = fake_publish
+
+            result = main.publicar_pronosticos_lab_compacto(
+                bankroll=200.0,
+                perfil="agresivo",
+                modo="comparador",
+                mercados="todo",
+                partido="todos",
+                deporte="todo",
+                solo_stakazos=False,
+            )
+        finally:
+            main.construir_publicacion_apuestas_lab = original_construir
+            main._build_operational_fallback_picks = original_operational
+            main.publicar_payload_preparado = original_publish
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["picks_guardados"], 1)
+        self.assertEqual(result["zero_picks_diagnostics"]["compact_fallback_used"], "operational")
+        self.assertEqual(len(captured["payload"]["pronosticos"]), 1)
+        self.assertIn("Fallback Match", captured["payload"]["mensajes_telegram"][0])
+
     def test_build_the_odds_query_params_usa_bookmakers_recomendados_por_defecto(self):
         import app.providers as providers
 
