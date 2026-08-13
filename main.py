@@ -271,24 +271,50 @@ def cargar_filtros_todo() -> dict[str, set[str]]:
         for item in (data.get("disabled_markets") or [])
         if str(item).strip()
     }
+    mercados_por_deporte = {
+        str(item).strip().lower()
+        for item in (data.get("disabled_market_pairs") or [])
+        if str(item).strip()
+    }
+    if mercados and not mercados_por_deporte:
+        familias = list(TODO_LIMITS_BY_FAMILY.keys())
+        mercados_por_deporte = {
+            f"{family}::{market}"
+            for family in familias
+            for market in mercados
+        }
     return {
         "disabled_sports": deportes,
         "disabled_leagues": ligas,
-        "disabled_markets": mercados,
+        "disabled_markets": set(),
+        "disabled_market_pairs": mercados_por_deporte,
     }
 
 
-def guardar_filtros_todo(*, disabled_sports: set[str], disabled_leagues: set[str], disabled_markets: set[str]) -> dict[str, set[str]]:
+def guardar_filtros_todo(
+    *,
+    disabled_sports: set[str],
+    disabled_leagues: set[str],
+    disabled_markets: set[str],
+    disabled_market_pairs: set[str] | None = None,
+) -> dict[str, set[str]]:
+    market_pairs = {
+        str(item).strip().lower()
+        for item in (disabled_market_pairs or set())
+        if str(item).strip()
+    }
     payload = {
         "disabled_sports": sorted({str(item).strip().lower() for item in disabled_sports if str(item).strip()}),
         "disabled_leagues": sorted({str(item).strip().lower() for item in disabled_leagues if str(item).strip()}),
-        "disabled_markets": sorted({str(item).strip().lower() for item in disabled_markets if str(item).strip()}),
+        "disabled_markets": [],
+        "disabled_market_pairs": sorted(market_pairs),
     }
     guardar_setting(TODO_FILTERS_SETTING, json.dumps(payload, ensure_ascii=False))
     return {
         "disabled_sports": set(payload["disabled_sports"]),
         "disabled_leagues": set(payload["disabled_leagues"]),
-        "disabled_markets": set(payload["disabled_markets"]),
+        "disabled_markets": set(),
+        "disabled_market_pairs": set(payload["disabled_market_pairs"]),
     }
 
 
@@ -296,7 +322,7 @@ def build_todo_toggle_groups(provider: str | None = None) -> dict[str, Any]:
     filtros = cargar_filtros_todo()
     disabled_sports = filtros["disabled_sports"]
     disabled_leagues = filtros["disabled_leagues"]
-    disabled_markets = filtros["disabled_markets"]
+    disabled_market_pairs = filtros.get("disabled_market_pairs") or set()
     sports_items = [
         {"key": key, "label": info.get("sport_label", key), "enabled": key not in disabled_sports}
         for key, info in SPORT_CATALOG.items()
@@ -319,18 +345,27 @@ def build_todo_toggle_groups(provider: str | None = None) -> dict[str, Any]:
             }
         )
     league_items.sort(key=lambda item: item["label"])
-    market_items = [
-        {
-            "key": market,
-            "label": etiqueta_mercado_toggle(market),
-            "enabled": market not in disabled_markets,
-        }
-        for market in sorted(MERCADOS_DISPONIBLES)
-    ]
+    market_items: list[dict[str, Any]] = []
+    for family in TODO_LIMITS_BY_FAMILY:
+        family_label = SPORT_PREFIX_LABELS.get(family, family.title())
+        sport_bucket = str(SPORT_ALIASES.get(family, family)).strip().lower()
+        market_items.extend(
+            {
+                "key": f"{family}::{market}",
+                "market_key": market,
+                "family": family,
+                "family_label": family_label,
+                "sport_bucket": sport_bucket,
+                "label": etiqueta_mercado_toggle(market),
+                "enabled": f"{family}::{market}" not in disabled_market_pairs,
+            }
+            for market in sorted(MERCADOS_DISPONIBLES)
+        )
     return {
         "disabled_sports": disabled_sports,
         "disabled_leagues": disabled_leagues,
-        "disabled_markets": disabled_markets,
+        "disabled_markets": set(),
+        "disabled_market_pairs": disabled_market_pairs,
         "sports": sports_items,
         "leagues": league_items,
         "markets": market_items,
@@ -791,6 +826,27 @@ def aplicar_filtros_mercados_todo(mercados: list[str]) -> list[str]:
     if not disabled_markets:
         return list(mercados)
     filtrados = [mercado for mercado in mercados if str(mercado).strip().lower() not in disabled_markets]
+    return filtrados
+
+
+def aplicar_filtros_mercados_todo_por_deporte(mercados: list[str], deporte: str | None = None) -> list[str]:
+    filtros = cargar_filtros_todo()
+    disabled_pairs = {
+        str(item).strip().lower()
+        for item in (filtros.get("disabled_market_pairs") or set())
+        if str(item).strip()
+    }
+    if not disabled_pairs:
+        return list(mercados)
+    contexto = resolver_contexto_deporte(deporte)
+    family = family_from_sport_key(str(contexto.get("sport_key") or ""))
+    if not family:
+        return list(mercados)
+    filtrados = [
+        mercado
+        for mercado in mercados
+        if f"{family}::{str(mercado).strip().lower()}" not in disabled_pairs
+    ]
     return filtrados
 
 
@@ -3877,7 +3933,7 @@ def resolver_mercados(filtro: str, deporte: str | None = None) -> tuple[list[str
 
 def resolver_mercados_para_todo_filtrado(filtro: str, deporte: str | None = None) -> tuple[list[str], str | None]:
     mercados, aviso = resolver_mercados(filtro, deporte=deporte)
-    filtrados = aplicar_filtros_mercados_todo(mercados)
+    filtrados = aplicar_filtros_mercados_todo_por_deporte(mercados, deporte=deporte)
     if filtrados:
         return filtrados, aviso
     return [], (
@@ -4332,6 +4388,7 @@ def apuestas_hoy(
     historical_from: str | None = None,
     historical_to: str | None = None,
 ):
+    resolve_markets_fn = resolver_mercados_para_todo_filtrado if str(deporte).strip().lower() == "todo" else resolver_mercados
     deps = ForecastDependencies(
         provider_name=ODDS_PROVIDER,
         reference_bookmaker=REFERENCE_BOOKMAKER,
@@ -4340,7 +4397,7 @@ def apuestas_hoy(
         get_bankroll=obtener_bankroll_seguro,
         update_bankroll=actualizar_bankroll_seguro,
         resolve_context=resolver_contexto_deporte,
-        resolve_markets=resolver_mercados,
+        resolve_markets=resolve_markets_fn,
         list_sport_options=lambda: opciones_deporte_disponibles(),
         aggregate_sports=lambda: deportes_agregados_para_todo(
             max_total=24,
@@ -5256,13 +5313,14 @@ async def lab_run_todo_filters(request: Request):
     key = str(form.get("key") or "").strip().lower()
     enabled = str(form.get("enabled") or "").strip().lower() == "true"
 
-    if scope not in {"sport", "league", "market"} or not key:
+    if scope not in {"sport", "league", "market", "market_pair"} or not key:
         raise HTTPException(status_code=400, detail="Filtro no valido")
 
     filtros = cargar_filtros_todo()
     disabled_sports = set(filtros["disabled_sports"])
     disabled_leagues = set(filtros["disabled_leagues"])
     disabled_markets = set(filtros.get("disabled_markets") or set())
+    disabled_market_pairs = set(filtros.get("disabled_market_pairs") or set())
 
     if scope == "sport":
         if enabled:
@@ -5274,16 +5332,22 @@ async def lab_run_todo_filters(request: Request):
             disabled_leagues.discard(key)
         else:
             disabled_leagues.add(key)
-    else:
+    elif scope == "market":
         if enabled:
             disabled_markets.discard(key)
         else:
             disabled_markets.add(key)
+    else:
+        if enabled:
+            disabled_market_pairs.discard(key)
+        else:
+            disabled_market_pairs.add(key)
 
     guardar_filtros_todo(
         disabled_sports=disabled_sports,
         disabled_leagues=disabled_leagues,
         disabled_markets=disabled_markets,
+        disabled_market_pairs=disabled_market_pairs,
     )
 
     query = _redirect_query_for_lab_filters(form)

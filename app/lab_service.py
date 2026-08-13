@@ -643,7 +643,7 @@ def build_lab_run(
             "snapshots_guardados": int(forecast.get("snapshots_guardados", 0) or 0),
         },
         "learning_panel": learning_panel,
-        "todo_toggle_panel": todo_toggle_panel or {"sports": [], "leagues": [], "markets": [], "disabled_sports": set(), "disabled_leagues": set(), "disabled_markets": set()},
+        "todo_toggle_panel": todo_toggle_panel or {"sports": [], "leagues": [], "markets": [], "disabled_sports": set(), "disabled_leagues": set(), "disabled_markets": set(), "disabled_market_pairs": set()},
         "historical_evaluation": historical_evaluation,
         "forecast_summary": {
             "sport_label": forecast.get("sport_label"),
@@ -735,6 +735,7 @@ def build_empty_lab_run(
             "disabled_sports": set(),
             "disabled_leagues": set(),
             "disabled_markets": set(),
+            "disabled_market_pairs": set(),
         },
         "publishable_preview": [],
         "blocked_picks": {
@@ -1065,25 +1066,35 @@ def render_lab_run_html(
         for item in todo_leagues
         if str(item.get("key") or "").strip()
     ) or '<div class="card"><p class="muted">Todavia no hay ligas detectadas para este proveedor.</p></div>'
-    market_toggle_cards = "".join(
-        (
-            '<form method="post" action="/lab/run/todo-filters" class="toggle-card">'
-            '<input type="hidden" name="scope" value="market">'
-            f'<input type="hidden" name="key" value="{escape(str(item.get("key") or ""), quote=True)}">'
-            f'<input type="hidden" name="enabled" value="{"false" if item.get("enabled") else "true"}">'
-            f"{toggle_form_inputs}"
-            '<button type="submit" class="toggle-row">'
-            '<span class="toggle-copy">'
-            f'<strong>{escape(str(item.get("label") or item.get("key") or "Mercado"))}</strong>'
-            f'<small>{"Activo en deporte=todo y /apuestas" if item.get("enabled") else "Ignorado en deporte=todo y /apuestas"}</small>'
-            '</span>'
-            f'<span class="toggle-switch {"on" if item.get("enabled") else "off"}" aria-hidden="true"><span class="toggle-knob"></span></span>'
-            '</button>'
-            '</form>'
+    market_sections: list[str] = []
+    markets_by_family: dict[str, list[dict[str, object]]] = {}
+    for item in todo_markets:
+        family_label = str(item.get("family_label") or "General")
+        markets_by_family.setdefault(family_label, []).append(item)
+    for family_label, items in markets_by_family.items():
+        cards = "".join(
+            (
+                '<form method="post" action="/lab/run/todo-filters" class="toggle-card">'
+                '<input type="hidden" name="scope" value="market_pair">'
+                f'<input type="hidden" name="key" value="{escape(str(item.get("key") or ""), quote=True)}">'
+                f'<input type="hidden" name="enabled" value="{"false" if item.get("enabled") else "true"}">'
+                f"{toggle_form_inputs}"
+                '<button type="submit" class="toggle-row">'
+                '<span class="toggle-copy">'
+                f'<strong>{escape(str(item.get("label") or item.get("key") or "Mercado"))}</strong>'
+                f'<small>{"Activo en deporte=todo y /apuestas" if item.get("enabled") else "Ignorado en deporte=todo y /apuestas"}</small>'
+                '</span>'
+                f'<span class="toggle-switch {"on" if item.get("enabled") else "off"}" aria-hidden="true"><span class="toggle-knob"></span></span>'
+                '</button>'
+                '</form>'
+            )
+            for item in items
+            if str(item.get("key") or "").strip()
+        ) or '<div class="card"><p class="muted">Sin mercados configurables en este deporte.</p></div>'
+        market_sections.append(
+            f'<div><h3 style="margin-bottom: 12px;">{escape(family_label)}</h3><div class="toggle-grid">{cards}</div></div>'
         )
-        for item in todo_markets
-        if str(item.get("key") or "").strip()
-    ) or '<div class="card"><p class="muted">Todavia no hay mercados configurables para este proveedor.</p></div>'
+    market_toggle_cards = "".join(market_sections) or '<div class="card"><p class="muted">Todavia no hay mercados configurables para este proveedor.</p></div>'
     publish_action_html = ""
     if publishable_preview and not historical_mode:
         publish_action_html = (
@@ -1428,7 +1439,7 @@ def render_lab_run_html(
                     </div>
                     <div>
                         <h3 style="margin-bottom: 12px;">Mercados disponibles</h3>
-                        <div class="toggle-grid">{market_toggle_cards}</div>
+                        <div class="stack">{market_toggle_cards}</div>
                     </div>
                 </div>
             </section>

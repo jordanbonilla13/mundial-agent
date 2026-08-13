@@ -5007,7 +5007,8 @@ class BettingModelTests(unittest.TestCase):
             main.cargar_filtros_todo = lambda: {
                 "disabled_sports": set(),
                 "disabled_leagues": set(),
-                "disabled_markets": {"totals"},
+                "disabled_markets": set(),
+                "disabled_market_pairs": {"tennis::totals"},
             }
 
             mercados, aviso = main.resolver_mercados_para_todo_filtrado("todo", deporte="tennis_atp_canadian_open")
@@ -5028,7 +5029,8 @@ class BettingModelTests(unittest.TestCase):
             main.cargar_filtros_todo = lambda: {
                 "disabled_sports": set(),
                 "disabled_leagues": set(),
-                "disabled_markets": {"totals"},
+                "disabled_markets": set(),
+                "disabled_market_pairs": {"tennis::totals"},
             }
             main.opciones_deporte_disponibles = lambda provider=None: []
 
@@ -5038,8 +5040,9 @@ class BettingModelTests(unittest.TestCase):
             main.opciones_deporte_disponibles = original_opciones
 
         market_map = {item["key"]: item for item in panel["markets"]}
-        self.assertIn("totals", market_map)
-        self.assertFalse(market_map["totals"]["enabled"])
+        self.assertIn("tennis::totals", market_map)
+        self.assertFalse(market_map["tennis::totals"]["enabled"])
+        self.assertTrue(market_map["soccer::totals"]["enabled"])
 
     def test_construir_publicacion_apuestas_lab_respeta_markets_desactivados_en_todo(self):
         import main
