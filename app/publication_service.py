@@ -97,6 +97,7 @@ def _build_operational_fallback_picks(
     fallback: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str, str]] = set()
     bankroll_value = float(bankroll or 200.0)
+    now = datetime.now(timezone.utc)
     fallback_source = list(data.get("descartadas_operativas") or data.get("descartadas") or [])
 
     for pick in fallback_source:
@@ -113,18 +114,38 @@ def _build_operational_fallback_picks(
         margin = float(pick.get("margen_cuota") or 0)
         quality = float(pick.get("quality_score") or 0)
         cuota = float(pick.get("cuota_apuesta") or pick.get("cuota_pinnacle") or 0)
+        commence = _parse_commence_time(pick.get("commence_time"))
+        delta_hours = None
+        if commence is not None:
+            delta_hours = (commence - now).total_seconds() / 3600
+            if delta_hours < -2 or delta_hours > 48:
+                continue
 
         if reliability < 57:
             continue
+        thin_margin_reason = "sin margen suficiente" in reason_text.lower()
+        if thin_margin_reason:
+            if cuota <= 0 or cuota < 1.5 or cuota > 2.35:
+                continue
+            if delta_hours is not None and delta_hours > 36:
+                continue
+            if reliability < 60:
+                continue
+            if quality < 45 and reliability < 66:
+                continue
+            if value_pct < 0.35 and margin < 1.003:
+                continue
         if promotable_reason:
-            if value_pct < 1.2 and margin < 1.008:
+            if thin_margin_reason:
+                pass
+            elif value_pct < 1.2 and margin < 1.008:
                 continue
         elif quality < 52 and reliability < 64:
             continue
         elif value_pct < 1.6 and margin < 1.012:
             continue
 
-        if cuota and cuota > 3.35:
+        if cuota and (cuota > 3.35 or cuota < 1.5):
             continue
 
         promoted = dict(pick)

@@ -3005,6 +3005,7 @@ class BettingModelTests(unittest.TestCase):
                 "descartadas": [
                     {
                         "event_id": "evt_fb",
+                        "commence_time": "2026-08-14T18:00:00Z",
                         "partido": "A vs B",
                         "equipo": "A",
                         "mercado": "h2h",
@@ -3016,6 +3017,7 @@ class BettingModelTests(unittest.TestCase):
                         "motivo": "Cuota mejor que Pinnacle, pero sin margen suficiente para apostar",
                         "valor_esperado": 0.116,
                         "margen_cuota": 1.116,
+                        "cuota_apuesta": 1.93,
                         "stake": 0,
                         "importe_sugerido": 0,
                     }
@@ -3089,6 +3091,7 @@ class BettingModelTests(unittest.TestCase):
                 "descartadas_operativas": [
                     {
                         "event_id": "evt_good",
+                        "commence_time": "2026-08-14T18:00:00Z",
                         "partido": "A vs B",
                         "equipo": "A",
                         "mercado": "totals",
@@ -3157,7 +3160,7 @@ class BettingModelTests(unittest.TestCase):
                 "descartadas_operativas": [
                     {
                         "event_id": "evt_emergency",
-                        "commence_time": "2026-08-08T18:00:00Z",
+                        "commence_time": "2026-08-14T18:00:00Z",
                         "partido": "A vs B",
                         "equipo": "Menos de 3 goles",
                         "mercado": "totals",
@@ -3227,7 +3230,7 @@ class BettingModelTests(unittest.TestCase):
                 "descartadas_operativas": [
                     {
                         "event_id": "evt_es",
-                        "commence_time": "2026-08-08T10:00:00Z",
+                        "commence_time": "2026-08-14T10:00:00Z",
                         "partido": "A vs B",
                         "equipo": "Menos de 3 goles",
                         "mercado": "totals",
@@ -3296,7 +3299,7 @@ class BettingModelTests(unittest.TestCase):
                 "descartadas_operativas": [
                     {
                         "event_id": "evt_bad_longshot",
-                        "commence_time": "2026-08-07T19:45:00Z",
+                        "commence_time": "2026-08-14T19:45:00Z",
                         "partido": "Fav vs Dog",
                         "equipo": "Dog",
                         "mercado": "h2h",
