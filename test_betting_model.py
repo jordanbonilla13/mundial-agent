@@ -5041,6 +5041,110 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual([pick["partido"] for pick in picks], ["Elite Ajustada"])
 
+    def test_seleccionar_picks_para_apuestas_lab_prefiere_total_conservador_si_sigue_fuerte(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [
+                        {
+                            "event_id": "evt-1",
+                            "sport_key": "soccer_concacaf_leagues_cup",
+                            "partido": "Portland Timbers vs Tijuana",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.96,
+                            "quality_score": 62,
+                            "reliability_score": 46,
+                            "valor_esperado": 0.064,
+                        },
+                        {
+                            "event_id": "evt-1",
+                            "sport_key": "soccer_concacaf_leagues_cup",
+                            "partido": "Portland Timbers vs Tijuana",
+                            "equipo": "Menos de 4 goles",
+                            "mercado": "alternate_totals",
+                            "outcome_point": 4.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.57,
+                            "quality_score": 58,
+                            "reliability_score": 50,
+                            "valor_esperado": 0.038,
+                        },
+                    ]
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 4 goles"])
+
+    def test_seleccionar_picks_para_apuestas_lab_no_fuerza_total_conservador_si_cuota_cae_demasiado(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [
+                        {
+                            "event_id": "evt-2",
+                            "sport_key": "soccer_concacaf_leagues_cup",
+                            "partido": "Flamengo vs Vitoria",
+                            "equipo": "Menos de 3 goles",
+                            "mercado": "totals",
+                            "outcome_point": 3.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.94,
+                            "quality_score": 64,
+                            "reliability_score": 48,
+                            "valor_esperado": 0.058,
+                        },
+                        {
+                            "event_id": "evt-2",
+                            "sport_key": "soccer_concacaf_leagues_cup",
+                            "partido": "Flamengo vs Vitoria",
+                            "equipo": "Menos de 4 goles",
+                            "mercado": "alternate_totals",
+                            "outcome_point": 4.0,
+                            "elite_tier": "elite",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.32,
+                            "quality_score": 62,
+                            "reliability_score": 54,
+                            "valor_esperado": 0.035,
+                        },
+                    ]
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["equipo"] for pick in picks], ["Menos de 3 goles"])
+
     def test_construir_publicacion_apuestas_lab_no_mete_seguimiento_en_picks_elite(self):
         import main
 

@@ -2036,6 +2036,81 @@ def _parse_apuestas_compact_commence(value: Any) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _totals_direction_for_pick(pick: dict[str, Any]) -> str | None:
+    market = str(pick.get("mercado") or "").strip().lower()
+    if market not in {"totals", "alternate_totals"}:
+        return None
+    candidates = (
+        pick.get("equipo"),
+        pick.get("equipo_raw"),
+        pick.get("tipo_resultado"),
+        pick.get("tipo_resultado_raw"),
+        pick.get("selection"),
+    )
+    normalized = " ".join(str(value or "").strip().lower() for value in candidates)
+    if any(token in normalized for token in ("menos de", "under")):
+        return "under"
+    if any(token in normalized for token in ("más de", "mas de", "over")):
+        return "over"
+    return None
+
+
+def _conservative_totals_group_key(pick: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    direction = _totals_direction_for_pick(pick)
+    if not direction:
+        return None
+    event_id = str(pick.get("event_id") or "").strip()
+    partido = str(pick.get("partido") or "").strip().lower()
+    if not event_id and not partido:
+        return None
+    sport_key = str(pick.get("sport_key") or "").strip().lower()
+    return (event_id or partido, sport_key, "totals", direction)
+
+
+def _prefer_conservative_totals_pick(current: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    current_direction = _totals_direction_for_pick(current)
+    candidate_direction = _totals_direction_for_pick(candidate)
+    if not current_direction or current_direction != candidate_direction:
+        return False
+
+    try:
+        current_point = float(current.get("outcome_point"))
+        candidate_point = float(candidate.get("outcome_point"))
+    except (TypeError, ValueError):
+        return False
+
+    if current_direction == "under":
+        is_more_conservative = candidate_point > current_point
+    else:
+        is_more_conservative = candidate_point < current_point
+    if not is_more_conservative:
+        return False
+
+    current_cuota = float(current.get("cuota_apuesta") or current.get("cuota_pinnacle") or current.get("cuota") or 0)
+    candidate_cuota = float(candidate.get("cuota_apuesta") or candidate.get("cuota_pinnacle") or candidate.get("cuota") or 0)
+    current_quality = float(current.get("quality_score") or 0)
+    candidate_quality = float(candidate.get("quality_score") or 0)
+    current_reliability = float(current.get("reliability_score") or 0)
+    candidate_reliability = float(candidate.get("reliability_score") or 0)
+    current_value = float(current.get("valor_esperado") or 0)
+    candidate_value = float(candidate.get("valor_esperado") or 0)
+
+    if candidate_cuota < 1.5:
+        return False
+    if candidate_cuota + 0.45 < current_cuota:
+        return False
+    if candidate_quality + 10 < current_quality:
+        return False
+    if candidate_reliability + 8 < current_reliability:
+        return False
+    if candidate_value + 0.03 < current_value:
+        return False
+
+    candidate_balance = (candidate_quality + candidate_reliability) - max((current_cuota - candidate_cuota) * 12.0, 0.0)
+    current_balance = current_quality + current_reliability
+    return candidate_balance >= current_balance - 8
+
+
 def seleccionar_picks_para_apuestas_lab(
     data: dict[str, Any],
     solo_stakazos: bool = False,
@@ -2166,6 +2241,26 @@ def seleccionar_picks_para_apuestas_lab(
     ]
     if not reasonable:
         return []
+
+    collapsed_reasonable: list[dict[str, Any]] = []
+    grouped_totals: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for pick in reasonable:
+        group_key = _conservative_totals_group_key(pick)
+        if not group_key:
+            collapsed_reasonable.append(pick)
+            continue
+        current = grouped_totals.get(group_key)
+        if current is None:
+            grouped_totals[group_key] = pick
+            continue
+        if _prefer_conservative_totals_pick(current, pick):
+            grouped_totals[group_key] = pick
+            continue
+        if _prefer_conservative_totals_pick(pick, current):
+            continue
+        continue
+
+    reasonable = collapsed_reasonable + list(grouped_totals.values())
     reasonable.sort(key=_pick_sort_key)
     return reasonable[:3]
 
