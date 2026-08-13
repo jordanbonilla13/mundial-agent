@@ -2279,6 +2279,8 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         "descartadas_preview": len(list(forecast.get("descartadas") or [])),
         "partidos_disponibles": len(list(forecast.get("partidos_disponibles") or [])),
         "snapshots_guardados": 0,
+        "selector_candidates": int(payload.get("selector_candidates") or 0),
+        "selector_rejections": list(payload.get("selector_rejections") or []),
         "coverage_notice": str(forecast.get("aviso_cobertura") or "").strip(),
         "base_criteria": str(forecast.get("criterio") or "").strip(),
         "blocked_summary": dict(forecast.get("blocked_summary") or {}),

@@ -4943,6 +4943,8 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(captured["analizar"]["kwargs"]["perfil"], "agresivo")
         self.assertIn("payload", result)
         self.assertIn("zero_picks_diagnostics", result)
+        self.assertIn("selector_candidates", result["zero_picks_diagnostics"])
+        self.assertIn("selector_rejections", result["zero_picks_diagnostics"])
         self.assertGreaterEqual(len(result["payload"].get("pronosticos") or []), 1)
 
     def test_construir_publicacion_apuestas_lab_descarta_picks_mas_alla_de_48_horas(self):
