@@ -2436,6 +2436,15 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
     diagnostics = {
         "analizadas": int(forecast.get("total_analizadas") or 0),
         "recomendadas": int(forecast.get("total_recomendadas") or 0),
+        "tiers_summary": {
+            "stakazo": int(forecast.get("total_stakazos") or 0),
+            "elite": max(
+                0,
+                int(forecast.get("total_elite") or 0) - int(forecast.get("total_stakazos") or 0),
+            ),
+            "premium": int(forecast.get("total_premium") or 0),
+            "seguimiento": int(forecast.get("total_seguimiento") or 0),
+        },
         "descartadas_preview": len(list(forecast.get("descartadas") or [])),
         "partidos_disponibles": len(list(forecast.get("partidos_disponibles") or [])),
         "snapshots_guardados": 0,
@@ -2611,6 +2620,7 @@ def lanzar_apuestas_telegram_async() -> str:
                 discard_reasons = list(diagnostics.get("top_discard_reasons") or [])
                 selector_candidates = int(diagnostics.get("selector_candidates") or 0)
                 selector_rejections = list(diagnostics.get("selector_rejections") or [])
+                tiers_summary = dict(diagnostics.get("tiers_summary") or {})
                 coverage_notice = str(diagnostics.get("coverage_notice") or "").strip()
                 base_criteria = str(diagnostics.get("base_criteria") or "").strip()
                 blocked_summary = dict(diagnostics.get("blocked_summary") or {})
@@ -2621,6 +2631,14 @@ def lanzar_apuestas_telegram_async() -> str:
                     f"Partidos disponibles: <b>{available_matches}</b>",
                     f"Snapshots: <b>{snapshots}</b>",
                 ]
+                if tiers_summary:
+                    detail_lines.append(
+                        "Tiers: "
+                        f"stakazo <b>{int(tiers_summary.get('stakazo') or 0)}</b> | "
+                        f"elite <b>{int(tiers_summary.get('elite') or 0)}</b> | "
+                        f"premium <b>{int(tiers_summary.get('premium') or 0)}</b> | "
+                        f"seguimiento <b>{int(tiers_summary.get('seguimiento') or 0)}</b>"
+                    )
                 if selector_candidates:
                     detail_lines.append(f"Candidatas al filtro final: <b>{selector_candidates}</b>")
                 if selector_rejections:

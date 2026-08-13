@@ -4631,6 +4631,12 @@ class BettingModelTests(unittest.TestCase):
                 "zero_picks_diagnostics": {
                     "analizadas": 42,
                     "recomendadas": 2,
+                    "tiers_summary": {
+                        "stakazo": 0,
+                        "elite": 1,
+                        "premium": 0,
+                        "seguimiento": 1,
+                    },
                     "descartadas_preview": 5,
                     "partidos_disponibles": 18,
                     "snapshots_guardados": 144,
@@ -4674,6 +4680,7 @@ class BettingModelTests(unittest.TestCase):
         self.assertIn("Descartadas visibles: <b>5</b>", sent_messages[0])
         self.assertIn("Partidos disponibles: <b>18</b>", sent_messages[0])
         self.assertIn("Snapshots: <b>144</b>", sent_messages[0])
+        self.assertIn("Tiers: stakazo <b>0</b> | elite <b>1</b> | premium <b>0</b> | seguimiento <b>1</b>", sent_messages[0])
         self.assertIn("Candidatas al filtro final: <b>1</b>", sent_messages[0])
         self.assertIn("Quality por debajo del minimo (40/50) x1", sent_messages[0])
         self.assertIn("Bloqueado por guard de mercado x3", sent_messages[0])
