@@ -2046,7 +2046,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
 
     if deporte == "todo":
         deportes_objetivo = deportes_agregados_para_todo(
-            max_total=18,
+            max_total=30,
             strict_family_limits=False,
         )
         sport_label = "Todo"

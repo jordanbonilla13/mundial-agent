@@ -5270,7 +5270,12 @@ class BettingModelTests(unittest.TestCase):
         captured = {}
 
         try:
-            main.deportes_agregados_para_todo = lambda **kwargs: [f"soccer_league_{i}" for i in range(18)]
+            def fake_deportes_agregados_para_todo(**kwargs):
+                captured["aggregate_kwargs"] = dict(kwargs)
+                max_total = int(kwargs.get("max_total") or 0)
+                return [f"soccer_league_{i}" for i in range(max_total)]
+
+            main.deportes_agregados_para_todo = fake_deportes_agregados_para_todo
             main.resolver_mercados_para_todo_filtrado = lambda filtro, deporte=None: (["h2h", "totals", "alternate_totals"], None)
             main.resolver_contexto_deporte = lambda value: {
                 "catalog_key": value,
@@ -5324,7 +5329,8 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(captured["mercados_cuotas"], "h2h,totals,alternate_totals")
         self.assertEqual(captured["mercados_analizar"], ["h2h", "totals", "alternate_totals"])
-        self.assertIn("18 ligas", result["lab_data"]["forecast"]["aviso_cobertura"])
+        self.assertEqual(captured["aggregate_kwargs"]["max_total"], 30)
+        self.assertIn("30 ligas", result["lab_data"]["forecast"]["aviso_cobertura"])
         self.assertIn("mercados completos", result["lab_data"]["forecast"]["aviso_cobertura"])
 
     def test_build_the_odds_query_params_usa_bookmakers_recomendados_por_defecto(self):
