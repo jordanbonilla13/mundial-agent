@@ -1998,11 +1998,25 @@ def seleccionar_picks_para_apuestas_lab(
     data: dict[str, Any],
     solo_stakazos: bool = False,
 ) -> list[dict[str, Any]]:
-    base = seleccionar_picks_para_telegram(
-        data,
-        solo_stakazos=solo_stakazos,
-        max_items=12 if not solo_stakazos else 4,
-    )
+    if solo_stakazos:
+        base = [
+            pick
+            for pick in list(data.get("picks_elite") or [])
+            if str(pick.get("elite_tier") or "").strip().lower() == "stakazo"
+        ][:8]
+    else:
+        elite_universe = [
+            pick
+            for pick in list(data.get("picks_elite") or [])
+            if str(pick.get("elite_tier") or "").strip().lower() in {"stakazo", "elite"}
+        ]
+        base = elite_universe[:24]
+        if not base:
+            base = seleccionar_picks_para_telegram(
+                data,
+                solo_stakazos=solo_stakazos,
+                max_items=12,
+            )
     if solo_stakazos:
         return base[:4]
 
@@ -2130,7 +2144,7 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
 
     if deporte == "todo":
         deportes_objetivo = deportes_agregados_para_todo(
-            max_total=42,
+            max_total=54,
             strict_family_limits=False,
         )
         sport_label = "Todo"
@@ -2259,12 +2273,18 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
             }
         )
 
-    recomendadas_ordenadas = []
+    recomendadas_ordenadas_full = []
     for pick in sorted(recomendadas_total, key=prioridad_pick_todo, reverse=True):
         delta_hours = hours_until_pick(pick)
         if delta_hours is None or delta_hours < 0 or delta_hours > max_pick_hours:
             continue
-        recomendadas_ordenadas.append(pick)
+        recomendadas_ordenadas_full.append(pick)
+    elite_full = [pick for pick in recomendadas_ordenadas_full if bool(pick.get("elite_pick"))]
+    stakazos_full = [pick for pick in elite_full if str(pick.get("elite_tier") or "").lower() == "stakazo"]
+    premium_full = [pick for pick in recomendadas_ordenadas_full if str(pick.get("elite_tier") or "").lower() == "premium"]
+    seguimiento_full = [pick for pick in recomendadas_ordenadas_full if str(pick.get("elite_tier") or "").lower() == "seguimiento"]
+
+    recomendadas_ordenadas = list(recomendadas_ordenadas_full)
     max_publicables = min(telegram_pick_limit(RISK_OPERATING_MODE, solo_stakazos=solo_stakazos), 4)
     recomendadas_ordenadas = apply_exposure_limits(
         recomendadas_ordenadas,
@@ -2326,16 +2346,17 @@ def construir_publicacion_apuestas_lab(**kwargs) -> dict[str, Any]:
         "modo_es": modo_es(modo),
         "stake_maximo_por_pick": stake_limit_text(perfil),
         "total_analizadas": total_analizadas,
-        "total_recomendadas": len(recomendadas_ordenadas),
-        "total_elite": len(elite),
-        "total_stakazos": len(stakazos),
-        "total_premium": len(premium),
-        "total_seguimiento": len(seguimiento),
+        "total_recomendadas": len(recomendadas_ordenadas_full),
+        "total_elite": len(elite_full),
+        "total_stakazos": len(stakazos_full),
+        "total_premium": len(premium_full),
+        "total_seguimiento": len(seguimiento_full),
         "total_guardadas": 0,
         "mejores_apuestas": recomendadas_ordenadas,
-        "picks_elite": stakazos[:10] if solo_stakazos else elite[:10],
+        "mejores_apuestas_ampliadas": recomendadas_ordenadas_full[:120],
+        "picks_elite": stakazos_full[:20] if solo_stakazos else elite_full[:40],
         "descartadas": sorted(descartadas_total, key=prioridad_pick, reverse=True)[:5],
-        "descartadas_operativas": sorted(descartadas_total, key=prioridad_pick, reverse=True)[:25],
+        "descartadas_operativas": sorted(descartadas_total, key=prioridad_pick, reverse=True)[:120],
         "blocked_summary": blocked_summary,
     }
 

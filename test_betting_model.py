@@ -5407,8 +5407,8 @@ class BettingModelTests(unittest.TestCase):
 
         self.assertEqual(captured["mercados_cuotas"], "h2h,totals,alternate_totals")
         self.assertEqual(captured["mercados_analizar"], ["h2h", "totals", "alternate_totals"])
-        self.assertEqual(captured["aggregate_kwargs"]["max_total"], 42)
-        self.assertIn("42 ligas", result["lab_data"]["forecast"]["aviso_cobertura"])
+        self.assertEqual(captured["aggregate_kwargs"]["max_total"], 54)
+        self.assertIn("54 ligas", result["lab_data"]["forecast"]["aviso_cobertura"])
         self.assertIn("mercados completos", result["lab_data"]["forecast"]["aviso_cobertura"])
 
     def test_publicar_pronosticos_lab_compacto_rescata_fallback_si_selector_final_devuelve_vacio(self):
