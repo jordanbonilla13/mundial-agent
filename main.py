@@ -2374,8 +2374,8 @@ def seleccionar_picks_para_apuestas_lab(
     now = datetime.now(timezone.utc)
     max_hours_ahead = 48.0
     selector_reasons: dict[str, int] = {}
-    min_final_quality = 55.0
-    min_final_reliability = 50.0
+    min_final_quality = 60.0
+    min_final_reliability = 55.0
 
     def _bump_reason(reason: str) -> None:
         label = str(reason).strip()

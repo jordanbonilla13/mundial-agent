@@ -5316,7 +5316,7 @@ class BettingModelTests(unittest.TestCase):
             "commence_time": "2026-08-14T10:00:00Z",
             "cuota_apuesta": 1.96,
             "quality_score": 62,
-            "reliability_score": 52,
+            "reliability_score": 55,
             "valor_esperado": 0.064,
         }
         weaker_safer_pick = {
@@ -5457,6 +5457,60 @@ class BettingModelTests(unittest.TestCase):
             main.datetime = original_datetime
 
         self.assertEqual([pick["partido"] for pick in picks], ["Pick buena"])
+
+    def test_seleccionar_picks_para_apuestas_lab_filtra_pick_final_por_nuevo_suelo_60_55(self):
+        import main
+        from datetime import datetime, timezone
+
+        original_datetime = main.datetime
+
+        class FrozenDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return cls(2026, 8, 13, 12, 0, 0, tzinfo=timezone.utc if tz else None)
+
+        try:
+            main.datetime = FrozenDateTime
+            picks = main.seleccionar_picks_para_apuestas_lab(
+                {
+                    "picks_elite": [
+                        {
+                            "partido": "Pick 59-70",
+                            "elite_tier": "elite",
+                            "sport_key": "soccer_spain_la_liga",
+                            "mercado": "totals",
+                            "commence_time": "2026-08-14T10:00:00Z",
+                            "cuota_apuesta": 1.95,
+                            "quality_score": 59,
+                            "reliability_score": 70,
+                        },
+                        {
+                            "partido": "Pick 70-54",
+                            "elite_tier": "elite",
+                            "sport_key": "soccer_spain_la_liga",
+                            "mercado": "h2h",
+                            "commence_time": "2026-08-14T11:00:00Z",
+                            "cuota_apuesta": 1.80,
+                            "quality_score": 70,
+                            "reliability_score": 54,
+                        },
+                        {
+                            "partido": "Pick 60-55",
+                            "elite_tier": "elite",
+                            "sport_key": "soccer_spain_la_liga",
+                            "mercado": "h2h",
+                            "commence_time": "2026-08-14T12:00:00Z",
+                            "cuota_apuesta": 1.78,
+                            "quality_score": 60,
+                            "reliability_score": 55,
+                        },
+                    ]
+                }
+            )
+        finally:
+            main.datetime = original_datetime
+
+        self.assertEqual([pick["partido"] for pick in picks], ["Pick 60-55"])
 
     def test_seleccionar_picks_para_apuestas_lab_ordena_universo_elite_antes_del_recorte(self):
         import main
