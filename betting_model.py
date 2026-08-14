@@ -1239,7 +1239,7 @@ def clasificar_pick_elite(
 
     if reliability_tier == "alta" and confianza == "Alta" and score >= 82 and (market_support_count is None or market_support_count >= 3):
         return True, "stakazo", score
-    if reliability_tier != "baja" and score >= 68:
+    if reliability_score >= 55 and score >= 72:
         return True, "elite", score
     if score >= 58:
         return False, "premium", score

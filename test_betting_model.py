@@ -1154,6 +1154,25 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(tier, "premium")
         self.assertGreaterEqual(score, 58)
 
+    def test_pick_con_score_alto_pero_fiabilidad_media_baja_baja_a_premium(self):
+        elite_pick, tier, score = clasificar_pick_elite(
+            stake=2.0,
+            confianza="Alta",
+            puntuacion_confianza=85,
+            valor=0.08,
+            margen_cuota=1.10,
+            cuota=1.95,
+            source_strength="market_only",
+            sport_key="soccer_regional_division_x",
+            league_key="regional_division_x",
+            market_key="totals",
+            casa="CasaDesconocida",
+        )
+
+        self.assertFalse(elite_pick)
+        self.assertEqual(tier, "premium")
+        self.assertGreaterEqual(score, 72)
+
     def test_rescatar_casi_value_convierte_borderline_en_micro_stake(self):
         stake_pct, importe, stake, recomendacion, motivo = rescatar_casi_value(
             bankroll=177.24,
