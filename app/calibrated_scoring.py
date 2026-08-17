@@ -25,10 +25,13 @@ from app.calibration import (
     get_penalty_factor_for_league_market,
     get_league_market_threshold_adjustment,
     get_penalty_factor_for_bookmaker,
+    get_penalty_factor_for_odds_bucket,
+    get_odds_bucket_threshold_adjustment,
     get_tier_boost,
     get_model_confidence_multiplier,
     CalibrationSnapshot,
 )
+from app.odds_buckets import odds_bucket_for_value
 
 
 # Cache global para evitar regenerar el snapshot en cada llamada
@@ -90,20 +93,25 @@ def calibrated_execution_score(pick: dict[str, Any]) -> int:
     league = pick.get("league_label") or pick.get("liga") or "Unknown"
     market = pick.get("mercado", "Unknown")
     bookmaker = pick.get("casa") or "Unknown"
+    odds_bucket = odds_bucket_for_value(pick.get("cuota_apuesta") or pick.get("cuota"))
     sport_penalty_factor = get_penalty_factor_for_sport(sport, calibration)
     market_adj = get_market_threshold_adjustment(market, calibration)
     league_market_adj = get_league_market_threshold_adjustment(league, market, calibration)
     bookmaker_penalty_factor = get_penalty_factor_for_bookmaker(bookmaker, calibration)
+    odds_bucket_penalty_factor = get_penalty_factor_for_odds_bucket(odds_bucket, calibration)
+    odds_bucket_adj = get_odds_bucket_threshold_adjustment(odds_bucket, calibration)
     
     # Si el threshold sube, el score operativo debe bajar para filtrar más.
     sport_penalty_ratio = max(0.0, min(1.0, 1.0 - sport_penalty_factor))
     bookmaker_penalty_ratio = max(0.0, min(1.0, 1.0 - bookmaker_penalty_factor))
+    odds_bucket_penalty_ratio = max(0.0, min(1.0, 1.0 - odds_bucket_penalty_factor))
     sport_impact = base_score * sport_penalty_ratio * 0.45
     bookmaker_impact = base_score * bookmaker_penalty_ratio * 0.35
     market_impact = market_adj * 10
     league_market_impact = league_market_adj * 12
-    
-    adjusted_score = base_score - sport_impact - bookmaker_impact - market_impact - league_market_impact
+    odds_bucket_impact = base_score * odds_bucket_penalty_ratio * 0.3 + (odds_bucket_adj * 10)
+
+    adjusted_score = base_score - sport_impact - bookmaker_impact - market_impact - league_market_impact - odds_bucket_impact
     return int(round(_clamp(adjusted_score, 0, 100)))
 
 
@@ -123,6 +131,7 @@ def calibrated_ranking_score(pick: dict[str, Any]) -> int:
     league = pick.get("league_label") or pick.get("liga") or "Unknown"
     market = pick.get("mercado", "Unknown")
     bookmaker = pick.get("casa") or "Unknown"
+    odds_bucket = odds_bucket_for_value(pick.get("cuota_apuesta") or pick.get("cuota"))
     sport_penalty_factor = get_penalty_factor_for_sport(sport, calibration)
     sport_penalty_ratio = max(0.0, min(1.0, 1.0 - sport_penalty_factor))
     league_penalty_factor = get_penalty_factor_for_league(league, calibration)
@@ -131,10 +140,13 @@ def calibrated_ranking_score(pick: dict[str, Any]) -> int:
     league_market_penalty_ratio = max(0.0, min(1.0, 1.0 - league_market_penalty_factor))
     bookmaker_penalty_factor = get_penalty_factor_for_bookmaker(bookmaker, calibration)
     bookmaker_penalty_ratio = max(0.0, min(1.0, 1.0 - bookmaker_penalty_factor))
+    odds_bucket_penalty_factor = get_penalty_factor_for_odds_bucket(odds_bucket, calibration)
+    odds_bucket_penalty_ratio = max(0.0, min(1.0, 1.0 - odds_bucket_penalty_factor))
     sport_impact = base_score * sport_penalty_ratio
     league_impact = base_score * league_penalty_ratio
     league_market_impact = base_score * league_market_penalty_ratio
     bookmaker_impact = base_score * bookmaker_penalty_ratio * 0.8
+    odds_bucket_impact = base_score * odds_bucket_penalty_ratio * 0.55
     
     # Aplicar boost por tier
     tier = str(pick.get("elite_tier") or "").lower()
@@ -145,7 +157,7 @@ def calibrated_ranking_score(pick: dict[str, Any]) -> int:
     model_multiplier = get_model_confidence_multiplier(calibration)
     
     # Composición final
-    adjusted_score = (base_score - sport_impact - league_impact - league_market_impact - bookmaker_impact + tier_impact) * model_multiplier
+    adjusted_score = (base_score - sport_impact - league_impact - league_market_impact - bookmaker_impact - odds_bucket_impact + tier_impact) * model_multiplier
     if calibration.total_picks_evaluated <= 0:
         adjusted_score = base_score
     elif adjusted_score < base_score * 0.55 and sport_penalty_ratio <= 0.05 and league_penalty_ratio <= 0.05 and league_market_penalty_ratio <= 0.05 and bookmaker_penalty_ratio <= 0.05 and tier_boost == 0 and model_multiplier >= 0.95:
@@ -166,6 +178,7 @@ def get_calibration_metadata(pick: dict[str, Any]) -> dict[str, Any]:
     market = pick.get("mercado", "Unknown")
     bookmaker = pick.get("casa") or "Unknown"
     tier = str(pick.get("elite_tier") or "").lower()
+    odds_bucket = odds_bucket_for_value(pick.get("cuota_apuesta") or pick.get("cuota"))
     
     sport_penalty = get_penalty_factor_for_sport(sport, calibration)
     league_penalty = get_penalty_factor_for_league(league, calibration)
@@ -173,6 +186,8 @@ def get_calibration_metadata(pick: dict[str, Any]) -> dict[str, Any]:
     league_market_penalty = get_penalty_factor_for_league_market(league, market, calibration)
     league_market_adj = get_league_market_threshold_adjustment(league, market, calibration)
     bookmaker_penalty = get_penalty_factor_for_bookmaker(bookmaker, calibration)
+    odds_bucket_penalty = get_penalty_factor_for_odds_bucket(odds_bucket, calibration)
+    odds_bucket_adj = get_odds_bucket_threshold_adjustment(odds_bucket, calibration)
     tier_boost = get_tier_boost(tier, calibration)
     model_mult = get_model_confidence_multiplier(calibration)
     
@@ -183,6 +198,9 @@ def get_calibration_metadata(pick: dict[str, Any]) -> dict[str, Any]:
         "league_market_penalty_factor": round(league_market_penalty, 3),
         "league_market_threshold_adjustment": round(league_market_adj, 3),
         "bookmaker_penalty_factor": round(bookmaker_penalty, 3),
+        "odds_bucket": odds_bucket,
+        "odds_bucket_penalty_factor": round(odds_bucket_penalty, 3),
+        "odds_bucket_threshold_adjustment": round(odds_bucket_adj, 3),
         "tier_boost": round(tier_boost, 3),
         "model_confidence_multiplier": round(model_mult, 3),
         "calibration_timestamp": calibration.timestamp,
@@ -221,12 +239,14 @@ def should_penalize_pick(pick: dict[str, Any]) -> bool:
     league = pick.get("league_label") or pick.get("liga") or "Unknown"
     market = pick.get("mercado", "Unknown")
     bookmaker = pick.get("casa") or "Unknown"
+    odds_bucket = odds_bucket_for_value(pick.get("cuota_apuesta") or pick.get("cuota"))
     
     # Si hay penalidades altas, considerar descarte
     sport_penalty = 1.0 - get_penalty_factor_for_sport(sport, calibration)
     league_penalty = 1.0 - get_penalty_factor_for_league(league, calibration)
     league_market_penalty = 1.0 - get_penalty_factor_for_league_market(league, market, calibration)
     bookmaker_penalty = 1.0 - get_penalty_factor_for_bookmaker(bookmaker, calibration)
+    odds_bucket_penalty = 1.0 - get_penalty_factor_for_odds_bucket(odds_bucket, calibration)
     
     if sport_penalty > 0.35:
         return True
@@ -238,11 +258,14 @@ def should_penalize_pick(pick: dict[str, Any]) -> bool:
     
     if bookmaker_penalty > 0.22:
         return True
+    if odds_bucket_penalty > 0.24:
+        return True
     
     # Si el ajuste de threshold exige mucha más confianza, también penalizar
     market_adj = get_market_threshold_adjustment(market, calibration)
     league_market_adj = get_league_market_threshold_adjustment(league, market, calibration)
-    if market_adj > 0.15 or league_market_adj > 0.15:
+    odds_bucket_adj = get_odds_bucket_threshold_adjustment(odds_bucket, calibration)
+    if market_adj > 0.15 or league_market_adj > 0.15 or odds_bucket_adj > 0.12:
         return True
     
     return False

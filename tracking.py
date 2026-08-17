@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from collections.abc import Iterator
 from typing import Any
+from app.odds_buckets import odds_bucket_for_value
 
 try:
     import psycopg
@@ -1306,6 +1307,28 @@ def _raw_pick(pick: dict[str, Any]) -> dict[str, Any]:
         return {}
 
 
+def _pick_odds_value(pick: dict[str, Any]) -> float | None:
+    raw = _raw_pick(pick)
+    for key in ("cuota", "cuota_apuesta", "cuota_real", "closing_odds"):
+        value = pick.get(key)
+        if value not in (None, "", 0, 0.0):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+        raw_value = raw.get(key)
+        if raw_value not in (None, "", 0, 0.0):
+            try:
+                return float(raw_value)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _pick_odds_bucket(pick: dict[str, Any]) -> str:
+    return odds_bucket_for_value(_pick_odds_value(pick))
+
+
 def _bool_pick_flag(pick: dict[str, Any], field: str, default: bool = False) -> bool:
     raw = _raw_pick(pick)
     value = raw.get(field, pick.get(field, default))
@@ -1806,6 +1829,69 @@ def dashboard_data(db_path: str = DB_PATH) -> dict[str, Any]:
 
         return sorted(salida, key=lambda x: (x["cerradas"], x["beneficio"]), reverse=True)
 
+    def agrupar_personalizado(
+        resolver: Any,
+        *,
+        min_closed: int = 0,
+        sort_mode: str = "default",
+    ) -> list[dict[str, Any]]:
+        grupos: dict[str, list[dict[str, Any]]] = {}
+
+        for pick in picks:
+            nombre = str(resolver(pick) or "sin_dato")
+            grupos.setdefault(nombre, []).append(pick)
+
+        salida = []
+        for nombre, grupo in grupos.items():
+            metricas = _metricas_grupo(grupo)
+            if int(metricas.get("cerradas") or 0) < min_closed:
+                continue
+            metricas["nombre"] = nombre
+            salida.append(metricas)
+
+        if sort_mode == "risk":
+            return sorted(
+                salida,
+                key=lambda x: (
+                    x["roi"],
+                    x["hit_rate"],
+                    x["beneficio"],
+                    -x["cerradas"],
+                ),
+            )
+
+        return sorted(salida, key=lambda x: (x["cerradas"], x["beneficio"]), reverse=True)
+
+    por_liga_mercado = agrupar_personalizado(
+        lambda pick: f"{str(_raw_pick(pick).get('league_label') or pick.get('league_label') or 'sin_liga')} :: {str(_raw_pick(pick).get('mercado') or pick.get('mercado') or 'sin_mercado')}",
+        min_closed=1,
+        sort_mode="risk",
+    )
+    por_rango_cuota = agrupar_personalizado(_pick_odds_bucket, min_closed=1, sort_mode="risk")
+    peores_segmentos = {
+        "liga_mercado": [
+            row for row in por_liga_mercado
+            if int(row.get("cerradas") or 0) >= 4
+        ][:8],
+        "mercado": [
+            row for row in agrupar("mercado")
+            if int(row.get("cerradas") or 0) >= 5
+        ],
+        "rango_cuota": [
+            row for row in por_rango_cuota
+            if int(row.get("cerradas") or 0) >= 4
+        ][:6],
+    }
+    acciones_urgentes: list[str] = []
+    for row in peores_segmentos["liga_mercado"][:3]:
+        acciones_urgentes.append(
+            f"Recortar o bloquear {row['nombre']} (ROI {row['roi']:.2f}%, hit {row['hit_rate']:.2f}%, {row['cerradas']} cerradas)."
+        )
+    for row in peores_segmentos["rango_cuota"][:2]:
+        acciones_urgentes.append(
+            f"Revisar cuotas {row['nombre']} (ROI {row['roi']:.2f}%, hit {row['hit_rate']:.2f}%)."
+        )
+
     return {
         "resumen": estadisticas(db_path=db_path),
         "aprendizaje": aprendizaje(db_path=db_path),
@@ -1817,11 +1903,17 @@ def dashboard_data(db_path: str = DB_PATH) -> dict[str, Any]:
         "por_perfil": agrupar("perfil"),
         "por_modelo": agrupar("modelo_mercado"),
         "por_elite": agrupar("elite_tier"),
+        "por_liga_mercado": por_liga_mercado,
+        "por_rango_cuota": por_rango_cuota,
         "solo_stakazos": _metricas_grupo(stakazos),
         "solo_elite": _metricas_grupo(elite),
         "solo_premium": _metricas_grupo(premium),
         "solo_seguimiento": _metricas_grupo(seguimiento),
         "pendientes": [p for p in picks if p["estado"] == "pendiente"][:20],
+        "auditoria_modelo": {
+            "peores_segmentos": peores_segmentos,
+            "acciones_urgentes": acciones_urgentes[:6],
+        },
     }
 
 

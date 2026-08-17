@@ -1521,6 +1521,43 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(panel["solo_stakazos"]["cerradas"], 1)
         self.assertEqual(panel["solo_elite"]["cerradas"], 1)
 
+    def test_dashboard_data_expone_auditoria_por_rango_cuota_y_liga_mercado(self):
+        picks = [
+            {
+                "event_id": f"audit_evt_{idx}",
+                "commence_time": "2026-07-15T20:00:00Z",
+                "sport_key": "soccer_test",
+                "sport_label": "Futbol",
+                "league_key": "concacaf",
+                "league_label": "Concacaf Leagues Cup",
+                "partido": f"Partido {idx}",
+                "equipo": "Menos de 3 goles",
+                "tipo_resultado": "totals",
+                "casa": "Coolbet",
+                "mercado": "totals",
+                "cuota_apuesta": 1.95,
+                "importe_sugerido": 4,
+                "stake": 1.5,
+                "recomendacion": "Value",
+                "motivo": "test",
+                "quality_score": 72,
+                "reliability_score": 54,
+                "elite_tier": "elite",
+            }
+            for idx in range(5)
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.sqlite3")
+            guardar_recomendaciones(picks, db_path=db_path)
+            for pick in listar_picks(db_path=db_path):
+                actualizar_resultado(pick["id"], "loss", closing_odds=1.88, db_path=db_path)
+            panel = dashboard_data(db_path=db_path)
+
+        self.assertTrue(any(row["nombre"] == "1.80-1.99" for row in panel["por_rango_cuota"]))
+        self.assertTrue(any("Concacaf Leagues Cup :: totals" == row["nombre"] for row in panel["por_liga_mercado"]))
+        self.assertGreaterEqual(len(panel["auditoria_modelo"]["acciones_urgentes"]), 1)
+
     def test_recent_form_panel_resume_ventanas_y_segmentos(self):
         import app.recent_panel_service as panel_module
 
@@ -7526,6 +7563,44 @@ class BettingModelTests(unittest.TestCase):
         self.assertGreater(adjustments["sport_penalties"]["Baloncesto"], 0)
         self.assertGreater(adjustments["bookmaker_penalties"]["BookieX"], 0)
 
+    def test_calibration_generates_odds_bucket_penalties(self):
+        bad_bucket = SegmentMetrics(
+            segment_name="2.30-2.79",
+            segment_type="rango_cuota",
+            total_picks=14,
+            total_recommended=14,
+            picks_closed=14,
+            picks_won=3,
+            picks_lost=11,
+            picks_push=0,
+            total_staked=14.0,
+            total_profit=-6.0,
+            roi=-42.86,
+            hit_rate=21.43,
+            clv=-2.8,
+            clv_positive_count=2,
+            confidence_score=0.11,
+            last_pick_date="2026-07-16T12:00:00Z",
+            min_sample_warning=False,
+            trend="weak",
+            recommendation="penalizar",
+        )
+
+        adjustments = _generate_model_adjustments(
+            {
+                "deportes": {},
+                "ligas": {},
+                "mercados": {},
+                "rangos_cuota": {"2.30-2.79": bad_bucket},
+                "ligas_mercados": {},
+                "tiers": {},
+                "casas": {},
+            }
+        )
+
+        self.assertGreater(adjustments["odds_bucket_penalties"]["2.30-2.79"], 0)
+        self.assertGreater(adjustments["odds_bucket_thresholds"]["2.30-2.79"], 0)
+
     def test_build_training_dataset_enlaza_snapshots_y_resultado(self):
         recomendacion = {
             "event_id": "train_evt_1",
@@ -7615,6 +7690,8 @@ class BettingModelTests(unittest.TestCase):
                 "league_market_penalties": {"WNBA::totals": 0.22},
                 "league_market_thresholds": {"WNBA::totals": 0.18},
                 "bookmaker_penalties": {"Pinnacle": 0.06},
+                "odds_bucket_penalties": {"1.80-1.99": 0.09},
+                "odds_bucket_thresholds": {"1.80-1.99": 0.04},
                 "tier_boosts": {},
                 "confidence_multipliers": {"model_general": 1.0},
                 "training_dataset": {"samples": 44},
@@ -7630,6 +7707,7 @@ class BettingModelTests(unittest.TestCase):
                     "league_label": "WNBA",
                     "mercado": "totals",
                     "casa": "Pinnacle",
+                    "cuota_apuesta": 1.95,
                     "elite_tier": "premium",
                 }
             )
@@ -7638,6 +7716,9 @@ class BettingModelTests(unittest.TestCase):
         self.assertEqual(metadata["league_market_penalty_factor"], 0.78)
         self.assertEqual(metadata["league_market_threshold_adjustment"], 0.18)
         self.assertEqual(metadata["bookmaker_penalty_factor"], 0.94)
+        self.assertEqual(metadata["odds_bucket"], "1.80-1.99")
+        self.assertEqual(metadata["odds_bucket_penalty_factor"], 0.91)
+        self.assertEqual(metadata["odds_bucket_threshold_adjustment"], 0.04)
         self.assertEqual(metadata["training_samples"], 44)
 
     def test_publication_guard_en_shadow_mode_bloquea_publicacion_real(self):
@@ -7848,6 +7929,46 @@ class BettingModelTests(unittest.TestCase):
         self.assertTrue(guard["overrides"]["performance_guard_disabled"])
         self.assertFalse(adjusted["performance_guard_blocked"])
         self.assertEqual(adjusted["stake"], 2)
+
+    def test_build_performance_guard_agresivo_si_bloquea_segmento_critico_de_mercado(self):
+        guard = build_performance_guard(
+            load_dashboard=lambda: {
+                "por_deporte": [],
+                "por_liga": [],
+                "por_mercado": [
+                    {
+                        "nombre": "totals",
+                        "cerradas": 9,
+                        "roi": -16.0,
+                        "hit_rate": 33.0,
+                        "clv_positivo_pct": 22.0,
+                    }
+                ],
+                "por_liga_mercado": [],
+                "por_rango_cuota": [],
+            },
+            operating_mode="agresivo",
+        )
+
+        adjusted = apply_performance_guard_to_pick(
+            {
+                "league_label": "Liga X",
+                "sport_label": "Futbol",
+                "mercado": "totals",
+                "cuota_apuesta": 1.95,
+                "stake": 2,
+                "importe_sugerido": 5,
+                "stake_pct_bankroll": 1.5,
+                "kelly_fraccional": 0.01,
+                "recomendacion": "Value",
+                "motivo": "test",
+            },
+            guard,
+        )
+
+        self.assertIn("totals", guard["blocked_markets"])
+        self.assertTrue(adjusted["performance_guard_blocked"])
+        self.assertIn("Mercado bloqueado por auditoria", adjusted["performance_guard_reason"])
 
     def test_build_performance_guard_alto_riesgo_no_bloquea_por_historico(self):
         guard = build_performance_guard(

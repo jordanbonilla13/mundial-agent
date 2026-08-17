@@ -7214,6 +7214,7 @@ def dashboard():
     resumen = data["resumen"]
     aprendizaje_info = data["aprendizaje"]
     riesgo_info = politica_riesgo_actual()
+    auditoria_modelo = data.get("auditoria_modelo") or {}
 
     def tabla(titulo: str, filas: list[dict]) -> str:
         if not filas:
@@ -7304,6 +7305,11 @@ def dashboard():
         else "<p>No hay picks pendientes.</p>"
     )
 
+    acciones_urgentes = "".join(
+        f"<li>{escape(str(item))}</li>"
+        for item in (auditoria_modelo.get("acciones_urgentes") or [])
+    ) or "<li>No hay bloqueos urgentes detectados con la muestra actual.</li>"
+
     html = f"""
     <html>
     <head>
@@ -7391,10 +7397,23 @@ def dashboard():
             <div class="metric">Evaluaciones<strong>{aprendizaje_info.get('picks_evaluadas', 0)}</strong></div>
         </div>
         </div>
+        <div class="dashboard-section">
+        <h2 class="section-title">Auditoria critica</h2>
+        <p class="dashboard-copy">Aqui se ven los segmentos donde el modelo esta sufriendo de verdad. Si una zona sale repetida aqui, no es mala suerte: es un patron a corregir.</p>
+        <div class="grid-4">
+            <div class="metric">Rangos de cuota auditados<strong>{len(data.get('por_rango_cuota') or [])}</strong></div>
+            <div class="metric">Segmentos liga+mercado<strong>{len(data.get('por_liga_mercado') or [])}</strong></div>
+            <div class="metric">Alertas urgentes<strong>{len(auditoria_modelo.get('acciones_urgentes') or [])}</strong></div>
+            <div class="metric">Mercados vigilados<strong>{len(data.get('por_mercado') or [])}</strong></div>
+        </div>
+        <ul>{acciones_urgentes}</ul>
+        </div>
         <p class="dashboard-copy">{escape(aprendizaje_info['lectura'])}</p>
         {tabla("Por deporte", data["por_deporte"])}
         {tabla("Por liga", data["por_liga"])}
         {tabla("Por mercado", data["por_mercado"])}
+        {tabla("Por liga + mercado", data["por_liga_mercado"])}
+        {tabla("Por rango de cuota", data["por_rango_cuota"])}
         {tabla("Por casa", data["por_casa"])}
         {tabla("Por perfil", data["por_perfil"])}
         {tabla("Por modelo", data["por_modelo"])}

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from collections import defaultdict
+from app.odds_buckets import odds_bucket_for_value
 from tracking import (
     listar_evaluaciones_picks,
     listar_picks,
@@ -371,6 +372,26 @@ def analyze_by_market(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
     return metrics
 
 
+def analyze_by_odds_bucket(db_path: str = DB_PATH) -> dict[str, SegmentMetrics]:
+    """Analiza rendimiento por rango de cuota tomada."""
+    picks = build_training_dataset(db_path=db_path)
+
+    picks_by_bucket: dict[str, list[dict]] = defaultdict(list)
+    for pick in picks:
+        bucket = odds_bucket_for_value(pick.get("cuota"))
+        picks_by_bucket[bucket].append(pick)
+
+    metrics = {}
+    for bucket, bucket_picks in picks_by_bucket.items():
+        metrics[bucket] = calculate_segment_metrics(
+            segment_name=bucket,
+            segment_type="rango_cuota",
+            picks=bucket_picks,
+        )
+
+    return metrics
+
+
 def _build_league_market_key(league: str, market: str) -> str:
     return f"{league}::{market}"
 
@@ -474,6 +495,7 @@ def generate_calibration_snapshot(db_path: str = DB_PATH) -> CalibrationSnapshot
         "deportes": analyze_by_sport(db_path),
         "ligas": analyze_by_league(db_path),
         "mercados": analyze_by_market(db_path),
+        "rangos_cuota": analyze_by_odds_bucket(db_path),
         "ligas_mercados": analyze_by_league_market(db_path),
         "tiers": analyze_by_tier(db_path),
         "casas": analyze_by_bookmaker(db_path),
@@ -553,6 +575,8 @@ def _generate_model_adjustments(segments_by_type: dict[str, dict[str, SegmentMet
         "league_market_penalties": {},
         "league_market_thresholds": {},
         "bookmaker_penalties": {},
+        "odds_bucket_penalties": {},
+        "odds_bucket_thresholds": {},
         "tier_boosts": {},
         "confidence_multipliers": {},
         "training_dataset": {
@@ -560,6 +584,7 @@ def _generate_model_adjustments(segments_by_type: dict[str, dict[str, SegmentMet
             "sports": len(segments_by_type.get("deportes", {})),
             "markets": len(segments_by_type.get("mercados", {})),
             "bookmakers": len(segments_by_type.get("casas", {})),
+            "odds_buckets": len(segments_by_type.get("rangos_cuota", {})),
         },
     }
 
@@ -608,6 +633,25 @@ def _generate_model_adjustments(segments_by_type: dict[str, dict[str, SegmentMet
             penalty = max(penalty, min(0.18, abs(metrics.clv) / 25))
         if penalty > 0:
             adjustments["bookmaker_penalties"][bookmaker] = round(penalty, 3)
+
+    for bucket, metrics in segments_by_type.get("rangos_cuota", {}).items():
+        if metrics.min_sample_warning:
+            continue
+        bucket_penalty = 0.0
+        bucket_threshold = 0.0
+        if metrics.roi <= -10 or metrics.hit_rate <= 40:
+            bucket_penalty = min(0.38, max(abs(metrics.roi) / 28, (46 - metrics.hit_rate) / 30))
+            bucket_threshold = 0.08
+        elif metrics.roi <= -5 or metrics.hit_rate <= 46:
+            bucket_penalty = min(0.22, max(abs(metrics.roi) / 40, (48 - metrics.hit_rate) / 45))
+            bucket_threshold = 0.04
+        elif metrics.roi >= 7 and metrics.hit_rate >= 58:
+            bucket_threshold = -0.03
+
+        if bucket_penalty > 0:
+            adjustments["odds_bucket_penalties"][bucket] = round(bucket_penalty, 3)
+        if bucket_threshold != 0:
+            adjustments["odds_bucket_thresholds"][bucket] = round(bucket_threshold, 3)
 
     # Analizar combinaciones liga + mercado
     for combo, metrics in segments_by_type.get("ligas_mercados", {}).items():
@@ -717,6 +761,15 @@ def get_penalty_factor_for_bookmaker(
     return 1.0 - penalty
 
 
+def get_penalty_factor_for_odds_bucket(
+    bucket: str,
+    calibration: CalibrationSnapshot,
+) -> float:
+    penalties = calibration.model_adjustments.get("odds_bucket_penalties", {})
+    penalty = penalties.get(bucket, 0)
+    return 1.0 - penalty
+
+
 def get_league_market_threshold_adjustment(
     league: str,
     market: str,
@@ -727,6 +780,14 @@ def get_league_market_threshold_adjustment(
     adjustments = calibration.model_adjustments.get("league_market_thresholds", {})
     combo_key = _build_league_market_key(league, market)
     return adjustments.get(combo_key, 0.0)
+
+
+def get_odds_bucket_threshold_adjustment(
+    bucket: str,
+    calibration: CalibrationSnapshot,
+) -> float:
+    adjustments = calibration.model_adjustments.get("odds_bucket_thresholds", {})
+    return adjustments.get(bucket, 0.0)
 
 
 def get_tier_boost(
