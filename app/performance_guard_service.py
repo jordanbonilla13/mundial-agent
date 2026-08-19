@@ -174,6 +174,9 @@ def build_performance_guard(
     if _aggressive_performance_mode(mode):
         blocked_sports = {}
         blocked_leagues = {}
+        blocked_markets = {}
+        blocked_league_markets = {}
+        blocked_odds_buckets = {}
 
     return {
         "operating_mode": mode,

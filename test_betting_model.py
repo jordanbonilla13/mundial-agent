@@ -7930,7 +7930,7 @@ class BettingModelTests(unittest.TestCase):
         self.assertFalse(adjusted["performance_guard_blocked"])
         self.assertEqual(adjusted["stake"], 2)
 
-    def test_build_performance_guard_agresivo_si_bloquea_segmento_critico_de_mercado(self):
+    def test_build_performance_guard_agresivo_no_bloquea_segmento_critico_de_mercado(self):
         guard = build_performance_guard(
             load_dashboard=lambda: {
                 "por_deporte": [],
@@ -7966,9 +7966,10 @@ class BettingModelTests(unittest.TestCase):
             guard,
         )
 
-        self.assertIn("totals", guard["blocked_markets"])
-        self.assertTrue(adjusted["performance_guard_blocked"])
-        self.assertIn("Mercado bloqueado por auditoria", adjusted["performance_guard_reason"])
+        self.assertEqual(guard["blocked_markets"], {})
+        self.assertTrue(guard["overrides"]["performance_guard_disabled"])
+        self.assertFalse(adjusted["performance_guard_blocked"])
+        self.assertEqual(adjusted["stake"], 2)
 
     def test_build_performance_guard_alto_riesgo_no_bloquea_por_historico(self):
         guard = build_performance_guard(
